@@ -21,11 +21,13 @@ The system orchestrates a **Research Agent** that fans out parallel queries to 7
 The result: a 16:9 crop that preserves compositional intent.
 
 <p align="center">
-  <img src="docs/images/original_brangwyn_swans.jpg" width="380" alt="Original painting (near-square aspect ratio)">
-  &nbsp;&nbsp;&nbsp;
-  <img src="docs/images/cropped_emile_clause.jpg" width="380" alt="Intelligently cropped to 16:9 preserving focal subject">
+  <img src="docs/images/swan_original.jpg" width="260" alt="Original — Frank Brangwyn, Swans (c.1921)">
+  &nbsp;
+  <img src="docs/images/swan_cropped.jpg" width="340" alt="Intelligent 16:9 crop preserving focal composition">
+  &nbsp;
+  <img src="docs/images/swan_placarded.jpg" width="260" alt="Final output with museum-style placard">
 </p>
-<p align="center"><em>Left: Original artwork (near-square). Right: Intelligent 16:9 crop preserving the focal subject and compositional balance.</em></p>
+<p align="center"><em>Frank Brangwyn, "Swans" (c.1921) — Original → Intelligent 16:9 crop → Museum placard overlay</em></p>
 
 ---
 
