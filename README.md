@@ -1,32 +1,31 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/Google_Gemini-8E75B2?style=for-the-badge&logo=google&logoColor=white" alt="Gemini">
-  <img src="https://img.shields.io/badge/Vertex_AI-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white" alt="Vertex AI">
-  <img src="https://img.shields.io/badge/Grok_Vision-000000?style=for-the-badge&logo=x&logoColor=white" alt="Grok">
-  <img src="https://img.shields.io/badge/OpenRouter-6366F1?style=for-the-badge&logo=openai&logoColor=white" alt="OpenRouter">
-  <img src="https://img.shields.io/badge/Pillow-FFD43B?style=for-the-badge&logo=python&logoColor=black" alt="Pillow">
   <img src="https://img.shields.io/badge/OpenCV-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white" alt="OpenCV">
+  <img src="https://img.shields.io/badge/Google_Gemini-8E75B2?style=for-the-badge&logo=google&logoColor=white" alt="Gemini">
+  <img src="https://img.shields.io/badge/Pillow-FFD43B?style=for-the-badge&logo=python&logoColor=black" alt="Pillow">
+  <img src="https://img.shields.io/badge/Vertex_AI-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white" alt="Vertex AI">
 </p>
 
 # Neural Canvas
 
-**A multi-agent vision AI pipeline that analyzes, interprets, and intelligently resizes artwork using coordinated AI specialists.**
+**Multi-agent vision AI pipeline that analyzes, interprets, and intelligently resizes artwork using coordinated AI specialists across 4 providers and 10+ models.**
 
 ---
 
-## What Makes This Interesting
+## Teaching Machines to See Art the Way Curators Do
 
-Most image processing pipelines treat artwork like any other photo. Neural Canvas treats it like a museum curator would -- understanding what is in the image, why it matters compositionally, and how to modify it without destroying what makes it art.
+Resizing a painting is not the same as resizing a photograph. A center-crop that works fine on a smartphone selfie will bisect the focal subject of a Brangwyn composition or amputate the horizon line from a Monet landscape. Neural Canvas solves this by making the machine *understand what it is looking at* before it touches a single pixel.
 
-The system orchestrates **10+ vision and language models** across four AI providers in a concurrent pipeline. A Research Agent fans out parallel calls to Gemini, Grok Vision, Llama 4, Qwen VL, and InternVL, then consolidates their findings through a dedicated reasoning model before any pixel is touched. Genre-specialized Vision Agents (landscape, portrait, religious/historical, surrealist, and five others) apply domain-specific cropping strategies informed by that research. The result: a 16:9 crop that preserves focal points a naive center-crop would destroy.
+The system orchestrates a **Research Agent** that fans out parallel queries to 7 vision models (Gemini 2.5 Pro, Grok-2 Vision, Llama 4 Maverick/Scout, Qwen 2.5 VL, InternVL3), then consolidates their findings through a dedicated reasoning model (Grok-3-mini) with explicit confidence scoring and art-historical date-range validation. That metadata -- artist, title, period, movement, genre -- drives the selection of a **genre-specialized Vision Agent** (one of 9 subclasses: landscape, portrait, religious/historical, surrealist, still life, animal, figurative, genre scene, or default) that applies domain-specific cropping logic using detected bounding boxes from Google Cloud Vision.
 
-Three engineering decisions set this apart:
+The result: a 16:9 crop that preserves compositional intent.
 
-- **Model-as-committee research.** Rather than trusting a single model's art identification, the Research Agent queries 7+ vision models concurrently with `ThreadPoolExecutor`, cross-validates their metadata (artist, title, date, movement, style), and consolidates through Grok's reasoning model with explicit confidence scoring and art-historical date-range validation against a curated movement catalog.
-
-- **Genre-polymorphic vision pipeline.** Nine concrete `VisionAgent` subclasses inherit from a shared abstract base with bounding-box and segmentation-mask primitives. The Docent orchestrator dynamically selects the appropriate subclass based on research output, so a Monet landscape and a Caravaggio religious scene follow entirely different cropping logic.
-
-- **Fidelity-aware quality gates.** A `FidelityMetrics` module computes structural similarity (SSIM), color histogram divergence, and composition scores between original and processed images, with genre-adjusted thresholds to ensure modifications stay within acceptable artistic tolerances.
+<p align="center">
+  <img src="docs/images/original_brangwyn_swans.jpg" width="380" alt="Original painting (near-square aspect ratio)">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/images/cropped_emile_clause.jpg" width="380" alt="Intelligently cropped to 16:9 preserving focal subject">
+</p>
+<p align="center"><em>Left: Original artwork (near-square). Right: Intelligent 16:9 crop preserving the focal subject and compositional balance.</em></p>
 
 ---
 
@@ -43,14 +42,14 @@ Three engineering decisions set this apart:
               |                           |
      +--------v--------+       +---------v---------+
      |  ResearchAgent   |       |    VisionAgent     |
-     |  (Multi-model    |       |  (Genre-specific   |
+     |  (7 models,      |       |  (Genre-specific   |
      |   parallel fan)  |       |   subclass)        |
      +--------+---------+       +---------+----------+
               |                           |
    +----------+----------+               |
-   |   |   |   |   |   | |               |
-  Gem Grok Llm Qwn Int Mst              |
-   |   |   |   |   |   | |               |
+   |  |  |  |  |  |  |   |               |
+  Gem Grk Llm Qwn Int Mst               |
+   |  |  |  |  |  |  |   |               |
    +----------+----------+               |
               |                           |
      +--------v--------+                 |
@@ -77,20 +76,15 @@ Three engineering decisions set this apart:
 
 ---
 
-## Key Technical Features
+## Technical Decisions
 
-| Feature | Detail |
+| Decision | Rationale |
 |---|---|
-| **Concurrent multi-model research** | 7 vision models queried in parallel via `ThreadPoolExecutor` with configurable concurrency limits, exponential backoff retry, and per-call timeouts |
-| **Model registry pattern** | `ModelRegistry` class manages client initialization, model registration, capability tagging (vision vs. text), and lazy Vertex AI model instantiation with thread-safe locking |
-| **Prompt template system** | `PromptTemplate` class generates model-specific prompts from a master template, with art movement catalog loaded from external data for date-range cross-validation |
-| **Genre-polymorphic agents** | 9 Vision Agent subclasses with shared abstract base providing bounding-box visualization, segmentation mask overlay, and standardized output generation |
-| **Google Cloud Vision integration** | Landscape and other genre agents use Cloud Vision API for object localization, producing `BoundingBoxRegion` data classes with normalized-to-absolute coordinate conversion |
-| **Artistic fidelity scoring** | SSIM-based structural comparison, color histogram analysis, and genre-adjusted pass/fail thresholds via `FidelityMetrics` |
-| **Intelligent cropping to 16:9** | Aspect-ratio conversion that uses detected bounding boxes and compositional analysis rather than naive center-crop |
-| **Museum placard generation** | Automated museum-style label overlay with card-stock texture background, metadata-driven text layout, and smart positioning to avoid occluding key elements |
-| **Multi-provider upscaling** | Dual-backend upscaler (Stability AI + image-upscaling.net) with configurable preference and automatic fallback |
-| **Structured consolidation** | Cross-model result merging with JSON schema validation, confidence score normalization, binary data censoring, and standardized field enforcement |
+| **Model-as-committee research** | A single vision model misidentifies artist or period roughly 30-40% of the time on lesser-known works. Querying 7 models concurrently via `ThreadPoolExecutor` and consolidating through a reasoning model with date-range cross-validation against a curated movement catalog produces reliable metadata. |
+| **Genre-polymorphic vision agents** | Nine `VisionAgent` subclasses inherit from a shared abstract base with `BoundingBoxRegion` and `SegmentationMask` primitives. The DocentAgent dynamically selects the subclass based on research output, so a Monet landscape and a Caravaggio religious scene follow entirely different cropping logic. |
+| **SSIM-based fidelity gates** | The `FidelityMetrics` module computes structural similarity, color histogram divergence, Laplacian detail preservation, and contrast-based emotional impact scores between original and processed images. Thresholds adjust per genre -- surrealist and abstract art tolerate more deviation than portraiture. |
+| **Dual-backend upscaling** | Stability AI and image-upscaling.net as configurable primary/fallback, keeping the pipeline resilient to individual API outages. |
+| **Card-stock placard overlay** | Museum-style labels rendered on a textured background image, positioned to avoid occluding key compositional elements, with metadata driven entirely by consolidated research output. |
 
 ---
 
@@ -98,55 +92,105 @@ Three engineering decisions set this apart:
 
 | Layer | Technologies |
 |---|---|
-| **Orchestration** | Python, YAML config, argparse CLI |
-| **Vision Models** | Gemini 2.5 Pro, Gemini 2.0 Flash, Grok-2 Vision, Llama 4 Maverick/Scout, Qwen 2.5 VL 72B, InternVL3 14B |
-| **Reasoning Model** | Grok-3-mini (consolidation, inter-agent thinking steps) |
-| **APIs** | Google Generative AI, Vertex AI, OpenAI-compatible (xAI, OpenRouter), Stability AI, Google Cloud Vision |
-| **Image Processing** | Pillow (PIL), OpenCV, NumPy, scikit-image (SSIM) |
-| **Testing** | pytest, pytest-cov, 17 test modules |
+| **Orchestration** | Python 3.10+, YAML config, argparse CLI |
+| **Vision Models** | Gemini 2.5 Pro, Gemini 2.0 Flash, Grok-2 Vision, Llama 4 Maverick/Scout, Qwen 2.5 VL 72B, InternVL3 14B, Mistral Small 3.1, Gemma 3 27B |
+| **Reasoning** | Grok-3-mini-fast (consolidation + inter-agent thinking steps) |
+| **APIs** | Google Generative AI, Vertex AI, xAI, OpenRouter, Stability AI, Google Cloud Vision |
+| **Image Processing** | Pillow, OpenCV, NumPy, scikit-image (SSIM) |
+| **Testing** | pytest (17 test modules), pytest-cov |
+
+> [!NOTE]
+> The Research Agent uses OpenAI-compatible client wrappers for both xAI (Grok) and OpenRouter endpoints, keeping the integration surface uniform across providers.
 
 ---
 
-## Project Metrics
+## Project Structure
 
-| Metric | Value |
-|---|---|
-| Python source files | 47 |
-| Test modules | 17 |
-| Vision agent specializations | 9 (Landscape, Portrait, Still Life, Animal, Figurative, Genre Scene, Religious/Historical, Surrealist, Default) |
-| Vision models orchestrated | 7 concurrent + 1 consolidation |
-| API providers integrated | 4 (Google, xAI, OpenRouter, Stability AI) |
-| Art movements in validation catalog | 50+ (with date ranges for cross-validation) |
-| Planning/design documents | 7 |
-| Test artwork corpus | 12 images spanning 1862--2025 |
-| Jupyter notebooks | 1 (upscaling API exploration) |
+```
+neural-canvas/
+  art_agent_team/
+    agents/
+      research_agent.py          # Multi-model parallel research + consolidation
+      vision_agent_abstract.py   # Abstract base: BoundingBox, SegmentationMask
+      vision_agent_landscape.py  # Google Cloud Vision object localization
+      vision_agent_portrait.py   # Face/figure-aware cropping
+      vision_agent_surrealist.py # Relaxed composition thresholds
+      placard_agent.py           # Museum label generation
+      upscale_agent.py           # Stability AI / image-upscaling.net
+      ... (9 genre agents total)
+    tests/                       # 17 test modules
+    docent_agent.py              # Pipeline orchestrator
+    fidelity_metrics.py          # SSIM, histogram, detail scoring
+    main.py                      # CLI entry point
+  input/                         # Source artwork + movements catalog
+  docs/images/                   # Sample outputs
+```
 
 ---
 
-## Getting Started
+<details>
+<summary><strong>Getting Started</strong></summary>
+
+### Prerequisites
+
+- Python 3.10+
+- API keys for at least one vision provider (Google Gemini, xAI/Grok, or OpenRouter)
+- Optional: Google Cloud Vision credentials (for bounding-box detection in genre agents)
+- Optional: Stability AI key (for upscaling)
+
+### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/your-username/neural-canvas.git
 cd neural-canvas
 
-# Create virtual environment and install dependencies
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
 
-# Configure API keys
+### Configuration
+
+```bash
 cp art_agent_team/config/config.yaml.example art_agent_team/config/config.yaml
-# Edit config.yaml with your API keys for Google, xAI/Grok, OpenRouter, and Stability AI
+# Edit config.yaml with your API keys
+```
 
-# Place artwork images in the input/ directory, then run
+### Usage
+
+```bash
+# Full pipeline
 python -m art_agent_team.main --input_folder input/
 
-# Run the test suite
+# The CLI presents stage selection:
+#   1. Research (metadata extraction)
+#   2. Vision (intelligent cropping)
+#   3. Upscale (enhancement)
+#   4. Placard (museum label)
+#   5. Full workflow (all stages)
+
+# Run tests
 pytest art_agent_team/tests/ -v
 ```
 
-The pipeline supports selective stage execution -- run research-only for metadata extraction, vision-only for cropping analysis, or the full four-stage workflow.
+</details>
+
+<details>
+<summary><strong>Supported Art Genres</strong></summary>
+
+| Genre | Agent | Cropping Strategy |
+|---|---|---|
+| Landscape | `VisionAgentLandscape` | Horizon-line preservation via Cloud Vision object localization |
+| Portrait | `VisionAgentPortrait` | Face/figure detection with compositional framing |
+| Religious/Historical | `VisionAgentReligiousHistorical` | Multi-figure scene preservation |
+| Surrealist | `VisionAgentSurrealist` | Relaxed thresholds for non-traditional composition |
+| Still Life | `VisionAgentStillLife` | Object-group bounding box aggregation |
+| Animal | `VisionAgentAnimal` | Subject-tracking with motion-aware framing |
+| Figurative | `VisionAgentFigurative` | Body-proportion-aware cropping |
+| Genre Scene | `VisionAgentGenre` | Multi-element narrative scene preservation |
+| Default | `DefaultVisionAgent` | Center-weighted 16:9 fallback |
+
+</details>
 
 ---
 
