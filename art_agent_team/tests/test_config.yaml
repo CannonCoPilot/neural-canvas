@@ -1,0 +1,4 @@
+google_search_api_key: "mock_key"
+mock_llm_endpoint: "http://localhost/mock_llm"
+grok_api_key: "dummy_grok_key"
+other_config_key: "mock_value"

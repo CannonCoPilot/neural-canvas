@@ -1,0 +1,8 @@
+{
+    "called_agents_workflow": [
+        "ResearchAgent",
+        "DefaultVisionAgent",
+        "UpscaleAgent",
+        "PlacardAgent"
+    ]
+}

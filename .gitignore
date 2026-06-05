@@ -1,0 +1,15 @@
+.env
+*.env
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+logs/
+*.log
+venv/
+.venv/
+node_modules/
+.roo/
+.codersinflow/
+tmp/
+
