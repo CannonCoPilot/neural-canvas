@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 class DocentAgent:
     """
     Orchestrates the art image processing workflow for the AI Art Team project.
-    This class coordinates a series of AI agents to process artwork images, ensuring modifications respect artistic sensibilities such as composition, color balance, historical context, and emotional impact. The workflow includes intelligent cropping, upscaling with ESRGAN for detail preservation, and plaque overlay for metadata addition. Threading is used for concurrent processing to handle batches efficiently, with queues facilitating safe data handoff between stages. Configuration is loaded from YAML to allow easy parameter tuning, and logging is implemented for traceability and debugging.
+    This class coordinates a series of AI agents to process artwork images, ensuring modifications respect artistic sensibilities such as composition, color balance, historical context, and emotional impact. The workflow includes intelligent cropping, upscaling via cloud APIs (image-upscaling.net / Stability AI) for detail preservation, and plaque overlay for metadata addition. Threading is used for concurrent processing to handle batches efficiently, with queues facilitating safe data handoff between stages. Configuration is loaded from YAML to allow easy parameter tuning, and logging is implemented for traceability and debugging.
     """
 
     def __init__(self, config_path='art_agent_team/config/config.yaml'):

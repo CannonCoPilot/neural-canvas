@@ -50,8 +50,11 @@ class VisionAgentSurrealist(VisionAgentAbstract):
             self.vertex_model = aiplatform.Model(self.config.get('vertex_model_id'))
             logging.info("VisionAgentSurrealist: Vertex AI model initialized successfully")
         except Exception as e:
-            logging.error(f"VisionAgentSurrealist: Failed to initialize Vertex AI model: {e}")
-            raise
+            # Vertex AI is an optional backend; a missing GCP service account / ADC
+            # must not crash agent construction. Degrade gracefully so the pipeline
+            # can fall back when Vertex is unavailable.
+            logging.warning(f"VisionAgentSurrealist: Vertex AI unavailable, skipping: {e}")
+            self.vertex_model = None
 
         # Colors for visualization
         self.colors = ['red', 'green', 'blue', 'yellow', 'orange', 'pink', 'purple',
@@ -100,6 +103,9 @@ class VisionAgentSurrealist(VisionAgentAbstract):
                     "image": {"bytesBase64Encoded": base64.b64encode(img_bytes).decode()},
                 }, Value())
 
+                if self.vertex_model is None:
+                    logging.warning("VisionAgentSurrealist: Vertex AI model unavailable; skipping analysis (pipeline will fall back).")
+                    return None
                 prediction = self.vertex_model.predict([instance])
                 analysis_result = json.loads(prediction.predictions[0])
 
