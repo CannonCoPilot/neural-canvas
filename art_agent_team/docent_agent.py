@@ -280,8 +280,8 @@ class DocentAgent:
  
                     # --- Display Individual Research Attempts ---
                     print(f"  --- Individual Research Attempts for {base_filename} ---")
-                    if research_output and isinstance(research_output, dict) and "individual_results" in research_output:
-                        individual_results = research_output.get("individual_results", {})
+                    if research_output and isinstance(research_output, dict) and DocentAgent._research_individual(research_output):
+                        individual_results = DocentAgent._research_individual(research_output)
                         display_order = ["grok_text", "gemini_text", "grok_image", "gemini_image", "openrouter_text", "openrouter_qwen_image", "vertex_vision_subjects"]
 
                         for source in display_order:
@@ -390,8 +390,8 @@ class DocentAgent:
                     metadata = {} # Initialize metadata as empty
                     genre = 'Default' # Initialize genre as default
 
-                    if research_output and isinstance(research_output, dict) and "consolidated_results" in research_output:
-                        consolidated_metadata = research_output.get("consolidated_results")
+                    if research_output and isinstance(research_output, dict) and DocentAgent._research_consolidated(research_output) is not None:
+                        consolidated_metadata = DocentAgent._research_consolidated(research_output)
 
                         # consolidated_metadata should always be a dict now
                         if consolidated_metadata and isinstance(consolidated_metadata, dict):
@@ -871,6 +871,28 @@ class DocentAgent:
         return parsed
 
     @staticmethod
+    def _research_individual(research_output: Any) -> Dict[str, Any]:
+        """Per-model research attempts from a ResearchAgent result, accepting the
+        current 'research_attempts' key or the legacy 'individual_results' key.
+        Returns {} if neither is present. Restores the Research->Docent handoff
+        after the ResearchAgent output-key rename (genre routing)."""
+        if not isinstance(research_output, dict):
+            return {}
+        return research_output.get("research_attempts") or research_output.get("individual_results") or {}
+
+    @staticmethod
+    def _research_consolidated(research_output: Any) -> Optional[Dict[str, Any]]:
+        """Consolidated research metadata from a ResearchAgent result, accepting
+        the current 'consolidated_findings' key or the legacy
+        'consolidated_results' key. Returns None if neither is present."""
+        if not isinstance(research_output, dict):
+            return None
+        consolidated = research_output.get("consolidated_findings")
+        if consolidated is None:
+            consolidated = research_output.get("consolidated_results")
+        return consolidated
+
+    @staticmethod
     def _format_confidence_score(score: Any) -> str:
         """Formats a confidence score for display."""
         if score is None: return "N/A"
@@ -934,8 +956,8 @@ class DocentAgent:
             try:
                 research_agent = ResearchAgent(self.config, self.vision_agent_classes)
                 research_output = research_agent.research_and_process(current_image_path)
-                if research_output and isinstance(research_output, dict) and "consolidated_results" in research_output:
-                    consolidated_metadata = research_output.get("consolidated_results")
+                if research_output and isinstance(research_output, dict) and DocentAgent._research_consolidated(research_output) is not None:
+                    consolidated_metadata = DocentAgent._research_consolidated(research_output)
                     if consolidated_metadata and isinstance(consolidated_metadata, dict) and 'error' not in consolidated_metadata:
                         metadata = consolidated_metadata
                         genre = metadata.get('genre') or 'Default'
