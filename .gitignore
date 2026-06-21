@@ -13,3 +13,6 @@ node_modules/
 .codersinflow/
 tmp/
 
+
+# neural-canvas runtime config (contains real keys — never commit)
+art_agent_team/config/config.yaml
