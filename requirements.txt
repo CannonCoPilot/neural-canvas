@@ -32,3 +32,6 @@ python-dotenv
 # Identification cross-check (B1.2): local CLIP + Qdrant catalog
 sentence-transformers>=2.2.0
 qdrant-client>=1.7.0
+
+# Google Photos delivery (B1.4)
+google-auth-oauthlib>=1.0.0

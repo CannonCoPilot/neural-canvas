@@ -62,10 +62,12 @@ class DocentAgent:
         # Import agents needed for the workflow stages
         from art_agent_team.agents.upscale_agent import UpscaleAgent
         from art_agent_team.agents.placard_agent import PlacardAgent
+        from art_agent_team.agents.delivery_agent import DeliveryAgent
         self.agents = {
             # ResearchAgent is instantiated per image in the processing thread
             'upscale': UpscaleAgent(config=self.config),
             'placard': PlacardAgent(config=self.config),
+            'delivery': DeliveryAgent(config=self.config),  # B1.4 terminal stage (Google Photos)
         }
         # Store vision agent classes loaded at the start
         self.vision_agent_classes = vision_agent_classes
@@ -196,6 +198,24 @@ class DocentAgent:
         return config
 
     # Removed _init_llm_client and _call_llm as DocentAgent no longer directly uses LLM for prompts
+
+    def _deliver_final(self, final_image_path, metadata=None):
+        """B1.4 terminal stage — deliver the finished image to Google Photos.
+        Graceful no-op if the DeliveryAgent has no OAuth client configured (step E)."""
+        try:
+            delivery = self.agents.get('delivery')
+            if not delivery or not delivery.available():
+                logger.info("Delivery skipped — Google Photos OAuth not configured (step E pending).")
+                return None
+            meta = metadata or {}
+            desc = " — ".join(str(meta.get(k)) for k in ("title", "author", "artist", "date") if meta.get(k))
+            result = delivery.deliver(final_image_path, {final_image_path: desc} if desc else None)
+            if result.get("delivered"):
+                logger.info("Delivered to Google Photos: %s", os.path.basename(final_image_path))
+            return result
+        except Exception as e:
+            logger.warning("Delivery stage error (non-fatal): %s", e)
+            return None
 
     def start_workflow(self):
         """
@@ -648,7 +668,10 @@ class DocentAgent:
                             print(f"  - Placard: OK -> {os.path.basename(placarded_path)}")
                             current_image_path = placarded_path # Update path to final output
                             placard_summary_log = f"Placard addition successful. Final output: `{os.path.basename(placarded_path)}`"
- 
+
+                            # --- B1.4 Delivery: push the finished image to Google Photos ---
+                            self._deliver_final(current_image_path, metadata)
+
                             # --- Optional Cleanup ---
                             cleanup_enabled = self.config.get('cleanup_workspace', True)
                             if cleanup_enabled:
@@ -1124,6 +1147,9 @@ class DocentAgent:
                         current_image_path = placarded_path_result # This is the final image
                         logger.info(f"[{base_filename}] Placard addition successful. Final output: {current_image_path}")
                         placard_summary_md_log = f"Placard addition successful. Final output: `{os.path.basename(current_image_path)}`"
+
+                        # --- B1.4 Delivery: push the finished image to Google Photos ---
+                        self._deliver_final(current_image_path, metadata)
                         
                         cleanup_enabled = self.config.get('cleanup_workspace', True)
                         if cleanup_enabled:
