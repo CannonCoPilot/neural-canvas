@@ -29,3 +29,6 @@ fonttools>=4.50.0
 
 # Other
 python-dotenv
+# Identification cross-check (B1.2): local CLIP + Qdrant catalog
+sentence-transformers>=2.2.0
+qdrant-client>=1.7.0
