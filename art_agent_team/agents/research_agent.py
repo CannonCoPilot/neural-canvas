@@ -610,6 +610,11 @@ class ResearchAgent:
         logging.info(f"{tag} Consolidating results from {len(individual_results)} individual calls...")
         consolidated_results = self._consolidate_results(individual_results)
 
+        # 3.5 Identification cross-check (B1.3): reconcile the VLM hypothesis against
+        # the local CLIP+Qdrant catalog (agree-or-flag). Free/local per decision D;
+        # graceful no-op if disabled or the catalog/Qdrant is unavailable.
+        consolidated_results = self._catalog_cross_check(image_path, consolidated_results)
+
         # 4. Format and Return Output
         output_data = {
             "research_attempts": individual_results, # Changed key
@@ -860,6 +865,34 @@ class ResearchAgent:
 
         logging.info(f"{tag} Finished parallel execution. Got results for {len(results)}/{len(model_names)} models.")
         return results
+
+    def _catalog_cross_check(self, image_path: str, consolidated: Dict[str, Any]) -> Dict[str, Any]:
+        """B1.3 — reconcile the VLM identification hypothesis against the local
+        CLIP+Qdrant artwork catalog (agree-or-flag). On a high-confidence visual
+        match the catalog's verified artist/title/date replace the VLM's (which
+        hallucinates exact title/date); otherwise title/date are flagged
+        low-confidence. Genre/style from the VLM are left untouched (they drive
+        cropping). Free/local per decision D; a graceful no-op when disabled or
+        when Qdrant/the catalog is unavailable."""
+        if not isinstance(consolidated, dict) or consolidated.get("error"):
+            return consolidated
+        id_cfg = (self.config.get("identification") or {}) if isinstance(self.config, dict) else {}
+        if id_cfg.get("engine") == "vlm_only" or not id_cfg.get("catalog_enabled", True):
+            return consolidated
+        try:
+            from art_agent_team.identification import ArtworkCatalog
+            catalog = ArtworkCatalog(qdrant_url=id_cfg.get("qdrant_url") or None)
+            reconciled = catalog.cross_check(image_path, consolidated)
+            for key in ("artist", "title", "date", "identification_source",
+                        "title_date_confidence", "needs_verification", "catalog_matches"):
+                if key in reconciled:
+                    consolidated[key] = reconciled[key]
+            logging.info("Catalog cross-check: %s (title_date_confidence=%s)",
+                         consolidated.get("identification_source"),
+                         consolidated.get("title_date_confidence"))
+        except Exception as e:
+            logging.warning("Catalog cross-check skipped (catalog/Qdrant unavailable): %s", e)
+        return consolidated
 
     def _consolidate_results(self, individual_results: Dict[str, Dict]) -> Dict[str, Any]:
         """
