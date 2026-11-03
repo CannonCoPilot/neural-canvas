@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from dataclasses import asdict, dataclass, field
 
@@ -39,7 +40,8 @@ if you recognise the artist but not the work, still give your best title guess f
 Reply ONLY with JSON:
 {{"signature_text": "exact text of any signature/inscription or empty string",
   "visual_summary": "one sentence describing the image",
-  "search_phrases": ["2-3 short phrases (3-6 words) a collector would type to find this image, naming its subject and setting"],
+  "subject_keywords": ["1-2 plain words naming the main subject, e.g. 'fishing boats'", "a second subject word"],
+  "search_phrases": ["3-5 concrete phrases (4-8 words) a person would type into an image search to find this exact picture: count, colour, subject, setting and medium, e.g. 'three fishing boats on a grey beach at dusk oil painting'"],
   "candidates": [{{"artist": "full name", "title": "title of the work", "year": "year or circa",
                    "confidence": 0.0}}]}}"""
 
@@ -154,8 +156,15 @@ class Identifier:
                seen: set[int]) -> list[Match]:
         refs = [r for r in refs if r.page_id not in seen]
         seen.update(r.page_id for r in refs)
-        pairs = [(r, (fetch_image(r.image_url, WEB_UA) or fetch_image(r.thumb_url, WEB_UA))
-                  if isinstance(r, WebReference) else fetch_image(r.thumb_url, self.ua)) for r in refs]
+        def get(r):
+            if isinstance(r, WebReference):
+                return fetch_image(r.image_url, WEB_UA) or fetch_image(r.thumb_url, WEB_UA)
+            return fetch_image(r.thumb_url, self.ua)
+        if refs and all(isinstance(r, WebReference) for r in refs):
+            with ThreadPoolExecutor(6) as ex:   # many independent sites: no shared rate limit
+                pairs = list(zip(refs, ex.map(get, refs)))
+        else:                                    # Wikimedia: serial and paced inside fetch_image
+            pairs = [(r, get(r)) for r in refs]
         pairs = [(r, im) for r, im in pairs if im is not None]
         if not pairs:
             return []
@@ -186,9 +195,12 @@ class Identifier:
     def _propose(self, img: Image.Image, refuted: list[dict]) -> dict:
         note = ""
         if refuted:
-            lst = "; ".join(f"{c['artist']} — {c['title']}" for c in refuted[:12])
+            lst = "; ".join(f"{c['artist']} — {c['title']}" for c in refuted[:15])
             note = (f"These identifications were already checked against museum photographs and DID NOT "
-                    f"match this image: {lst}. Do not repeat them.")
+                    f"match this image: {lst}. Do not repeat them; propose different artists and works.")
+        if self._used_phrases:
+            note += (" These search phrases were already tried without success: "
+                     + "; ".join(sorted(self._used_phrases)[:15]) + ". Give new, differently worded phrases.")
         sig = self._signature
         sig_note = (f"A close reading of the corners found this signature: {sig.get('signature_text')!r}"
                     + (f" (suggesting {sig['artist']})." if sig.get("artist") else ".")) if sig.get("signature_text") else ""
@@ -212,24 +224,27 @@ class Identifier:
             by_style = [artists[i] for i in np.argsort(-sty)]
         for a in by_style[:2]:   # the two closest styles: one catalogue sweep each, early
             out.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, self._img_vec)))
+        for kw in self._keywords:      # artist-agnostic on the catalogued collection: short keyword AND query
+            q = f"{kw} painting"
+            out.append(("commons", q, lambda q=q: self.wiki.search_files(q, 50)))
         if self.web:
             for c in cands:
                 if c.get("title"):
                     q = f"{c['artist']} {c['title']} painting"
                     out.append(("web", q, lambda q=q: self.web.search(q, 15)))
-            for ph in self._phrases[:3]:      # artist-agnostic: when the model cannot name the painter
-                q = f"{ph} painting"
+            for ph in self._phrases[:5]:      # artist-agnostic: when the model cannot name the painter
+                q = ph if re.search(r"paint|oil|canvas|watercolou?r|acrylic|art", ph, re.I) else f"{ph} painting"
                 out.append(("web", q, lambda q=q: self.web.search(q, 25)))
             for a in artists[:3]:
                 for ph in self._phrases[:2]:
                     q = f"{a} {ph}"
                     out.append(("web", q, lambda q=q: self.web.search(q, 20)))
-        for a in by_style[2:]:
+        for a in by_style[2:4]:  # the rest of the four closest; farther styles wait for a later round
             out.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, self._img_vec)))
         if self.web:
-            for a in artists:
+            for a in by_style[:3]:
                 out.append(("web", f"{a} painting", lambda a=a: self.web.search(f"{a} painting", 30)))
-        swept.update(_norm(a) for a in artists)
+        swept.update(_norm(a) for a in by_style[:4])
         return out
 
     def identify(self, img: Image.Image) -> Identification:
@@ -237,6 +252,9 @@ class Identifier:
         self._img_vec = img_vec
         self._img = img
         self._phrases: list[str] = []
+        self._keywords: list[str] = []
+        self._used_phrases: set[str] = set()
+        self._used_keywords: set[str] = set()
         self._signature = self.read_signature(img)
         log.info("signature pass: %s", self._signature)
         seen: set[int] = set()
@@ -248,8 +266,15 @@ class Identifier:
             prop = self._propose(img, refuted)
             sig = sig or self._signature.get("signature_text", "") or prop.get("signature_text", "")
             summary = summary or prop.get("visual_summary", "")
-            cands = [c for c in prop.get("candidates", []) if c.get("artist")][:5]
-            self._phrases = [str(x) for x in (prop.get("search_phrases") or []) if str(x).strip()]
+            done = {(_norm(c["artist"]), _norm(c.get("title", ""))) for c in refuted}
+            cands = [c for c in prop.get("candidates", []) if c.get("artist")
+                     and (_norm(c["artist"]), _norm(c.get("title", ""))) not in done][:5]
+            self._phrases = [str(x) for x in (prop.get("search_phrases") or [])
+                             if str(x).strip() and str(x).strip().lower() not in self._used_phrases]
+            self._used_phrases.update(p.strip().lower() for p in self._phrases)
+            self._keywords = [str(x).strip() for x in (prop.get("subject_keywords") or [])
+                              if 2 <= len(str(x).strip()) <= 30 and str(x).strip().lower() not in self._used_keywords][:2]
+            self._used_keywords.update(k.lower() for k in self._keywords)
             if rnd == 0:   # painters the picture *looks like*, independent of the model's memory
                 try:
                     style = self.style.top(img_vec, 4)
@@ -286,14 +311,19 @@ class Identifier:
                               evidence={"reason": "no reference image matched on both instruments"})
 
     def _corroborate(self, hits: list, cands: list[dict]) -> list:
-        """After a first web match, look for the same image on more sites so facts rest on several sources."""
+        """After a first web match, look for the same image on more sites so the facts rest on several
+        sources. Searches by what the matched copy itself says (caption, file name) first: prefixing a
+        guessed artist would steer away from the copies that carry the real name."""
         img, vec = self._img, self._img_vec
         seen = {h.reference_obj.page_id for h in hits}  # type: ignore[attr-defined]
-        artist = cands[0]["artist"] if cands else ""
-        words = re.sub(r"[+_%20-]+", " ", hits[0].reference_obj.image_url.split("?")[0].rsplit("/", 1)[-1].rsplit(".", 1)[0])  # type: ignore
-        for q in dict.fromkeys([f"{artist} {words}".strip(), f"{artist} {hits[0].reference_obj.file_title[:60]}"]):  # type: ignore
+        r0 = hits[0].reference_obj  # type: ignore[attr-defined]
+        fname = re.sub(r"[+_%20-]+", " ", r0.image_url.split("?")[0].rsplit("/", 1)[-1].rsplit(".", 1)[0]).strip()
+        caption = re.split(r"\s[|—–-]\s", r0.file_title)[0].strip()
+        qs = [q for q in (caption, fname if not re.fullmatch(r"[\w]{20,}|[\d\s]+", fname) else "",
+                          f"{caption} artist") if len(q) >= 6]
+        for q in list(dict.fromkeys(qs))[:3]:
             try:
-                hits += [m for m in self._score(img, vec, self.web.search(q, 15), q, seen) if m.confirmed]
+                hits += [m for m in self._score(img, vec, self.web.search(q, 20), q, seen) if m.confirmed]
             except Exception as e:
                 log.warning("corroboration search failed for %r: %s", q, e)
         return hits
