@@ -1,0 +1,42 @@
+diff --git a/art_agent_team/docent_agent.py b/art_agent_team/docent_agent.py
+index 27dd27a..fabef01 100644
+--- a/art_agent_team/docent_agent.py
++++ b/art_agent_team/docent_agent.py
+@@ -30,20 +30,27 @@ logger = logging.getLogger(__name__)
+ class DocentAgent:
+     """
+     Orchestrates the art image processing workflow for the AI Art Team project.
+-    This class coordinates a series of AI agents to process artwork images, ensuring modifications respect artistic sensibilities such as composition, color balance, historical context, and emotional impact. The workflow includes intelligent cropping, upscaling via cloud APIs (image-upscaling.net / Stability AI) for detail preservation, and plaque overlay for metadata addition. Threading is used for concurrent processing to handle batches efficiently, with queues facilitating safe data handoff between stages. Configuration is loaded from YAML to allow easy parameter tuning, and logging is implemented for traceability and debugging.
++    Coordinates a series of AI agents to process artwork images while respecting artistic sensibilities such as composition, color balance, historical context, and emotional impact. The workflow runs up to four user-selectable stages — Research (metadata extraction), Vision (intelligent, genre-aware cropping), Upscale (detail-preserving enhancement via cloud APIs: image-upscaling.net / Stability AI), and Placard (museum-style plaque overlay) — followed by an optional terminal Delivery stage to Google Photos. Images are processed sequentially, each stage passing its output to the next via a tracked current-image path (an earlier threaded, queue-based design was removed). Configuration is loaded from YAML for easy parameter tuning, and progress is logged both to the standard logger and to a markdown workflow log for traceability.
+     """
+ 
+     def __init__(self, config_path='art_agent_team/config/config.yaml'):
+         """
+-        Initialize the DocentAgent, setting up all necessary components for the AI Art Team's image processing pipeline.
+-        This constructor ensures that the agent is configured for secure and efficient operation, loading settings from a YAML file and preparing the environment for multi-threaded processing.
+-        - Config handling: The method loads configuration and sets API keys as environment variables, enhancing security by avoiding hard-coded secrets.
+-        - Directory creation: Automatically creates required directories to organize files, reducing the risk of runtime errors and improving code reliability.
+-        - Queue initialization: Establishes communication channels between workflow stages, supporting concurrent execution and preventing bottlenecks in the processing chain.
+-        - Agent setup: Instantiates or references agents (Research, Upscale, Placard) based on best practices for object-oriented design, allowing for easy extension or modification of the system.
+-        Design decision: Agents are instantiated here for simplicity, but research agents are created per image to handle potential state changes, balancing performance and memory usage.
+-        Artistic integrity: Configuration allows for tuning parameters that affect how images are processed, such as upscaling models or placard styles, to accommodate different artistic requirements and genres.
+-        Best practice adherence: Follows SOLID principles with single responsibility for each agent, and uses type hints and logging for better code maintainability and debugging.
++        Initialize the DocentAgent and prepare the image-processing pipeline.
++
++        Loads configuration from a YAML file (via _load_config, which also exports any
++        Google/Grok/OpenAI API keys to environment variables), then creates the input,
++        workspace, and output directories and starts a fresh markdown workflow log for
++        the run.
++
++        Instantiates the stage agents shared across images — UpscaleAgent, PlacardAgent,
++        and DeliveryAgent — and loads the genre->VisionAgent class map. ResearchAgent is
++        intentionally NOT created here: it is instantiated per image during the workflow
++        to isolate per-image state. Processing is sequential (an earlier queue-based,
++        multi-threaded design was removed).
++
++        Args:
++            config_path: Path to the YAML config. Relative paths resolve against the
++                project root. Defaults to 'art_agent_team/config/config.yaml'.
+         """
+         # Load configuration (empty dict is valid for testing)
+         self.config = self._load_config(config_path) or {}
