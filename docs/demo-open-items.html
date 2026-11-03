@@ -1,0 +1,17 @@
+<section class="todo">
+  <h2>What needs you</h2>
+  <ol>
+    <li><b>Rotate the xAI (Grok) API key.</b> The old code base had it hard-coded in <code>grok_api_test.py</code> and
+      <code>grok_vision_api.py</code>, and it has been on the public <code>CannonCoPilot/neural-canvas</code> repository since
+      the initial import on 4 June. The files are gone from the new tree, but git history still holds the key. Revoke it at
+      console.x.ai. Scrubbing history needs a force-push, which is your call.</li>
+    <li><b>Sign Google Photos in, once.</b> Delivery is built and tested up to the sign-in, and every card stops there with
+      the reason on the board. In Google Cloud Console enable the <em>Photos Library API</em>, create an OAuth client of type
+      <em>Desktop app</em>, save its JSON as <code>~/Claude/Project_Aion/.claude/secrets/neural-canvas-gphotos-client.json</code>,
+      then run <code>neural-canvas auth-photos</code> and <code>neural-canvas retry --stage deliver</code>. On the TV, choose the
+      <em>Neural Canvas</em> album under Ambient mode → Google Photos.</li>
+    <li><b>Optional: enable the Custom Search JSON API</b> on the Google Cloud project that owns the estate's search key. It
+      currently answers 403 "This project does not have the access to Custom Search JSON API", so web references come from
+      DuckDuckGo image search instead.</li>
+  </ol>
+</section>

@@ -1,205 +1,59 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/OpenCV-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white" alt="OpenCV">
-  <img src="https://img.shields.io/badge/Google_Gemini-8E75B2?style=for-the-badge&logo=google&logoColor=white" alt="Gemini">
-  <img src="https://img.shields.io/badge/Pillow-FFD43B?style=for-the-badge&logo=python&logoColor=black" alt="Pillow">
-  <img src="https://img.shields.io/badge/Vertex_AI-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white" alt="Vertex AI">
-</p>
+# Neural Canvas — an AI art docent for your TV
 
-# Neural Canvas
-
-**Multi-agent vision AI pipeline that analyzes, interprets, and intelligently resizes artwork using coordinated AI specialists across 4 providers and 10+ models.**
-
----
-
-## Teaching Machines to See Art the Way Curators Do
-
-Resizing a painting is not the same as resizing a photograph. A center-crop that works fine on a smartphone selfie will bisect the focal subject of a Brangwyn composition or amputate the horizon line from a Monet landscape. Neural Canvas solves this by making the machine *understand what it is looking at* before it touches a single pixel.
-
-The system orchestrates a **Research Agent** that fans out parallel queries to 7 vision models (Gemini 2.5 Pro, Grok-2 Vision, Llama 4 Maverick/Scout, Qwen 2.5 VL, InternVL3), then consolidates their findings through a dedicated reasoning model (Grok-3-mini) with explicit confidence scoring and art-historical date-range validation. That metadata -- artist, title, period, movement, genre -- drives the selection of a **genre-specialized Vision Agent** (one of 9 subclasses: landscape, portrait, religious/historical, surrealist, still life, animal, figurative, genre scene, or default) that applies domain-specific cropping logic using detected bounding boxes from Google Cloud Vision.
-
-The result: a 16:9 crop that preserves compositional intent.
-
-<p align="center">
-  <img src="docs/images/swan_original.jpg" width="260" alt="Original — Frank Brangwyn, Swans (c.1921)">
-  &nbsp;
-  <img src="docs/images/swan_cropped.jpg" width="340" alt="Intelligent 16:9 crop preserving focal composition">
-  &nbsp;
-  <img src="docs/images/swan_placarded.jpg" width="260" alt="Final output with museum-style placard">
-</p>
-<p align="center"><em>Frank Brangwyn, "Swans" (c.1921) — Original → Intelligent 16:9 crop → Museum placard overlay</em></p>
-
----
-
-## Architecture
+Drop an image of an artwork into a folder — no title, no artist, nothing but pixels. Neural Canvas
+identifies the work, reads the scene, composes it for a 4K (3840×2160) screen without cutting through
+its subjects, writes a museum wall label, and delivers the finished frame to the Google Photos album
+your TV's ambient mode shows. Every step runs on local models; each run is a task on the Aion Pulse board.
 
 ```
-                          input/
-                            |
-                     +------+------+
-                     | DocentAgent |  (Orchestrator)
-                     +------+------+
-                            |
-              +-------------+-------------+
-              |                           |
-     +--------v--------+       +---------v---------+
-     |  ResearchAgent   |       |    VisionAgent     |
-     |  (7 models,      |       |  (Genre-specific   |
-     |   parallel fan)  |       |   subclass)        |
-     +--------+---------+       +---------+----------+
-              |                           |
-   +----------+----------+               |
-   |  |  |  |  |  |  |   |               |
-  Gem Grk Llm Qwn Int Mst               |
-   |  |  |  |  |  |  |   |               |
-   +----------+----------+               |
-              |                           |
-     +--------v--------+                 |
-     |  Consolidation   |                 |
-     |  (Grok reasoning)|                 |
-     +--------+---------+                 |
-              |                           |
-              +-------------+-------------+
-                            |
-                  +---------v----------+
-                  |   UpscaleAgent     |
-                  | (Stability AI /    |
-                  |  image-upscaling)  |
-                  +---------+----------+
-                            |
-                  +---------v----------+
-                  |   PlacardAgent     |
-                  | (Museum-style      |
-                  |  label overlay)    |
-                  +---------+----------+
-                            |
-                        output/
+watch folder ─▶ Pulse task ─▶ identify ─▶ interpret ─▶ compose ─▶ upscale ─▶ label ─▶ deliver
+ (var/inbox)   (kanban card)   who/what    subjects,     16:9 crop   Real-     museum   Google Photos
+                               it is       intent        or mat      ESRGAN    card     "Neural Canvas"
 ```
 
----
+## How each stage works
 
-## Technical Decisions
-
-| Decision | Rationale |
-|---|---|
-| **Model-as-committee research** | A single vision model misidentifies artist or period roughly 30-40% of the time on lesser-known works. Querying 7 models concurrently via `ThreadPoolExecutor` and consolidating through a reasoning model with date-range cross-validation against a curated movement catalog produces reliable metadata. |
-| **Genre-polymorphic vision agents** | Nine `VisionAgent` subclasses inherit from a shared abstract base with `BoundingBoxRegion` and `SegmentationMask` primitives. The DocentAgent dynamically selects the subclass based on research output, so a Monet landscape and a Caravaggio religious scene follow entirely different cropping logic. |
-| **SSIM-based fidelity gates** | The `FidelityMetrics` module computes structural similarity, color histogram divergence, Laplacian detail preservation, and contrast-based emotional impact scores between original and processed images. Thresholds adjust per genre -- surrealist and abstract art tolerate more deviation than portraiture. |
-| **Dual-backend upscaling** | Stability AI and image-upscaling.net as configurable primary/fallback, keeping the pipeline resilient to individual API outages. |
-| **Card-stock placard overlay** | Museum-style labels rendered on a textured background image, positioned to avoid occluding key compositional elements, with metadata driven entirely by consolidated research output. |
-
----
-
-## Tech Stack
-
-| Layer | Technologies |
-|---|---|
-| **Orchestration** | Python 3.10+, YAML config, argparse CLI |
-| **Vision Models** | Gemini 2.5 Pro, Gemini 2.0 Flash, Grok-2 Vision, Llama 4 Maverick/Scout, Qwen 2.5 VL 72B, InternVL3 14B, Mistral Small 3.1, Gemma 3 27B |
-| **Reasoning** | Grok-3-mini-fast (consolidation + inter-agent thinking steps) |
-| **APIs** | Google Generative AI, Vertex AI, xAI, OpenRouter, Stability AI, Google Cloud Vision |
-| **Image Processing** | Pillow, OpenCV, NumPy, scikit-image (SSIM) |
-| **Testing** | pytest (17 test modules), pytest-cov |
-
-> [!NOTE]
-> The Research Agent uses OpenAI-compatible client wrappers for both xAI (Grok) and OpenRouter endpoints, keeping the integration surface uniform across providers.
-
----
-
-## Project Structure
-
-```
-neural-canvas/
-  art_agent_team/
-    agents/
-      research_agent.py          # Multi-model parallel research + consolidation
-      vision_agent_abstract.py   # Abstract base: BoundingBox, SegmentationMask
-      vision_agent_landscape.py  # Google Cloud Vision object localization
-      vision_agent_portrait.py   # Face/figure-aware cropping
-      vision_agent_surrealist.py # Relaxed composition thresholds
-      placard_agent.py           # Museum label generation
-      upscale_agent.py           # Stability AI / image-upscaling.net
-      ... (9 genre agents total)
-    tests/                       # 17 test modules
-    docent_agent.py              # Pipeline orchestrator
-    fidelity_metrics.py          # SSIM, histogram, detail scoring
-    main.py                      # CLI entry point
-  input/                         # Source artwork + movements catalog
-  docs/images/                   # Sample outputs
-```
-
----
-
-<details>
-<summary><strong>Getting Started</strong></summary>
-
-### Prerequisites
-
-- Python 3.10+
-- API keys for at least one vision provider (Google Gemini, xAI/Grok, or OpenRouter)
-- Optional: Google Cloud Vision credentials (for bounding-box detection in genre agents)
-- Optional: Stability AI key (for upscaling)
-
-### Installation
-
-```bash
-git clone https://github.com/your-username/neural-canvas.git
-cd neural-canvas
-
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### Configuration
-
-```bash
-cp art_agent_team/config/config.yaml.example art_agent_team/config/config.yaml
-# Edit config.yaml with your API keys
-```
-
-### Usage
-
-```bash
-# Full pipeline
-python -m art_agent_team.main --input_folder input/
-
-# The CLI presents stage selection:
-#   1. Research (metadata extraction)
-#   2. Vision (intelligent cropping)
-#   3. Upscale (enhancement)
-#   4. Placard (museum label)
-#   5. Full workflow (all stages)
-
-# Run tests
-pytest art_agent_team/tests/ -v
-```
-
-</details>
-
-<details>
-<summary><strong>Supported Art Genres</strong></summary>
-
-| Genre | Agent | Cropping Strategy |
+| Stage | Method (all local unless noted) | Gate — the run blocks if it fails |
 |---|---|---|
-| Landscape | `VisionAgentLandscape` | Horizon-line preservation via Cloud Vision object localization |
-| Portrait | `VisionAgentPortrait` | Face/figure detection with compositional framing |
-| Religious/Historical | `VisionAgentReligiousHistorical` | Multi-figure scene preservation |
-| Surrealist | `VisionAgentSurrealist` | Relaxed thresholds for non-traditional composition |
-| Still Life | `VisionAgentStillLife` | Object-group bounding box aggregation |
-| Animal | `VisionAgentAnimal` | Subject-tracking with motion-aware framing |
-| Figurative | `VisionAgentFigurative` | Body-proportion-aware cropping |
-| Genre Scene | `VisionAgentGenre` | Multi-element narrative scene preservation |
-| Default | `DefaultVisionAgent` | Center-weighted 16:9 fallback |
+| **identify** | Qwen3-VL 32B proposes candidates and reads signatures. Reference photos come from Wikimedia Commons (title search), then the artist's whole **Wikidata oeuvre** (every catalogued painting, embeddings cached), then web image search for in-copyright works. | A reference must match on **two independent instruments**: CLIP image similarity ≥ 0.86 **and** ≥ 25 ORB/RANSAC geometric inliers. Facts come from the matched record (Wikidata), never from the model's guess. Web-caption facts need the artist corroborated by the model's own reading. |
+| **interpret** | Qwen3-VL 32B: genre, subjects with boxes, focal point, intent, 40–65-word label paragraph constrained to verified facts. | At least one essential subject; label paragraph present. |
+| **compose** | One subject-preserving algorithm for every genre (genre only tunes weights): best 16:9 window by subject importance, spectral-residual saliency and thirds; if no 16:9 window keeps every essential subject, trim only as far as they allow and mat the rest (museum wall). | Every essential subject ≥ 97 % retained. |
+| **upscale** | Real-ESRGAN x4plus on Apple MPS (tiled), then Lanczos to the exact display size. | Exact size; ≤ 4× needed; colour drift ΔE ≤ 4 vs a plain resize. |
+| **label** | Georgia-set museum card: artist, nationality and life dates, title and date, medium, collection, paragraph. Placed on the mat, else the least-salient corner. | No overlap with essential subjects; contrast ≥ 7:1; text fits. |
+| **deliver** | Google Photos Library API, app-created album "Neural Canvas". | Media item created. |
 
-</details>
+A failed gate never degrades into a "success": the Pulse card goes to **Blocked** with the reason, stays
+open, and an alert goes to the Nexus message bus. The original file name and descriptive EXIF are never
+seen by any stage — ingest copies the image to a content-hashed path.
 
----
+## Running it
 
-## License
+```bash
+uv venv .venv && VIRTUAL_ENV=.venv uv pip install -e '.[test]'
+ollama pull qwen3-vl:32b-instruct
+curl -L -o RealESRGAN_x4plus.pth https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth   # sha256 4fa0d389…
+```
 
-MIT
+| Command | What it does |
+|---|---|
+| `neural-canvas serve` | the service: watch folder → Pulse tasks → runs (installed as launchd `com.aion.neural-canvas`, see `deploy/`) |
+| `neural-canvas submit IMG…` | drop images into the watch folder |
+| `neural-canvas status` | the neural-canvas cards on the Pulse board |
+| `neural-canvas retry [--stage deliver]` | re-queue blocked cards (finished stages are reused) |
+| `neural-canvas run IMG… [--no-deliver]` | run directly without Pulse (development) |
+| `neural-canvas auth-photos` | one-time Google Photos consent |
+| `neural-canvas eval tests/fixtures/gold.yaml` | score finished runs against the 12-artwork gold set |
 
----
+Configuration: copy keys from `neural_canvas/config.py` `DEFAULTS` into a `config.yaml` at the repo root
+(gitignored) to override paths, models or thresholds.
 
-<p align="center"><i>Treating every pixel with the respect the artist intended.</i></p>
+### Google Photos (one-time)
+1. Google Cloud Console → enable **Photos Library API** → Credentials → *Create OAuth client ID* → *Desktop app*.
+2. Save the JSON as `~/Claude/Project_Aion/.claude/secrets/neural-canvas-gphotos-client.json`.
+3. `neural-canvas auth-photos`, then `neural-canvas retry --stage deliver`.
+4. On the TV: Ambient mode → Google Photos → select the **Neural Canvas** album.
+
+## Layout
+`neural_canvas/` the package · `tests/` unit tests + gold set · `test_images/` 12 test artworks ·
+`deploy/` launchd plist · `docs/` code review, reconstruction notes, original planning docs (`docs/history/`) ·
+`var/` runtime (inbox, work, output, state, logs — gitignored).
