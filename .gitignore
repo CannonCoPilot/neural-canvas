@@ -16,3 +16,10 @@ tmp/
 
 # neural-canvas runtime config (contains real keys — never commit)
 art_agent_team/config/config.yaml
+
+# neural-canvas v2 runtime (work dirs, outputs, state, inbox) and the Staging-backed venv symlink
+var/
+.venv
+config.yaml
+.claude/scratch/
+neural_canvas.egg-info/

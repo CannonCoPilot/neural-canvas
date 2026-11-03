@@ -1,0 +1,23 @@
+[project]
+name = "neural-canvas"
+version = "2.0.0"
+description = "AI art docent: identifies an artwork from its pixels, composes it for a 4K TV with a museum label, delivers it to Google Photos. Runs on local models, driven from the Aion Pulse kanban."
+requires-python = ">=3.11"
+dependencies = [
+  "torch>=2.4", "spandrel>=0.4", "sentence-transformers>=3.0", "opencv-python-headless>=4.9",
+  "pillow>=10.4", "numpy>=1.26", "requests>=2.31", "pyyaml>=6.0", "ddgs>=9.0",
+  "google-auth>=2.30", "google-auth-oauthlib>=1.2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+neural-canvas = "neural_canvas.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["neural_canvas*"]

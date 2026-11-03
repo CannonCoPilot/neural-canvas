@@ -1,0 +1,16 @@
+# Gold identities for the 12 test artworks (hand-written; read only by `neural-canvas eval`).
+# The pipeline never reads this file or the image file names.
+images_dir: ../../test_images
+artworks:
+  - {file: "Emile Clause - Summer morning 1891.jpeg", artist: "Emile Claus", title: "Summer Morning", year: 1891}
+  - {file: "Frank Brangwyn, Swans, c.1921.jpg", artist: "Frank Brangwyn", title: "Swans", year: 1921}
+  - {file: "Jesus Ministered to by Angels, James Tissot 1886.jpg", artist: "James Tissot", title: "Jesus Ministered to by Angels", year: [1886, 1894]}
+  - {file: "Santa Ynez California Hillside, Eyvind Earle, 1969.jpeg", artist: "Eyvind Earle", title: "Santa Ynez California Hillside", year: 1969}
+  - {file: "The Feigned Death Of Juliet Frederic Leighton.jpg", artist: "Frederic Leighton", title: "The Feigned Death of Juliet", year: null}
+  - {file: "The Field of Derout-Lollichon (1886) Paul Gauguin.jpg", artist: "Paul Gauguin", title: "The Field of Derout-Lollichon", year: 1886}
+  - {file: "The Miracle of the Loaves and Fishes, James Tissot (1886-1894).jpg", artist: "James Tissot", title: "The Miracle of the Loaves and Fishes", year: [1886, 1894]}
+  - {file: "Tom Lovell - Shot in the Dark (1943).jpeg", artist: "Tom Lovell", title: "Shot in the Dark", year: 1943}
+  - {file: "Tomioka Soichiro - Trees (1961).jpeg", artist: "Soichiro Tomioka", title: "Trees", year: 1961}
+  - {file: "Towering Storm, Jim Musil, Acrylic, 2025.jpeg", artist: "Jim Musil", title: "Towering Storm", year: 2025}
+  - {file: "Transfiguration of Jesus (1872) Carl Bloch.jpg", artist: "Carl Bloch", title: "Transfiguration", year: 1872}
+  - {file: "Valley of the Catawissa in Autumn, Thomas Moran (circa 1862).jpg", artist: "Thomas Moran", title: "Valley of the Catawissa in Autumn", year: 1862}
