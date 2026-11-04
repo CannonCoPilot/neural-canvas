@@ -29,6 +29,7 @@ from .identify import Identifier
 from .imify import Imify
 from .interpret import Interpretation, Subject, interpret
 from .matching import Embedder
+from .movement import classify as classify_movement
 from .placard import compose
 from .references import Wikimedia
 from .upscale import Upscaler
@@ -120,7 +121,7 @@ class Docent:
 
     # ── one run ──────────────────────────────────────────────────────────
     def run(self, run_id: str, source: Path, resume: bool = True, deliver: bool = True,
-            on_stage=None) -> RunResult:
+            on_stage=None, redeliver: bool = False) -> RunResult:
         work = source.parent
         rec_path = work / "record.json"
         rec = json.loads(rec_path.read_text()) if (resume and rec_path.exists()) else {}
@@ -212,6 +213,10 @@ class Docent:
             stage = "label"
             if on_stage:
                 on_stage(stage)
+            if "movement" not in st:     # once per run: a re-run prints the same line
+                st["movement"] = classify_movement(self.wiki, self.vlm, img, facts)
+                save()
+            facts["movement"] = st["movement"]["movement"]
             win = plan.window
             ess = []
             for s in it.subjects:
@@ -220,8 +225,8 @@ class Docent:
                           (s.box[2] - win[0]) / (win[2] - win[0]), (s.box[3] - win[1]) / (win[3] - win[1]))
                     ess.append(tuple(min(1.0, max(0.0, v)) for v in bx))
             disp = (self.cfg["display"]["width"], self.cfg["display"]["height"])
-            frame, pl = compose(art, plan, disp, facts, it.label_text, ess,
-                                self.cfg.thresholds["placard_min_contrast"])
+            frame, pl = compose(art, plan, disp, facts, ess, self.cfg.thresholds["placard_min_contrast"],
+                                self.cfg["display"]["placard_scale"])
             name = f"{_slug(facts['artist'])}--{_slug(facts['title'])}--{run_id[:8]}.jpg"
             out = self.cfg.path("output_dir") / name
             frame.save(out, "JPEG", quality=92, optimize=True)
@@ -237,7 +242,8 @@ class Docent:
             stage = "deliver"
             if on_stage:
                 on_stage(stage)
-            if deliver and not done(stage):
+            if deliver and (redeliver or not done(stage)):
+                old = st.get(stage, {}).get("media_item_id", "") if redeliver else ""
                 desc = f"{facts['title']}" + (f", {facts['date']}" if facts["date"] else "") + \
                        f" — {facts['artist']}. {it.label_text}"
                 try:
@@ -250,6 +256,10 @@ class Docent:
                 save()
                 if not dr.passed:
                     return block(stage, dr.failures)
+                if old and old != dr.media_item_id:   # the new frame replaces the old one in the album
+                    self.photos.remove_from_album(old)
+                    st[stage]["replaced"] = old
+                    save()
                 self.registry.record(run_id, status="delivered", frame=str(out))
             elif not deliver:
                 st[stage] = {"passed": False, "skipped": "delivery disabled for this run"}

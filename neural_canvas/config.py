@@ -32,7 +32,8 @@ DEFAULTS: dict[str, Any] = {
         "upscaler_weights": str(Path.home() / "Claude" / "Staging" / "verified" / "models"
                                 / "realesrgan" / "RealESRGAN_x4plus.pth"),
     },
-    "display": {"width": 3840, "height": 2160},
+    # placard_scale: the wall label's size; 1.0 is the original 940 px card
+    "display": {"width": 3840, "height": 2160, "placard_scale": 0.5},
     "thresholds": {
         # identification: a candidate is CONFIRMED only when a reference image of it from an
         # open collection matches the input on both instruments (embedding + geometry).

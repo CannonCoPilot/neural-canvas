@@ -135,6 +135,13 @@ class GooglePhotos:
         log.info("created Google Photos album %r", self.album_name)
         return aid
 
+    def remove_from_album(self, media_item_id: str) -> None:
+        """Take an app-created item out of the album (it stays in the library: the API cannot delete)."""
+        s = self._session()
+        r = s.post(f"{API}/albums/{self._album_id(s)}:batchRemoveMediaItems",
+                   json={"mediaItemIds": [media_item_id]}, timeout=30)
+        r.raise_for_status()
+
     def deliver(self, image_path: Path, description: str) -> DeliveryResult:
         s = self._session()
         album = self._album_id(s)

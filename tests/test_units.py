@@ -99,15 +99,41 @@ def test_web_evidence_line_names_the_image_file():
     assert "file: Towering Storm" in line and "page: San Diego Sunset" in line and "jimmusil.com" in line
 
 
-def test_label_moves_to_mat_when_every_corner_covers_a_protagonist():
+def test_label_moves_to_mat_when_the_corner_covers_a_protagonist():
     from neural_canvas.crop import CropPlan
     from neural_canvas.placard import compose
     art = _img(3840, 2160)
     plan = CropPlan("full-bleed", (0, 0, 1, 1), (0, 0, 3840, 2160), (3840, 2160), (0, 0), passed=True)
     ident = {"artist": "A. Painter", "title": "Crowd", "date": "1900"}
-    frame, pl = compose(art, plan, (3840, 2160), ident, "A paragraph. " * 8, [(0.0, 0.0, 1.0, 1.0)], 7.0)
+    frame, pl = compose(art, plan, (3840, 2160), ident, [(0.0, 0.0, 1.0, 1.0)], 7.0)
     assert frame.size == (3840, 2160)
-    assert pl.position == "mat-right" and pl.essential_overlap == 0 and pl.passed, pl.failures
+    assert pl.position == "mat-bottom-right" and pl.essential_overlap == 0 and pl.passed, pl.failures
+    assert pl.box[2] == 3840 - 40 and pl.box[3] == 2160 - 40        # the frame's bottom-right corner
+
+
+def test_placard_is_facts_only_half_size_fitted_and_bottom_right():
+    from neural_canvas.crop import CropPlan
+    from neural_canvas.placard import compose
+    art = _img(3840, 2160)
+    plan = CropPlan("full-bleed", (0, 0, 1, 1), (0, 0, 3840, 2160), (3840, 2160), (0, 0), passed=True)
+    ident = {"artist": "Paul Gauguin", "artist_nationality": "France", "artist_born": "1848", "artist_died": "1903",
+             "title": "The Field of Derout-Lollichon", "date": "1886", "medium": "Oil paint on canvas",
+             "movement": "Impressionism", "collection": "Los Angeles County Museum of Art"}
+    _, pl = compose(art, plan, (3840, 2160), ident, [(0.0, 0.0, 0.3, 0.3)], 7.0, scale=0.5)
+    assert pl.position == "bottom-right" and pl.passed, pl.failures
+    text = [s for s in pl.lines if s]
+    assert text[-2:] == ["Impressionism", "Los Angeles County Museum of Art"]   # movement right above it
+    assert len(text) == 7                                                      # no paragraph
+    x0, y0, x1, y1 = pl.box
+    assert (x1, y1) == (3840 - 40, 2160 - 40) and x1 - x0 < 470 + 2 * 22     # fitted, half of 940
+
+
+def test_wikidata_movement_labels_print_as_names():
+    from neural_canvas.movement import display_name
+    assert display_name("Post-impressionism") == "Post-Impressionism"
+    assert display_name("synthetism") == "Synthetism"
+    assert display_name("Hudson River school") == "Hudson River School"
+    assert display_name("Golden Age of Danish painting") == "Golden Age of Danish Painting"
 
 
 def test_imify_names_an_untitled_hit_by_its_page_url():
