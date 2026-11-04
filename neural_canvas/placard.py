@@ -101,33 +101,29 @@ def compose(art: Image.Image, plan: CropPlan, canvas_size: tuple[int, int], iden
     aw, ah = art.size
     margin = 64
 
-    # artwork placement: when the mat is wide enough, push the art aside to give the card the mat
-    ox, oy = plan.art_offset
-    side_room = W - aw
-    in_mat = plan.mode == "pillarbox" and side_room >= CARD_W + 3 * margin
-    if in_mat:
-        ox = margin if side_room - margin >= CARD_W + 2 * margin else (W - aw) // 2
-        frame.paste(art, (ox, oy))
+    def mat_layout(aw, ah):
+        """Art pushed left, card on the mat to its right."""
+        ox = margin if (W - aw) - margin >= CARD_W + 2 * margin else (W - aw) // 2
+        oy = (H - ah) // 2
         cx = ox + aw + (W - ox - aw - CARD_W) // 2
-        cy = H - margin - ch
-        candidates = [("mat-right", (cx, cy, cx + CARD_W, cy + ch))]
-    else:
-        frame.paste(art, (ox, oy))
-        bands = H - ah
-        if plan.mode == "letterbox" and bands // 2 >= ch + margin:
-            candidates = [("band-bottom-right", (W - margin - CARD_W, H - margin // 2 - ch, W - margin, H - margin // 2))]
-        else:
-            candidates = [(n, (x, y, x + CARD_W, y + ch)) for n, x, y in (
-                ("bottom-right", ox + aw - margin - CARD_W, oy + ah - margin - ch),
-                ("bottom-left", ox + margin, oy + ah - margin - ch),
-                ("top-right", ox + aw - margin - CARD_W, oy + margin),
-                ("top-left", ox + margin, oy + margin))]
+        return ox, oy, [("mat-right", (cx, H - margin - ch, cx + CARD_W, H - margin))]
+
+    def overlay_layout(aw, ah, ox, oy):
+        if plan.mode == "letterbox" and (H - ah) // 2 >= ch + margin:
+            return [("band-bottom-right", (W - margin - CARD_W, H - margin // 2 - ch, W - margin, H - margin // 2))]
+        return [(n, (x, y, x + CARD_W, y + ch)) for n, x, y in (
+            ("bottom-right", ox + aw - margin - CARD_W, oy + ah - margin - ch),
+            ("bottom-left", ox + margin, oy + ah - margin - ch),
+            ("top-right", ox + aw - margin - CARD_W, oy + margin),
+            ("top-left", ox + margin, oy + margin))]
 
     sal = saliency_map(art)
     n = sal.shape[0]
+    geo = {}
 
     def art_frac(box):
         x0, y0, x1, y1 = box
+        ox, oy, aw, ah = geo["ox"], geo["oy"], geo["aw"], geo["ah"]
         return ((x0 - ox) / aw, (y0 - oy) / ah, (x1 - ox) / aw, (y1 - oy) / ah)
 
     def overlap(box):
@@ -144,6 +140,22 @@ def compose(art: Image.Image, plan: CropPlan, canvas_size: tuple[int, int], iden
         fx0, fy0, fx1, fy1 = (min(1.0, max(0.0, v)) for v in art_frac(box))
         return float(sal[int(fy0 * n):max(int(fy1 * n), int(fy0 * n) + 1),
                          int(fx0 * n):max(int(fx1 * n), int(fx0 * n) + 1)].sum())
+
+    aw, ah = art.size
+    if plan.mode == "pillarbox" and W - aw >= CARD_W + 3 * margin:
+        ox, oy, candidates = mat_layout(aw, ah)
+    else:
+        ox, oy = plan.art_offset
+        candidates = overlay_layout(aw, ah, ox, oy)
+        geo.update(ox=ox, oy=oy, aw=aw, ah=ah)
+        if min(overlap(c[1]) for c in candidates) > 0:
+            # every overlay spot covers a protagonist: hang the work a little smaller, label on the mat
+            k = min((W - CARD_W - 3 * margin) / aw, (H - 2 * margin) / ah)
+            aw, ah = round(aw * k), round(ah * k)
+            art = art.resize((aw, ah), Image.LANCZOS)
+            ox, oy, candidates = mat_layout(aw, ah)
+    geo.update(ox=ox, oy=oy, aw=aw, ah=ah)
+    frame.paste(art, (ox, oy))
 
     scored = sorted(candidates, key=lambda c: (overlap(c[1]) > 0, overlap(c[1]), sal_cost(c[1])))
     pos, box = scored[0]

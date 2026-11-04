@@ -21,9 +21,10 @@ Verified identification (from the collection record — treat as fact): {facts}
    framing elements are never essential. At most 6 essential subjects.
 3. Give the focal point [x, y] (0-1000) and, if the work has one, the horizon height y (0-1000).
 4. Describe the scene and the artist's evident intent.
-5. Write a museum wall-label paragraph of 40-65 words about this work: what we see, how it is
-   painted, why it matters. State no biographical or historical fact beyond the verified
-   identification above; describe only what is visible.
+5. Write a museum wall-label paragraph of 40-65 words about this work, as the curator who knows it:
+   name its subjects the way the verified title names them (never "a figure" when the title says
+   who it is), then what we see, how it is painted, and why it matters. Add no biographical or
+   historical claim beyond the verified identification; everything else must be visible in the image.
 Reply ONLY with JSON:
 {{"genre": "...", "scene": "...", "artistic_intent": "...", "focal_point": [x, y], "horizon_y": null,
   "subjects": [{{"label": "...", "box_2d": [x0, y0, x1, y1], "importance": 3, "essential": false}}],

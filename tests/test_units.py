@@ -97,3 +97,14 @@ def test_web_evidence_line_names_the_image_file():
                      image_url="https://images.example-cdn.com/content/v1/abc/Towering+Storm.jpeg?format=500w")
     line = _web_line(r)
     assert "file: Towering Storm" in line and "page: San Diego Sunset" in line and "jimmusil.com" in line
+
+
+def test_label_moves_to_mat_when_every_corner_covers_a_protagonist():
+    from neural_canvas.crop import CropPlan
+    from neural_canvas.placard import compose
+    art = _img(3840, 2160)
+    plan = CropPlan("full-bleed", (0, 0, 1, 1), (0, 0, 3840, 2160), (3840, 2160), (0, 0), passed=True)
+    ident = {"artist": "A. Painter", "title": "Crowd", "date": "1900"}
+    frame, pl = compose(art, plan, (3840, 2160), ident, "A paragraph. " * 8, [(0.0, 0.0, 1.0, 1.0)], 7.0)
+    assert frame.size == (3840, 2160)
+    assert pl.position == "mat-right" and pl.essential_overlap == 0 and pl.passed, pl.failures
