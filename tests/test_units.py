@@ -213,3 +213,31 @@ def test_vision_key_never_reaches_an_error_message(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError) as e:
         v.detect(_img(64, 64))
     assert "SECRET12345" not in str(e.value) and "<redacted>" in str(e.value)
+
+
+def test_delivery_check_names_a_missing_permission(tmp_path):
+    import json
+    from neural_canvas.deliver import GooglePhotos, SCOPES
+    (tmp_path / "client.json").write_text("{}")
+    tok = tmp_path / "token.json"
+    tok.write_text(json.dumps({"scopes": SCOPES[:2], "refresh_token": "r", "token": "t"}))
+    g = GooglePhotos({"oauth_client_path": str(tmp_path / "client.json"), "token_path": str(tok),
+                      "album_name": "."}, tmp_path)
+    assert "edit.appcreateddata" in g.check() and "auth-photos" in g.check()
+
+
+def test_runner_pauses_without_claiming_when_delivery_cannot_sign_in(tmp_path, monkeypatch):
+    from neural_canvas import service as svc
+    from neural_canvas.config import DEFAULTS, Config, _merge
+    cfg = Config(_merge(DEFAULTS, {"paths": {k: str(tmp_path / k) for k in ("watch_dir", "work_dir", "output_dir", "state_dir")}}))
+    s = svc.Service(cfg)
+    alerts, claims = [], []
+    monkeypatch.setattr(s.pulse, "list", lambda label: [{"id": "t1", "labels": ["staging:wait"]},
+                                                       {"id": "t2", "labels": ["staging:wait"]}])
+    monkeypatch.setattr(s.pulse, "claim", lambda tid, label: claims.append(tid) or False)
+    monkeypatch.setattr(s.pulse, "alert", lambda sev, text, data: alerts.append((sev, data)))
+    monkeypatch.setattr(s.photos, "check", lambda: "Google Photos sign-in expired: re-run auth-photos.")
+    assert s.run_ready() == 0 and claims == []
+    assert alerts == [("critical", {"waiting": 2})]
+    s.run_ready()
+    assert len(alerts) == 1                     # one alert an hour, not one per poll

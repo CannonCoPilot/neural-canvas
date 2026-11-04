@@ -6,8 +6,10 @@ Ported forward from art_agent_team/agents/delivery_agent.py, with two fixes:
 * the album id is persisted, so a run never depends on listing at all.
 
 Since 2025-03-31 the Library API can only touch media and albums the app itself created, so the app
-creates "Neural Canvas" and the TV is pointed at that album once (Google TV → Ambient mode →
-Google Photos → select album).
+creates its own album and the TV is pointed at that album once (Google TV → Ambient mode → Google
+Photos → select album). The album keeps the title in config (``google_photos.album_name``, e.g. "."
+so the screensaver overlay shows no name): a title change renames it, which needs
+``edit.appcreateddata``.
 
 Never interactive inside the service: when the one-time OAuth consent has not been given, delivery
 FAILS with ``AuthRequired`` naming the command that performs the consent, and the run stays open.
@@ -25,7 +27,9 @@ import requests
 log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/photoslibrary.appendonly",
-          "https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata"]
+          "https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata",
+          "https://www.googleapis.com/auth/photoslibrary.edit.appcreateddata"]
+REAUTH = "re-run `neural-canvas auth-photos`"
 API = "https://photoslibrary.googleapis.com/v1"
 
 
@@ -74,20 +78,44 @@ class GooglePhotos:
             raise AuthRequired(self._client_missing())
         if not self.token_path.exists():
             raise AuthRequired("Google Photos consent not yet given: run `neural-canvas auth-photos` once.")
-        creds = Credentials.from_authorized_user_file(str(self.token_path), SCOPES)
+        from google.auth.exceptions import RefreshError
+        granted = set(json.loads(self.token_path.read_text()).get("scopes") or [])
+        missing = [s.rsplit("/", 1)[-1] for s in SCOPES if s not in granted]
+        if missing:
+            raise AuthRequired(f"Google Photos permission not granted ({', '.join(missing)}): {REAUTH}.")
+        creds = Credentials.from_authorized_user_file(str(self.token_path), sorted(granted))
         if not creds.valid:
-            if creds.expired and creds.refresh_token:
+            if not (creds.expired and creds.refresh_token):
+                raise AuthRequired(f"Google Photos token invalid: {REAUTH}.")
+            try:
                 creds.refresh(Request())
-                self.token_path.write_text(creds.to_json())
-            else:
-                raise AuthRequired("Google Photos token invalid: re-run `neural-canvas auth-photos`.")
+            except RefreshError as e:   # an app in Testing loses its refresh token after 7 days
+                raise AuthRequired(f"Google Photos sign-in expired or revoked ({str(e)[:80]}): {REAUTH}.") from None
+            self.token_path.write_text(creds.to_json())
         s = requests.Session()
         s.headers["Authorization"] = f"Bearer {creds.token}"
         return s
 
+    def check(self) -> str:
+        """'' when delivery can authenticate right now, else the reason (the runner pauses on it)."""
+        try:
+            self._session()
+            return ""
+        except AuthRequired as e:
+            return str(e)
+
     def _album_id(self, s: requests.Session) -> str:
         if self.album_file.exists():
-            return json.loads(self.album_file.read_text())["id"]
+            cached = json.loads(self.album_file.read_text())
+            if cached.get("title") != self.album_name:      # config renamed the album: follow it
+                r = s.patch(f"{API}/albums/{cached['id']}", params={"updateMask": "title"},
+                            json={"title": self.album_name}, timeout=30)
+                if r.status_code == 403:
+                    raise AuthRequired(f"renaming the album to {self.album_name!r} needs edit permission: {REAUTH}.")
+                r.raise_for_status()
+                log.info("renamed Google Photos album %r -> %r", cached.get("title"), self.album_name)
+                self.album_file.write_text(json.dumps({"id": cached["id"], "title": self.album_name}))
+            return cached["id"]
         page = None
         while True:   # an app-created album from an earlier install
             r = s.get(f"{API}/albums", params={"pageSize": 50, **({"pageToken": page} if page else {})}, timeout=30)

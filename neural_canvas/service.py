@@ -28,6 +28,7 @@ import requests
 
 from .config import Config
 from .dedup import ArtworkRegistry, phash
+from .deliver import GooglePhotos
 from .pipeline import IMAGE_EXTS, Docent, ingest, load_image
 
 log = logging.getLogger(__name__)
@@ -117,6 +118,8 @@ class Service:
         self.known: dict = json.loads(self.known_path.read_text()) if self.known_path.exists() else {}
         self._sizes: dict[str, int] = {}
         self.registry = ArtworkRegistry(cfg.path("state_dir"))
+        self.photos = GooglePhotos(cfg["google_photos"], cfg.path("state_dir"))
+        self._auth_alerted = 0.0
         self._docent: Docent | None = None
 
     @property
@@ -184,9 +187,18 @@ class Service:
     # ── runner: tasks → runs ──────────────────────────────────────────────
     def run_ready(self) -> int:
         n = 0
-        for t in self.pulse.list(self.runner_label):
-            if t.get("status") == "closed" or "staging:wait" not in t.get("labels", []):
-                continue
+        ready = [t for t in self.pulse.list(self.runner_label)
+                 if t.get("status") != "closed" and "staging:wait" in t.get("labels", [])]
+        for i, t in enumerate(ready):
+            # checked before EVERY claim: a run takes minutes, the queue days, and a sign-in can lapse
+            # midway. Every run would then end blocked at deliver, so leave the queue untouched and say so.
+            why = self.photos.check() if self.cfg["google_photos"].get("enabled", True) else ""
+            if why:
+                log.error("runner paused, %d tasks waiting: %s", len(ready) - i, why)
+                if time.time() - self._auth_alerted > 3600:
+                    self.pulse.alert("critical", f"neural-canvas paused: {why}", {"waiting": len(ready) - i})
+                    self._auth_alerted = time.time()
+                return n
             if not self.pulse.claim(t["id"], self.runner_label):
                 continue
             self.run_task(self.pulse.get(t["id"]))
