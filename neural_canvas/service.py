@@ -27,7 +27,8 @@ from pathlib import Path
 import requests
 
 from .config import Config
-from .pipeline import IMAGE_EXTS, Docent, ingest
+from .dedup import ArtworkRegistry, phash
+from .pipeline import IMAGE_EXTS, Docent, ingest, load_image
 
 log = logging.getLogger(__name__)
 ACTOR = "neural-canvas"
@@ -109,10 +110,13 @@ class Service:
         self.watch = cfg.path("watch_dir")
         self.ingested = self.watch / "ingested"
         self.ingested.mkdir(exist_ok=True)
+        self.duplicates = self.watch / "duplicates"
+        self.duplicates.mkdir(exist_ok=True)
         self.state = cfg.path("state_dir")
         self.known_path = self.state / "known.json"
         self.known: dict = json.loads(self.known_path.read_text()) if self.known_path.exists() else {}
         self._sizes: dict[str, int] = {}
+        self.registry = ArtworkRegistry(cfg.path("state_dir"))
         self._docent: Docent | None = None
 
     @property
@@ -124,6 +128,7 @@ class Service:
     # ── watcher: folder → tasks ────────────────────────────────────────────
     def scan(self) -> list[str]:
         created = []
+        self.registry.reload()
         for f in sorted(self.watch.iterdir()):
             if not f.is_file() or f.suffix.lower() not in IMAGE_EXTS or f.name.startswith("."):
                 continue
@@ -132,6 +137,28 @@ class Service:
                 self._sizes[f.name] = size
                 continue
             self._sizes.pop(f.name, None)
+            try:
+                ph = phash(load_image(f))
+            except Exception as e:          # unreadable: queue it anyway, the run will block and say why
+                log.warning("could not hash %s: %s", f.name, e)
+                ph = None
+            twin = self.registry.near(ph) if ph is not None and not f.name.startswith("requeue-") else None
+            if twin:
+                dest = self.duplicates / f.name
+                dest = dest if not dest.exists() else self.duplicates / f"{int(time.time())}-{f.name}"
+                like = twin[1].get("original_name") or twin[1].get("title", "")
+                t = self.pulse.create(
+                    title=f"Docent: duplicate set aside — {f.name[:60]}",
+                    description=(f"{f.name} is {twin[2]} bits (of 64) from run {twin[0]} ({like}) by perceptual hash, "
+                                 f"so it was not queued. It was moved to {dest}.\n\nIf it is a different work, move it "
+                                 "back into the watch folder with its name prefixed 'requeue-' and it will be queued."),
+                    labels=[self.runner_label, self.project_label, "agent:aifred", "type:docent-run",
+                            "completed:duplicate", "blocked:no"],
+                    metadata={"original_name": f.name, "duplicate_of": twin[0], "hamming": twin[2], "path": str(dest)})
+                shutil.move(str(f), dest)
+                self.pulse.close(t["id"], f"duplicate of run {twin[0][:8]} ({twin[2]} bits)")
+                log.info("duplicate set aside: %s is %d bits from run %s (%s)", f.name, twin[2], twin[0][:8], like)
+                continue
             rid, src = ingest(self.cfg, f)
             dest = self.ingested / f.name
             shutil.move(str(f), dest if not dest.exists() else self.ingested / f"{rid[:8]}-{f.name}")
@@ -148,6 +175,7 @@ class Service:
                         "staging:wait", "blocked:no"],
                 metadata={"run_id": rid, "source_path": str(src), "original_name": f.name})
             self.known[rid] = t["id"]
+            self.registry.record(rid, phash=ph, status="queued", original_name=f.name)
             self.known_path.write_text(json.dumps(self.known, indent=1))
             log.info("queued %s as %s", f.name, t["id"])
             created.append(t["id"])
@@ -193,6 +221,10 @@ class Service:
             self.pulse.note(tid, f"COMPLETE: {summary['artist']} — {summary['title']} ({summary['date']}) "
                                  f"→ {res.frame_path}", metadata={**meta, "result": summary})
             self.pulse.close(tid, f"delivered: {summary['artist']} — {summary['title']}")
+        elif res.status == "duplicate":
+            self.pulse.labels(tid, add=["active:done", "completed:duplicate"], remove=["active:running"])
+            self.pulse.note(tid, f"DUPLICATE: {'; '.join(res.reasons)}", metadata={**meta, "result": summary})
+            self.pulse.close(tid, "duplicate of a delivered artwork")
         else:
             reason = f"reason:docent-{res.stage or 'error'}"
             self.pulse.labels(tid, add=["blocked:yes", reason, "active:no"], remove=["active:running"])

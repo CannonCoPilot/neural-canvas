@@ -23,18 +23,21 @@ from PIL import Image, ImageOps
 
 from .config import Config
 from .crop import Composer, CropPlan
+from .dedup import ArtworkRegistry, phash
 from .deliver import AuthRequired, GooglePhotos
 from .identify import Identifier
+from .imify import Imify
 from .interpret import Interpretation, Subject, interpret
 from .matching import Embedder
 from .placard import compose
 from .references import Wikimedia
 from .upscale import Upscaler
+from .vision_web import VisionWebDetection
 from .vlm import VLM
 from .websearch import WebImageSearch
 
 log = logging.getLogger(__name__)
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".tif", ".tiff"}
 STAGES = ["identify", "interpret", "compose", "upscale", "label", "deliver"]
 
 
@@ -86,11 +89,28 @@ class Docent:
         self.vlm = VLM(m["ollama_url"], m["vlm"], m["vlm_timeout_s"])
         self.wiki = Wikimedia(s["commons_api"], s["wikidata_api"], s["user_agent"])
         self.embedder = Embedder(m["clip"])
-        self.identifier = Identifier(cfg, self.vlm, self.wiki, self.embedder, WebImageSearch())
+        im, vw = cfg["imify"], cfg["vision_web"]
+        self.identifier = Identifier(cfg, self.vlm, self.wiki, self.embedder,
+                                     WebImageSearch(searxng_url=s.get("searxng_url", "")),
+                                     Imify(im) if im.get("enabled") else None,
+                                     VisionWebDetection(vw, cfg.path("state_dir") / "vision_web")
+                                     if vw.get("enabled") else None)
         self.composer = Composer(cfg["display"]["width"], cfg["display"]["height"],
                                  cfg.thresholds["essential_retained_min"])
         self._upscaler = None
         self.photos = GooglePhotos(cfg["google_photos"], cfg.path("state_dir"))
+        self.registry = ArtworkRegistry(cfg.path("state_dir"))
+
+    def _looks_like(self, img: Image.Image, other_rid: str) -> bool:
+        """Names alone never make a duplicate: the delivered twin's own source must also match this
+        picture on the embedding (at the identification bar), so two works sharing a title stay apart."""
+        srcs = sorted((self.cfg.path("work_dir") / other_rid).glob("source.*"))
+        if not srcs:
+            return False
+        vecs = self.embedder.embed([img, load_image(srcs[0])])
+        sim = float(self.embedder.similarity(vecs[0], vecs[1:])[0])
+        log.info("duplicate check vs %s: CLIP %.3f", other_rid[:8], sim)
+        return sim >= self.cfg.thresholds["id_clip_min"]
 
     @property
     def upscaler(self) -> Upscaler:
@@ -141,6 +161,19 @@ class Docent:
             facts = {k: st["identify"].get(k, "") for k in (
                 "artist", "title", "date", "medium", "collection", "artist_nationality",
                 "artist_born", "artist_died")}
+            # a different photograph of a painting already in the album: done, not delivered twice
+            twin = self.registry.delivered_twin(facts["artist"], facts["title"], exclude=run_id)
+            if twin and not self._looks_like(img, twin[0]):
+                rec["duplicate_check"] = {"twin": twin[0], "verdict": "same name, different picture: delivered"}
+                twin = None
+            if twin:
+                reason = (f"same artwork as run {twin[0][:8]} ({twin[1].get('artist')} — {twin[1].get('title')}), "
+                          "already delivered to the album")
+                rec["status"], rec["duplicate_of"], rec["reasons"] = "duplicate", twin[0], [reason]
+                save()
+                return RunResult(run_id, "duplicate", "identify", [reason], str(rec_path), "")
+            self.registry.record(run_id, phash=phash(img), artist=facts["artist"], title=facts["title"],
+                                 status="identified")
 
             stage = "interpret"
             if on_stage:
@@ -217,6 +250,7 @@ class Docent:
                 save()
                 if not dr.passed:
                     return block(stage, dr.failures)
+                self.registry.record(run_id, status="delivered", frame=str(out))
             elif not deliver:
                 st[stage] = {"passed": False, "skipped": "delivery disabled for this run"}
                 rec["status"] = "rendered"

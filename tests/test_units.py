@@ -108,3 +108,108 @@ def test_label_moves_to_mat_when_every_corner_covers_a_protagonist():
     frame, pl = compose(art, plan, (3840, 2160), ident, "A paragraph. " * 8, [(0.0, 0.0, 1.0, 1.0)], 7.0)
     assert frame.size == (3840, 2160)
     assert pl.position == "mat-right" and pl.essential_overlap == 0 and pl.passed, pl.failures
+
+
+def test_imify_names_an_untitled_hit_by_its_page_url():
+    from neural_canvas.imify import _slug_title
+    assert _slug_title("https://barbarapicci.com/2021/11/19/fotogallery-54/tomioka-soichiro/") == \
+        "fotogallery 54 / tomioka soichiro"
+
+
+def test_vision_web_pages_come_first_and_similar_images_never_count():
+    from neural_canvas.vision_web import VisionWebDetection
+    web = {"pagesWithMatchingImages": [{"url": "https://a.org/p", "pageTitle": "Trees (1961) by Tomioka",
+                                        "fullMatchingImages": [{"url": "https://a.org/t.jpg"}]}],
+           "fullMatchingImages": [{"url": "https://a.org/t.jpg"}, {"url": "https://b.org/t2.jpg"}],
+           "visuallySimilarImages": [{"url": "https://c.org/other.jpg"}],
+           "bestGuessLabels": [{"label": "tomioka soichiro trees 1961"}],
+           "webEntities": [{"description": "Painting", "score": 0.4}, {"description": "Sōichirō Tomioka", "score": 0.9}]}
+    refs = VisionWebDetection.references(web)
+    assert [r.image_url for r in refs] == ["https://a.org/t.jpg", "https://b.org/t2.jpg"]
+    assert refs[0].file_title == "Trees (1961) by Tomioka" and refs[0].page_url == "https://a.org/p"
+    h = VisionWebDetection.hints(web)
+    assert h["best_guess"] == ["tomioka soichiro trees 1961"] and h["entities"][0] == "Sōichirō Tomioka"
+
+
+def test_vision_key_is_found_in_any_document_of_a_multi_doc_yaml(tmp_path):
+    from neural_canvas.vision_web import _read_key
+    f = tmp_path / "creds.yaml"
+    f.write_text("github:\n  token: x\n---\nimage:\n  google_vision: ' k123 '\n")
+    assert _read_key(str(f), "image.google_vision") == "k123"
+    with pytest.raises(KeyError):
+        _read_key(str(f), "image.missing")
+
+
+def test_web_search_interleaves_engines_and_survives_one_failing(monkeypatch):
+    from neural_canvas.websearch import WebImageSearch, WebReference
+    ref = lambda u: WebReference(u, hash(u), u, u, u)
+    w = WebImageSearch(searxng_url="http://searx.invalid")
+    monkeypatch.setattr(w, "_ddg", lambda q, n: [ref("d1"), ref("same"), ref("d2")])
+    monkeypatch.setattr(w, "_searx", lambda q, n: [ref("s1"), ref("same")])
+    assert [r.image_url for r in w.search("q", 3)] == ["d1", "s1", "same", "d2"]
+    monkeypatch.setattr(w, "_searx", lambda q, n: (_ for _ in ()).throw(RuntimeError("down")))
+    assert [r.image_url for r in w.search("q", 3)] == ["d1", "same", "d2"]
+    monkeypatch.setattr(w, "_ddg", lambda q, n: (_ for _ in ()).throw(RuntimeError("down")))
+    with pytest.raises(RuntimeError):
+        w.search("q", 3)
+
+
+def _painting(seed):
+    """Smooth random structure, like a painting (pure noise has no low frequencies to hash)."""
+    rng = np.random.default_rng(seed)
+    small = rng.integers(0, 255, (6, 8, 3), dtype=np.uint8)
+    return Image.fromarray(small).resize((1600, 1200), Image.Resampling.BICUBIC)
+
+
+def test_phash_matches_resized_recompressed_copies_and_separates_different_works():
+    import io
+    from neural_canvas.dedup import PHASH_NEAR, hamming, phash
+    a = _painting(1)
+    buf = io.BytesIO()
+    a.resize((640, 480)).save(buf, "JPEG", quality=60)
+    copy = Image.open(io.BytesIO(buf.getvalue()))
+    assert hamming(phash(a), phash(copy)) <= 4
+    assert min(hamming(phash(a), phash(_painting(s))) for s in range(2, 12)) > PHASH_NEAR
+
+
+def test_work_key_folds_case_accents_articles_and_initials():
+    from neural_canvas.dedup import work_key
+    assert work_key("Andrew Wyeth", "The Carry") == work_key("A. WYETH", "carry") == "wyeth|carry"
+    assert work_key("Paul Cézanne", "Abandoned House") == work_key("Paul Cezanne", "abandoned house")
+    assert work_key("", "Untitled") == ""
+
+
+def test_registry_flags_only_delivered_twins_and_never_undelivers(tmp_path):
+    from neural_canvas.dedup import ArtworkRegistry
+    r = ArtworkRegistry(tmp_path)
+    r.record("run1", phash=123, artist="Carl Bloch", title="Transfiguration of Jesus", status="identified")
+    assert r.delivered_twin("C. Bloch", "transfiguration of jesus", exclude="run2") is None
+    r.record("run1", status="delivered")
+    assert r.delivered_twin("C. Bloch", "transfiguration of jesus", exclude="run2")[0] == "run1"
+    assert r.delivered_twin("C. Bloch", "transfiguration of jesus", exclude="run1") is None   # itself
+    r.record("run1", status="identified")                       # a resumed run
+    assert ArtworkRegistry(tmp_path).works["run1"]["status"] == "delivered"
+    assert ArtworkRegistry(tmp_path).near(123 ^ 0b111)[0] == "run1"
+
+
+def test_generic_titles_never_make_two_works_the_same():
+    from neural_canvas.dedup import work_key
+    for t in ("Untitled", "Composition No. 7", "Self-Portrait", "Still Life", "Improvisation 31", "Study"):
+        assert work_key("Mark Rothko", t) == "", t
+    assert work_key("Vincent van Gogh", "Irises") == "gogh|irises"
+
+
+def test_vision_key_never_reaches_an_error_message(tmp_path, monkeypatch):
+    import requests
+    from neural_canvas import vision_web
+    creds = tmp_path / "c.yaml"
+    creds.write_text("image:\n  google_vision: SECRET12345\n")
+    v = vision_web.VisionWebDetection({"credentials_path": str(creds), "key_path": "image.google_vision"}, tmp_path / "cache")
+
+    def boom(url, **kw):
+        assert "SECRET12345" not in url and kw["headers"]["X-goog-api-key"] == "SECRET12345"
+        raise requests.ConnectionError(f"Max retries exceeded with url: /v1/images:annotate?key=SECRET12345 (refused)")
+    monkeypatch.setattr(vision_web.requests, "post", boom)
+    with pytest.raises(RuntimeError) as e:
+        v.detect(_img(64, 64))
+    assert "SECRET12345" not in str(e.value) and "<redacted>" in str(e.value)

@@ -6,8 +6,11 @@ facts are then read from that reference's catalogue record, never from the model
 
 Search widens round by round: the model's candidates by title → a sweep of each proposed
 artist's works (catches right-artist/wrong-title) → a fresh model round told which candidates
-were already refuted. No confirmation after the last round ⇒ the artwork stays UNCONFIRMED and
-the run blocks; nothing downstream is allowed to print a guessed attribution.
+were already refuted. A free reverse-image search (Imify) runs alongside from the start. Google
+Vision web detection, which is billed, is the fallback: once per image, on a near-miss or when the
+free rounds are spent, and its hints buy one more round. No confirmation after the last round ⇒
+the artwork stays UNCONFIRMED and the run blocks; nothing downstream is allowed to print a guessed
+attribution.
 """
 from __future__ import annotations
 
@@ -22,7 +25,9 @@ from PIL import Image
 
 from .matching import Embedder, fetch_image, geometric_inliers
 from .references import Reference, Wikimedia, file_thumb
+from .imify import Imify
 from .style import StyleShortlist
+from .vision_web import VisionWebDetection
 from .websearch import WebImageSearch, WebReference
 from .vlm import VLM
 
@@ -30,7 +35,8 @@ log = logging.getLogger(__name__)
 WEB_UA = "Mozilla/5.0 (compatible; neural-canvas/1.0; +https://github.com/CannonCoPilot/neural-canvas)"
 
 PROPOSE_PROMPT = """You are a museum curator identifying an artwork from a photograph of it.
-Nothing is known about it except the image. Study style, subject, palette, technique, and read any
+Nothing is known about it except the image. It IS a work of art — a painting, print or drawing — even
+when it looks photographic: propose painters and printmakers, never photographers. Study style, subject, palette, technique, and read any
 visible signature, monogram, date or inscription exactly as written.
 {refuted}
 {signature}
@@ -109,8 +115,10 @@ def _norm(s: str) -> str:
 
 
 class Identifier:
-    def __init__(self, cfg, vlm: VLM, wiki: Wikimedia, embedder: Embedder, web: WebImageSearch | None = None):
+    def __init__(self, cfg, vlm: VLM, wiki: Wikimedia, embedder: Embedder, web: WebImageSearch | None = None,
+                 imify: Imify | None = None, vision: VisionWebDetection | None = None):
         self.cfg, self.vlm, self.wiki, self.emb, self.web = cfg, vlm, wiki, embedder, web
+        self.imify, self.vision = imify, vision
         self.t = cfg.thresholds
         self.ua = cfg["sources"]["user_agent"]
         self.style = StyleShortlist(wiki, embedder, cfg.path("state_dir"))
@@ -213,6 +221,12 @@ class Identifier:
         if self._used_phrases:
             note += (" These search phrases were already tried without success: "
                      + "; ".join(sorted(self._used_phrases)[:15]) + ". Give new, differently worded phrases.")
+        if self._vision_hints:
+            h = self._vision_hints
+            note += (" A reverse-image search of the web found this picture on pages titled: "
+                     + "; ".join(t for t in h["page_titles"] if t)[:600]
+                     + f". The search engine's best guess: {', '.join(h['best_guess'])}; "
+                     + f"related names: {', '.join(h['entities'])}. These are leads, not facts.")
         sig = self._signature
         sig_note = (f"A close reading of the corners found this signature: {sig.get('signature_text')!r}"
                     + (f" (suggesting {sig['artist']})." if sig.get("artist") else ".")) if sig.get("signature_text") else ""
@@ -251,8 +265,10 @@ class Identifier:
                     q = f"{c['artist']} {c['title']} painting"
                     out.append(("web", q, lambda q=q: self.web.search(q, 15)))
             for ph in self._phrases[:5]:      # artist-agnostic: when the model cannot name the painter
-                q = ph if re.search(r"paint|oil|canvas|watercolou?r|acrylic|art", ph, re.I) else f"{ph} painting"
-                out.append(("web", q, lambda q=q: self.web.search(q, 25)))
+                core = re.sub(r"\b(oil|acrylic|watercolou?r)?\s*(painting|print|on canvas|artwork)\b", "", ph, flags=re.I).strip()
+                # contemporary work circulates mostly as print and shop listings: search each medium wording
+                for q in dict.fromkeys([ph, f"{core} acrylic painting", f"{core} art print"]):
+                    out.append(("web", q, lambda q=q: self.web.search(q, 25)))
             for a in artists[:3]:
                 for ph in self._phrases[:2]:
                     q = f"{a} {ph}"
@@ -266,6 +282,24 @@ class Identifier:
         return out
 
     def identify(self, img: Image.Image) -> Identification:
+        calls0 = self.vision.calls if self.vision else 0
+        pool = ThreadPoolExecutor(1)
+        self._imify_pending = None
+        try:
+            ident = self._identify(img, pool)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        if self._imify_pending is not None:      # confirmed before the reverse search answered
+            ident.evidence["imify"] = "not consulted: identification confirmed first"
+            self._imify_pending.add_done_callback(lambda f: log.info(
+                "late imify result (unused): %s", f.exception() or f"{len(f.result())} candidates"))
+        ident.evidence["vision_web_calls"] = (self.vision.calls - calls0) if self.vision else 0
+        return ident
+
+    def _identify(self, img: Image.Image, pool: ThreadPoolExecutor) -> Identification:
+        # the reverse-image arm starts now and is scored the moment it answers
+        imify_fut = pool.submit(self.imify.search_image, img) if self.imify else None
+        self._imify_pending = imify_fut
         img_vec = self.emb.embed([img])[0]
         self._img_vec = img_vec
         self._img = img
@@ -273,6 +307,9 @@ class Identifier:
         self._keywords: list[str] = []
         self._used_phrases: set[str] = set()
         self._used_keywords: set[str] = set()
+        self._vision_hints: dict = {}
+        vision_due = bool(self.vision and self.vision.enabled)
+        max_rounds = self.t["id_max_rounds"]
         self._signature = self.read_signature(img)
         log.info("signature pass: %s", self._signature)
         seen: set[int] = set()
@@ -280,7 +317,9 @@ class Identifier:
         swept: set[str] = set()
         rounds = []
         sig, summary = "", ""
-        for rnd in range(self.t["id_max_rounds"]):
+        rnd = -1
+        while rnd + 1 < max_rounds:
+            rnd += 1
             prop = self._propose(img, refuted)
             sig = sig or self._signature.get("signature_text", "") or prop.get("signature_text", "")
             summary = summary or prop.get("visual_summary", "")
@@ -307,7 +346,15 @@ class Identifier:
                 cands.append({"artist": sa, "title": "", "year": "", "confidence": self._signature.get("confidence", 0)})
             log.info("round %d candidates: %s", rnd + 1, [(c["artist"], c.get("title")) for c in cands])
             matches: list[Match] = []
-            for tier, q, fn in self._tiers(cands, swept):
+            pending = self._tiers(cands, swept)
+            while True:
+                if imify_fut is not None and (imify_fut.done() or not pending):
+                    f, imify_fut = imify_fut, None   # waits only when nothing else is left to try
+                    self._imify_pending = None
+                    pending.insert(0, ("imify", "reverse-image search", f.result))
+                if not pending:
+                    break
+                tier, q, fn = pending.pop(0)
                 log.info("  tier %s: %s", tier, q[:80])
                 try:
                     batch = self._score(img, img_vec, fn(), q, seen)
@@ -322,8 +369,30 @@ class Identifier:
                     if ident.status == "confirmed":
                         return ident
                     rounds.pop()          # facts failed their gate; keep searching
+            near = [m for m in matches if m.clip >= self.cfg["vision_web"]["near_miss_clip"]]
+            if vision_due and (near or rnd + 1 == max_rounds):
+                vision_due = False   # one billed call per image, ever (the response is cached on disk)
+                why = "near-miss" if near else "free rounds exhausted"
+                log.info("  tier vision_web (%s)", why)
+                try:
+                    web = self.vision.detect(img)
+                    self._vision_hints = VisionWebDetection.hints(web)
+                    batch = self._score(img, img_vec, VisionWebDetection.references(web), f"vision web detection ({why})", seen)
+                except Exception as e:
+                    log.warning("vision web detection failed: %s", e)
+                    batch = [Match(f"ERROR vision_web: {e}", "", "", 0.0, 0, False, "vision web detection")]
+                matches += batch
+                hits = [m for m in batch if m.confirmed]
+                if hits:
+                    ident = self._finish("vision_web", hits, matches, rounds, rnd, cands, sig, summary)
+                    if ident.status == "confirmed":
+                        return ident
+                    rounds.pop()
+                if self._vision_hints and rnd + 1 == max_rounds:
+                    max_rounds += 1   # its hints name new candidates: they get one round of their own
             best = sorted(matches, key=lambda m: (-m.clip, -m.inliers))[:5]
-            rounds.append({"round": rnd + 1, "candidates": cands, "best_matches": [_mdict(m) for m in best]})
+            rounds.append({"round": rnd + 1, "candidates": cands, "best_matches": [_mdict(m) for m in best],
+                           **({"vision_hints": self._vision_hints} if self._vision_hints else {})})
             refuted += cands
         return Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
                               evidence={"reason": "no reference image matched on both instruments"})
@@ -406,6 +475,15 @@ class Identifier:
             by_model = bool(surname[0]) and surname[0] in _norm(seen_names)
             sites = {h.reference_obj.domain for h in hits  # type: ignore[attr-defined]
                      if surname[0] and surname[0] in _norm(_web_line(h.reference_obj)).split()}  # type: ignore
+            if not by_model and len(sites) < 2 and ident.artist and ident.title:
+                # one more look, now that the facts name an artist and title: the artist's own site,
+                # galleries and catalogues usually title the same image the same way
+                q = f"{ident.artist} {ident.title}"
+                hits = hits + [m for m in self._score(self._img, self._img_vec, self.web.search(q, 20), q,
+                                                      {h.reference_obj.page_id for h in hits}) if m.confirmed]  # type: ignore
+                sites = {h.reference_obj.domain for h in hits  # type: ignore[attr-defined]
+                         if surname[0] and surname[0] in _norm(_web_line(h.reference_obj)).split()}  # type: ignore
+                ident.evidence["web_references"] = [_web_line(h.reference_obj) for h in hits]  # type: ignore
             ident.evidence["artist_corroborated"] = by_model or len(sites) >= 2
             ident.evidence["artist_corroborated_by"] = ("the model's own reading" if by_model
                                                        else f"{len(sites)} independent sites")

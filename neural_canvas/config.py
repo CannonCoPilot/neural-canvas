@@ -50,6 +50,22 @@ DEFAULTS: dict[str, Any] = {
         "user_agent": "neural-canvas/1.0 (https://github.com/CannonCoPilot/neural-canvas)",
         "commons_api": "https://commons.wikimedia.org/w/api.php",
         "wikidata_api": "https://www.wikidata.org/w/api.php",
+        # Imify's bundled SearXNG: a second free text-to-image engine beside DuckDuckGo ("" = off)
+        "searxng_url": "http://127.0.0.1:8888",
+    },
+    # free reverse-image arm: the local Imify service (~/Claude/Staging/verified/imify/run-imify.sh)
+    "imify": {"enabled": True, "url": "http://127.0.0.1:8890", "timeout_s": 90, "num_results": 40},
+    # billed reverse-image fallback: Google Cloud Vision web detection, at most one call per image.
+    # The key is read from the credentials file at call time; it never appears in config.
+    "vision_web": {
+        "enabled": True,
+        "credentials_path": str(Path.home() / "Claude" / "Project_Aion" / ".claude" / "secrets" / "credentials.yaml"),
+        "key_path": "image.google_vision",
+        # a round that ends unconfirmed with any reference this close is a near-miss: the work is
+        # out there, but no free copy matched on both instruments
+        "near_miss_clip": 0.80,
+        "max_side": 1600,
+        "max_results": 30,
     },
     "pulse": {
         "url": "http://localhost:8800/api/v1",
