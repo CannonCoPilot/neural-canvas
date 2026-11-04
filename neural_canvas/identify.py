@@ -116,6 +116,8 @@ class Identifier:
         self.style = StyleShortlist(wiki, embedder, cfg.path("state_dir"))
         self.cache_dir = cfg.path("state_dir") / "oeuvre"
         self.cache_dir.mkdir(exist_ok=True)
+        self._artist_qids: dict[str, str] = {}
+        self._free_sweeps = 0
 
     # ── catalogue sweep: an artist's whole Wikidata oeuvre, embedded once and cached ──
     def _oeuvre_vectors(self, artist_qid: str) -> tuple[list[dict], np.ndarray]:
@@ -137,6 +139,16 @@ class Identifier:
             np.savez(cache, qids=np.array(list(have)), vecs=np.stack(list(have.values())))
         works = [w for w in works if w["qid"] in have]
         return works, (np.stack([have[w["qid"]] for w in works]) if works else np.zeros((0, 512)))
+
+    def _oeuvre_cached(self, artist: str) -> bool:
+        qid = self._artist_qids.get(artist)
+        if qid is None:
+            try:
+                qid = self.wiki.find_artist(artist) or ""
+            except Exception:
+                qid = ""
+            self._artist_qids[artist] = qid
+        return bool(qid) and (self.cache_dir / f"{qid}.npz").exists()
 
     def _oeuvre_refs(self, artist: str, img_vec: np.ndarray, k: int = 4) -> list[Reference]:
         qid = self.wiki.find_artist(artist)
@@ -219,9 +231,15 @@ class Identifier:
                     out.append(("commons", q, lambda q=q: self.wiki.search_files(q, 12)))
         artists = [a for a in dict.fromkeys(c["artist"] for c in cands) if _norm(a) not in swept]
         by_style = []
-        if artists:   # painters ordered by how much the picture resembles their manner
+        if artists:   # interleave the model's picks (its order) with the closest styles, then cached first
             sty = self.emb.embed_text([f"a painting by {a}" for a in artists]) @ self._img_vec
-            by_style = [artists[i] for i in np.argsort(-sty)]
+            styled = [artists[i] for i in np.argsort(-sty)]
+            model = [c["artist"] for c in cands if c.get("source") != "style"]
+            mixed = [a for pair in zip(model, styled) for a in pair] + model + styled
+            prio = list(dict.fromkeys(a for a in mixed if a in artists))
+            cached = [a for a in prio if self._oeuvre_cached(a)]
+            by_style = list(dict.fromkeys(cached + prio))
+            self._free_sweeps = len(cached)
         for a in by_style[:2]:   # the two closest styles: one catalogue sweep each, early
             out.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, self._img_vec)))
         for kw in self._keywords:      # artist-agnostic on the catalogued collection: short keyword AND query
@@ -239,12 +257,12 @@ class Identifier:
                 for ph in self._phrases[:2]:
                     q = f"{a} {ph}"
                     out.append(("web", q, lambda q=q: self.web.search(q, 20)))
-        for a in by_style[2:4]:  # the rest of the four closest; farther styles wait for a later round
+        for a in by_style[2:max(4, self._free_sweeps)]:  # four per round (cached catalogues are free)
             out.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, self._img_vec)))
         if self.web:
             for a in by_style[:3]:
                 out.append(("web", f"{a} painting", lambda a=a: self.web.search(f"{a} painting", 30)))
-        swept.update(_norm(a) for a in by_style[:4])
+        swept.update(_norm(a) for a in by_style[:max(4, self._free_sweeps)])
         return out
 
     def identify(self, img: Image.Image) -> Identification:
