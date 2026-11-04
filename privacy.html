@@ -44,12 +44,38 @@ what it accesses and what it does with it.</p>
 <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User
 Data Policy</a>, including the Limited Use requirements.</p>
 
-<h2>Storage and removal</h2>
-<p>The sign-in token is stored only on the owner's computer, readable only by the owner's account.
-Access can be revoked at any time at
+<h2>Google user data, item by item</h2>
+<ul>
+  <li><strong>Album it creates</strong>: its identifier and title, kept on the owner's computer so
+    frames go to the same album every time.</li>
+  <li><strong>Frames it uploads</strong>: their identifiers and links, kept in the run record on the
+    owner's computer so each artwork is delivered only once.</li>
+  <li><strong>Sign-in token</strong>: issued by Google, kept on the owner's computer.</li>
+</ul>
+<p>neural-canvas does not collect names, email addresses, contacts, location, or any photo it did
+not create. It has no server of its own, so none of this data ever leaves the owner's computer
+except to Google itself.</p>
+
+<h2>Retention and deletion</h2>
+<p>Album and frame identifiers are kept for as long as the owner uses neural-canvas, and are deleted
+when the owner deletes the program's folder. Frames it uploaded stay in Google Photos until the
+owner deletes them there.</p>
+
+<h2>Security</h2>
+<p>The sign-in token is stored only on the owner's computer, readable only by the owner's user
+account, and is never written to logs or shared. All traffic to Google uses HTTPS.</p>
+
+<h2>Your control</h2>
+<p>Access can be revoked at any time at
 <a href="https://myaccount.google.com/connections">myaccount.google.com/connections</a>. After that,
-neural-canvas can no longer reach the account. Frames it uploaded stay in Google Photos until the
-owner deletes them.</p>
+neural-canvas can no longer reach the account.</p>
+
+<h2>Children</h2>
+<p>neural-canvas is a personal tool, not directed at children, and collects no data from anyone but
+its owner.</p>
+
+<h2>Changes to this policy</h2>
+<p>Any change will be published on this page, with a new effective date.</p>
 
 <h2>Contact</h2>
 <p>Questions about this policy: open an issue at
