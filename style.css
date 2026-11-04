@@ -1,0 +1,16 @@
+:root { --bg: #fbfaf7; --fg: #22201c; --muted: #6b665d; --rule: #e3dfd6; --link: #7a4a12; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #17161a; --fg: #ebe8e1; --muted: #a39e94; --rule: #2f2d33; --link: #e0b26e; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+       font: 17px/1.6 Georgia, "Iowan Old Style", "Times New Roman", serif; }
+main { max-width: 42rem; margin: 0 auto; padding: 3rem 1rem 4rem; }
+h1 { font-size: 2.1rem; line-height: 1.2; margin: 0 0 .4rem; letter-spacing: -.01em; }
+h2 { font-size: 1.2rem; margin: 2.2rem 0 .4rem; }
+p, li { margin: .5rem 0; }
+.lede { color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem; }
+a { color: var(--link); }
+nav { border-top: 1px solid var(--rule); margin-top: 3rem; padding-top: 1rem; color: var(--muted); font-size: .95rem; }
+nav a { margin-right: 1.2rem; }
+code { font-size: .9em; }
