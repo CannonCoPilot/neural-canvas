@@ -27,6 +27,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from itertools import chain
 from urllib.parse import quote, urljoin, urlparse
 
@@ -43,8 +44,6 @@ UA = "neural-canvas/1.0 (+https://github.com/CannonCoPilot/neural-canvas)"
 LANGS = "en|de|fr|nl|it|es|ja|da|sv|no|nb|fi|cs|ru|pl|pt"
 UNAVAILABLE = {
     "Getty ULAN": "server-side TLS failure on vocab.getty.edu (2026-11-05)",
-    "National Gallery of Art": "nga.gov answers plain HTTP with a Cloudflare challenge (403, 2026-11-05); its open "
-                               "data is a 5.3 GB CSV repository, not wired in",
     "Norman Rockwell Museum": "collection.nrm.org answers every automated request with a bot challenge (2026-11-05)",
 }
 # Smithsonian art units. The API ignores its fq filter; a fielded unit_code term inside q filters (2026-11-05).
@@ -920,6 +919,62 @@ class Catalogue:
                     break
         return out
 
+    def _nga(self, img, img_vec, titles: list[str], artist: str) -> list[Record]:
+        """National Gallery of Art, from its open data (nga.gov itself is walled): the artist's NGA works whose
+        titles match a lead first, then all of them ranked by embedding; images from its IIIF server."""
+        from .nga import NGA
+        path = (self.cfg["sources"].get("nga_db") if self.cfg else "") or ""
+        nga = NGA(Path(path).expanduser()) if path else None
+        if not artist or nga is None or not nga.available:
+            return []
+        self.consulted.append("National Gallery of Art (open data)")
+        rows = [r for r in nga.works_by(artist) if r.get("iiif")]
+        if not rows:
+            return []
+        titled = [r for r in rows if any(same_title(t, r["title"]) for t in titles)]
+        rest = [r for r in rows if r not in titled]
+        if rest and len(rest) <= 800:          # the artist's other NGA works by embedding (thumbnails cached)
+            vecs = self._nga_vectors(artist, rest)
+            if vecs is not None:
+                rest = [rest[int(i)] for i in np.argsort(-(vecs @ img_vec))]
+        for r in (titled[:6] + rest[:6]):
+            ok, sim, inl = self._verify(img, img_vec, NGA.image(r))
+            if ok:
+                return [Record("nga", f"https://www.nga.gov/collection/art-object-page.{r['objectid']}.html", r["title"], [],
+                               r["artist"], ", ".join(x for x in (r["nationality"], r["artist_dates"]) if x),
+                               r["displaydate"] or "", r["medium"] or "", "National Gallery of Art", "", NGA.image(r),
+                               "image", sim, inl,
+                               text=fold(" ".join(str(r[k] or "") for k in ("title", "attribution", "inscription", "medium",
+                                                                           "displaydate", "accessionnum"))))]
+        return []
+
+    def _nga_vectors(self, artist: str, rows: list[dict]):
+        """Embeddings of an artist's NGA thumbnails, cached by object id."""
+        state = Path(self.cfg.path("state_dir")) / "nga" if self.cfg else None
+        if state is None:
+            return None
+        state.mkdir(parents=True, exist_ok=True)
+        cache = state / f"{re.sub(r'[^a-z0-9]+', '-', fold(artist))}.npz"
+        have: dict[int, np.ndarray] = {}
+        if cache.exists():
+            z = np.load(cache, allow_pickle=False)
+            have = dict(zip(z["ids"].tolist(), z["vecs"]))
+        from .nga import NGA
+        todo = [r for r in rows if r["objectid"] not in have]
+        if todo:
+            log.info("nga: embedding %d thumbnails for %s", len(todo), artist)
+            ok = [(r, im) for r in todo for im in [fetch_image(NGA.image(r, 250), UA)] if im is not None]
+            for i in range(0, len(ok), 64):
+                chunk = ok[i:i + 64]
+                for (r, _), v in zip(chunk, self.emb.embed([im for _, im in chunk])):
+                    have[r["objectid"]] = v
+            if have:
+                np.savez(cache, ids=np.array(list(have)), vecs=np.stack(list(have.values())))
+        if any(r["objectid"] not in have for r in rows):
+            return None if not have else np.stack([have.get(r["objectid"], np.zeros(len(next(iter(have.values())))))
+                                                    for r in rows])
+        return np.stack([have[r["objectid"]] for r in rows])
+
     @staticmethod
     def _over(recs: list) -> list:
         """Mark records of the OVERRULE tier: they vote among themselves; lower-tier disagreement is discarded."""
@@ -1007,6 +1062,7 @@ class Catalogue:
                     break
         self.consulted += ["RKD", "Wikipedia", "Wikimedia Commons", "museum, foundation and artist pages found by web search"]
         self._living, self._artist = living, artist
+        recs += over(self._safe("nga", lambda: self._nga(img, img_vec, titles, artist)))
         recs += over(self._safe("catalogue_sites", lambda: self._registry(img, img_vec, artist, titles,
                                                                   {institution(r.source) for r in recs})))
         recs += self._safe("artvee", lambda: self._artvee(img, img_vec, titles, artist, surname))

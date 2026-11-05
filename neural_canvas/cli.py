@@ -48,6 +48,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("gold")
     p.add_argument("out")
     p.add_argument("--notes", help="HTML fragment appended to the page (open items)")
+    p = sub.add_parser("nga-index", help="index the National Gallery of Art open-data CSVs (objects, constituents, "
+                                         "objects_constituents, published_images) into the configured SQLite file")
+    p.add_argument("csv_dir")
     a = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
@@ -56,6 +59,10 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger(noisy).setLevel(logging.WARNING)
     cfg = load_config(a.config)
 
+    if a.cmd == "nga-index":
+        from .nga import build_index
+        print(build_index(Path(a.csv_dir).expanduser(), Path(cfg["sources"]["nga_db"]).expanduser()))
+        return 0
     if a.cmd == "serve":
         from .service import Service
         Service(cfg).serve(once=a.once)

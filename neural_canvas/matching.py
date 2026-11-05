@@ -80,10 +80,10 @@ WIKIMEDIA_INTERVAL_S = 0.12   # paced: Wikimedia answers bursts with HTTP 429
 # seconds between fetches per host family. The Art Institute allows 60 a minute; a burst past that is met
 # with a Cloudflare challenge (HTTP 403, cf-mitigated) on every image for some minutes (2026-11-05).
 HOST_INTERVAL_S = {"wikimedia.org": WIKIMEDIA_INTERVAL_S, "wikipedia.org": WIKIMEDIA_INTERVAL_S, "artic.edu": 1.0,
-                   "artvee.com": 0.25}
+                   "artvee.com": 0.25, "api.nga.gov": 0.25}
 # hosts that take one request at a time. Measured 2026-11-05 on 27 Wikimedia thumbnails: serial 0.12 s each,
 # six in flight 0.54 s each (its thumbnail allowance answers bursts with 429, Retry-After 11 s).
-SERIAL_HOSTS = ("wikimedia.org", "wikipedia.org", "artic.edu", "artvee.com")
+SERIAL_HOSTS = ("wikimedia.org", "wikipedia.org", "artic.edu", "artvee.com", "api.nga.gov")
 _in_flight: dict[str, threading.Semaphore] = {}
 
 

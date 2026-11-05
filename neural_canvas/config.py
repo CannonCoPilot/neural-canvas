@@ -65,6 +65,8 @@ DEFAULTS: dict[str, Any] = {
         "searxng_url": "http://127.0.0.1:8888",
         # "site: key" lines (europeana, harvard, smithsonian ...); outside every repo, read at run time
         "api_keys_path": str(Path.home() / "Claude" / "Project_Aion" / ".claude" / "secrets" / "neural-canvas-api-keys.txt"),
+        # National Gallery of Art open data, indexed by `neural-canvas nga-index` (CSV source kept in Staging)
+        "nga_db": str(Path.home() / "Claude" / "Staging" / "verified" / "nga-opendata-2026-11-05" / "nga.sqlite"),
         # keyed text-search engines beside SearXNG; each is used only when its key is in the store
         "text_search": {
             "credentials_path": str(Path.home() / "Claude" / "Project_Aion" / ".claude" / "secrets" / "credentials.yaml"),

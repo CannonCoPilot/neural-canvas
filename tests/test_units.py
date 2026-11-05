@@ -864,3 +864,18 @@ def test_overrule_sources_vote_among_themselves():
     c = _rec("artvee.com", "Venice", artist="James McNeill Whistler")
     ru = cat.rule([c, a, b], {"artist": "James McNeill Whistler", "inscribed_title": ""})
     assert ru["support"]["title"] == ["gla", "yale"] and ru["discarded"]["title"] == ["artvee.com: Venice"]
+
+
+def test_nga_open_data_indexes_and_finds_an_artists_works(tmp_path):
+    from neural_canvas.nga import NGA, build_index
+    w = lambda name, text: (tmp_path / f"{name}.csv").write_text(text, encoding="utf-8")
+    w("objects", "objectid,title,displaydate,medium,attribution,inscription,accessionnum,classification,wikidataid\n"
+                 '17,Wind from the Sea,1947,tempera on hardboard,Andrew Wyeth,,1975.1.1,Painting,Q1\n')
+    w("constituents", "constituentid,forwarddisplayname,preferreddisplayname,lastname,displaydate,nationality,wikidataid,ulanid\n"
+                      "5,Andrew Wyeth,\"Wyeth, Andrew\",Wyeth,\"American, 1917 - 2009\",American,Q2,500\n")
+    w("objects_constituents", "objectid,constituentid,role,prefix\n17,5,artist,\n")
+    w("published_images", "depictstmsobjectid,iiifurl,viewtype,sequence\n17,https://api.nga.gov/iiif/abc,primary,0\n")
+    counts = build_index(tmp_path, tmp_path / "nga.sqlite")
+    assert counts == {"works": 1, "artists": 1, "work_artists": 1, "images": 1}
+    [r] = NGA(tmp_path / "nga.sqlite").works_by("Andrew Wyeth")
+    assert r["title"] == "Wind from the Sea" and NGA.image(r) == "https://api.nga.gov/iiif/abc/full/!500,500/0/default.jpg"
