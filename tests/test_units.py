@@ -53,7 +53,7 @@ def test_a_tall_figure_keeps_head_and_body_and_gives_up_the_sky():
     y0, y1 = plan.window[1], plan.window[3]
     assert y0 <= 0.25 - 0.04 * (y1 - y0) and y1 > 0.6         # her head with headroom, cut below the hands
     assert plan.faces_kept == "1/1"
-    assert plan.detail and "young woman" in plan.warnings[0]   # her feet cannot fit: a detail, said so
+    assert plan.detail and "young woman" in plan.detail_reasons[0]   # her feet cannot fit: a detail, said so
 
 
 def test_principal_faces_that_cannot_share_a_window_make_a_detail_not_a_block():
@@ -521,3 +521,17 @@ def test_caption_facts_that_cannot_be_right_are_blanked_with_a_reason():
     assert "outside" in check_facts(later)["date"]
     living = SimpleNamespace(artist_born="", artist_died="", date="2025", medium="Acrylic")
     assert check_facts(living) == {}
+
+
+def test_a_small_cut_to_a_secondary_subject_is_a_warning_not_a_detail():
+    subs = [Subject("main", (0.3, 0.2, 0.6, 0.7), 5, True, "figure"), Subject("side", (0.05, 0.1, 0.25, 0.9), 3, True, "figure")]
+    plan = Composer(3840, 2160, 0.97, detail_min=0.75).plan(_img(1000, 600), _interp(subs))
+    assert not plan.detail and plan.detail_reasons == [] and _retained(subs[0].box, plan.window) == 1.0
+
+
+def test_artist_names_lose_bracketed_and_trailing_facts():
+    from neural_canvas.identify import clean_artist
+    assert clean_artist("Tom Lovell (American, 1909-1997)") == "Tom Lovell"
+    assert clean_artist("Eyvind Earle (1916-2000)") == "Eyvind Earle"
+    assert clean_artist("Thomas Moran, 1837–1926") == "Thomas Moran"
+    assert clean_artist("Jim Musil") == "Jim Musil" and clean_artist("Carl Heinrich Bloch") == "Carl Heinrich Bloch"

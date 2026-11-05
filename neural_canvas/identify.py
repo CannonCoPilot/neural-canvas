@@ -72,7 +72,7 @@ with the image's own file name and the title of the page it appeared on:
 {captions}
 An image's file name usually names the pictured work; a page title may describe a DIFFERENT work shown on
 the same page (shop pages, related-items strips, galleries). Weigh the evidence across all lines.
-Give the artwork's artist (full name), its own title (no artist, gallery, size, price or "print" wording),
+Give the artwork's artist (full name only: no dates, nationality or brackets), its own title (no artist, gallery, size, price or "print" wording),
 creation year and medium if any line states them. Use "" for anything no line states. Two years in brackets
 beside the artist's name, e.g. "(Japan, 1922-1994)", are the artist's life, NOT the work's date. A medium
 cut off mid-phrase (e.g. "Oil on |") is not stated: use "". Reply ONLY with JSON:
@@ -446,7 +446,7 @@ class Identifier:
                     description=m.get("ImageDescription", "")[:600], artist=m.get("Artist", "")[:200],
                     date=m.get("DateTimeOriginal", "")), required=("title", "artist"))
                 ident.facts_source = "commons-metadata"
-                ident.title, ident.artist = parsed["title"].strip(), parsed["artist"].strip()
+                ident.title, ident.artist = parsed["title"].strip(), clean_artist(parsed["artist"])
                 ident.date = str(parsed.get("date", "")).strip()
         else:
             hits = self._corroborate(hits, cands)
@@ -468,7 +468,7 @@ class Identifier:
             caps = "\n".join(_web_line(h.reference_obj) for h in hits)  # type: ignore[attr-defined]
             parsed = self.vlm.ask_json(WEB_FACTS_PROMPT.format(captions=caps), required=("artist", "title"))
             ident.facts_source = "web-captions"
-            ident.title, ident.artist = parsed["title"].strip(), parsed["artist"].strip()
+            ident.title, ident.artist = parsed["title"].strip(), clean_artist(parsed["artist"])
             ident.date, ident.medium = str(parsed.get("date", "")).strip(), str(parsed.get("medium", "")).strip()
             ident.evidence["web_references"] = [_web_line(h.reference_obj) for h in hits]  # type: ignore[attr-defined]
             # independent corroboration 1: the caption's artist is the one the model saw
@@ -528,6 +528,14 @@ class Identifier:
 
 
 _DANGLING = re.compile(r"\b(on|and|with|of|in|over|en|sur|auf|su|y|et|und)\s*[|,;:.\u2026-]*\s*$|\.\.\.$|\u2026$", re.I)
+
+
+def clean_artist(name: str) -> str:
+    """A name only: captions write "Tom Lovell (American, 1909-1997)" or "Eyvind Earle, 1916-2000"; the
+    bracket or trailing dates are the artist's facts, which come from Wikidata, not part of the name."""
+    name = re.sub(r"\s*\([^)]*\)", "", str(name or ""))
+    name = re.sub(r"[\s,]+(b\.\s*|c\.\s*)?\d{4}(\s*[-\u2013]\s*\d{4})?\s*$", "", name)
+    return re.sub(r"\s+", " ", name).strip(" ,;")
 
 
 def check_facts(ident) -> dict:

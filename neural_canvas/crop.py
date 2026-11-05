@@ -16,9 +16,10 @@ for every genre (Sir's rule, 2026-11-04):
    landscape gives up foreground before sky and keeps its horizon off the centre line; faces and
    essential subjects keep out of the bottom-right corner, where the placard is printed.
 
-When the best window still cuts an essential subject or a principal head, the frame is a DETAIL of
-the work: ``detail`` is set, the reasons are listed, and the label says "(detail)". It is delivered as
-the best crop available, never blocked and never padded.
+When the best window still cuts the MAIN subject (the top-importance essential subject keeps less
+than ``detail_min`` of itself) or a principal head, the frame is a DETAIL of the work: ``detail`` is
+set with its reasons, and the label says "(detail)". It is delivered as the best crop available,
+never blocked and never padded. Smaller cuts to other essential subjects are listed in ``warnings``.
 """
 from __future__ import annotations
 
@@ -91,7 +92,8 @@ class CropPlan:
     failures: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
     faces_kept: str = ""
-    detail: bool = False                       # the frame shows a detail: something essential is cut
+    detail: bool = False                       # the frame shows a detail: the main subject is cut
+    detail_reasons: list = field(default_factory=list)
     centroid: tuple[float, float] = (0.5, 0.5)
     centroid_window: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)   # step 2's window
     costs: dict = field(default_factory=dict)  # the chosen window's cost, term by term
@@ -102,9 +104,9 @@ class CropPlan:
 
 class Composer:
     def __init__(self, width: int, height: int, essential_min: float,
-                 card: tuple[float, float, float, float] = (0.867, 0.894, 0.99, 0.981)):
+                 card: tuple[float, float, float, float] = (0.867, 0.894, 0.99, 0.981), detail_min: float = 0.75):
         """``card`` is the placard's box as fractions of the display (bottom-right)."""
-        self.W, self.H, self.ess_min, self.card = width, height, essential_min, card
+        self.W, self.H, self.ess_min, self.card, self.detail_min = width, height, essential_min, card, detail_min
         self.A = width / height
 
     def _card_in_source(self, win):
@@ -190,12 +192,17 @@ class Composer:
         ret = {f"{i}:{s.label}": round(_retained(s.box, win), 3) for i, s in enumerate(interp.subjects)}
         warnings = [f"essential subject {s.label!r} truncated: {_retained(s.box, win):.0%} kept"
                     for s in interp.subjects if s.essential and _retained(s.box, win) < self.ess_min]
-        warnings += [f"principal head of {f.label!r} cut: {_retained(f.box, win):.0%} kept"
+        head_cuts = [f"principal head of {f.label!r} cut: {_retained(f.box, win):.0%} kept"
                      for f in heads if _retained(f.box, win) < 0.999]
+        warnings += head_cuts
+        ess = [s for s in interp.subjects if s.essential]
+        top = max((s.importance for s in ess), default=0)
+        reasons = head_cuts + [f"main subject {s.label!r}: {_retained(s.box, win):.0%} kept"
+                               for s in ess if s.importance == top and _retained(s.box, win) < self.detail_min]
         kept = sum(_retained(f.box, win) >= 0.999 for f in interp.faces)
         return CropPlan("full-bleed", tuple(round(v, 4) for v in win), px, (self.W, self.H), (0, 0), ret,
                         round(best["total"], 4), passed=True, failures=[], warnings=warnings,
-                        faces_kept=f"{kept}/{len(interp.faces)}", detail=bool(warnings),
+                        faces_kept=f"{kept}/{len(interp.faces)}", detail=bool(reasons), detail_reasons=reasons,
                         centroid=(round(cen[0], 4), round(cen[1], 4)),
                         centroid_window=tuple(round(v, 4) for v in window(o_c)),
                         costs={key: round(v, 4) for key, v in best.items()})

@@ -47,8 +47,11 @@ DEFAULTS: dict[str, Any] = {
         "id_clip_min": 0.86,
         "id_inliers_min": 25,
         "id_max_rounds": 3,
-        # crop: every essential subject must be (almost) wholly inside the visible artwork
+        # crop: an essential subject cut below this is reported in the run's warnings
         "essential_retained_min": 0.97,
+        # crop: the frame is labelled "(detail)" when the main subject keeps less than this, or a
+        # principal head is cut
+        "detail_min_retained": 0.75,
         # upscale: largest single-pass scale Real-ESRGAN x4 is trusted for
         "max_upscale": 4.0,
         # placard: minimum text contrast (WCAG ratio); overlap with essential subjects must be zero

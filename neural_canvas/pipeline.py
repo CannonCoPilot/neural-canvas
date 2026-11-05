@@ -103,7 +103,8 @@ class Docent:
         cw, ch = card_size(dsp["placard_scale"], self.grid)
         m = card_margin(dsp["placard_scale"], self.grid)
         self.composer = Composer(W, H, cfg.thresholds["essential_retained_min"],
-                                 card=((W - m - cw) / W, (H - m - ch) / H, (W - m) / W, (H - m) / H))
+                                 card=((W - m - cw) / W, (H - m - ch) / H, (W - m) / W, (H - m) / H),
+                                 detail_min=cfg.thresholds["detail_min_retained"])
         self._upscaler = None
         self.photos = GooglePhotos(cfg["google_photos"], cfg.path("state_dir"))
         self.registry = ArtworkRegistry(cfg.path("state_dir"))
