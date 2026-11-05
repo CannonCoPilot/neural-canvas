@@ -23,3 +23,6 @@ var/
 config.yaml
 .claude/scratch/
 neural_canvas.egg-info/
+
+# API keys (Sir, 2026-11-05): read at runtime, never committed
+docs/keys/

@@ -63,6 +63,8 @@ DEFAULTS: dict[str, Any] = {
         "wikidata_api": "https://www.wikidata.org/w/api.php",
         # Imify's bundled SearXNG: a second free text-to-image engine beside DuckDuckGo ("" = off)
         "searxng_url": "http://127.0.0.1:8888",
+        # "site: key" lines (europeana, harvard, smithsonian ...); outside every repo, read at run time
+        "api_keys_path": str(Path.home() / "Claude" / "Project_Aion" / ".claude" / "secrets" / "neural-canvas-api-keys.txt"),
     },
     # free reverse-image arm: the local Imify service (~/Claude/Staging/verified/imify/run-imify.sh)
     "imify": {"enabled": True, "url": "http://127.0.0.1:8890", "timeout_s": 90, "num_results": 40},

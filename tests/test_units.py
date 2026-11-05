@@ -609,9 +609,10 @@ def test_titles_dates_and_media_agree_across_wording():
 
 def test_one_vote_per_institution():
     from neural_canvas.catalogue import institution
-    assert institution("https://images.nga.gov/x") == institution("https://www.nga.gov/y") == "nga.gov"
-    assert institution("artic") == institution("https://www.artic.edu/artworks/1") == "artic.edu"
-    assert institution("https://www.vam.ac.uk/item/O1") == "vam.ac.uk"
+    assert institution("https://images.nga.gov/x") == institution("https://www.nga.gov/y") == "nga"
+    assert institution("artic") == institution("https://www.artic.edu/artworks/1") == "artic"
+    assert institution("https://www.vam.ac.uk/item/O1") == "vam"
+    assert institution("https://www.meisterdrucke.us/x") == institution("https://www.meisterdrucke.uk/y")
 
 
 def _rec(source, title, **kw):

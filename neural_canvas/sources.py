@@ -106,6 +106,29 @@ _RECORD_PATH = re.compile(r"/(collections?|artworks?|objects?|object-page|kunstw
                           r"painting|art-object|fotoweb|catalog|catalogue|detail|item)s?\b", re.I)
 
 
+# Sir, 2026-11-05: Wikipedia and Wikimedia Commons count, and so does Meisterdrucke (a fine-art print
+# publisher whose pages carry catalogue-style captions)
+ALSO_RULING = ("wikipedia.org", "commons.wikimedia.org", "meisterdrucke")
+
+
+def rulable(url: str, artist: str = "", living: bool = False, linked: bool = False) -> bool:
+    """May this page's statements count toward a ruling? Curated and institutional pages; Wikipedia,
+    Commons and Meisterdrucke (Sir's list); an artist's foundation or estate; and, for a LIVING artist,
+    the artist's own site (a host that carries the artist's surname). An unlisted museum-looking host
+    counts only when a catalogue links to it (``linked``): found by search, "gallery" is often a shop."""
+    if classify(url) == "curated" or (linked and institutional(url)):
+        return True
+    host = urlparse(url or "").netloc.lower()
+    if any(d in host for d in ALSO_RULING):
+        return True
+    sur = re.sub(r"[^a-z]", "", (artist or "").split()[-1].lower()) if artist else ""
+    if sur and len(sur) >= 3 and sur in re.sub(r"[^a-z]", "", host):
+        if re.search(r"foundation|stiftung|fondation|fundacion|estate|trust", host + urlparse(url).path, re.I):
+            return True
+        return living and classify(url) not in ("social", "blog", "market")
+    return False
+
+
 def institutional(url: str) -> bool:
     """A page that speaks for an institution: a curated domain, or an unlisted one (reached from a
     catalogue's own link, never from a search) whose host or path is a museum or collection record."""

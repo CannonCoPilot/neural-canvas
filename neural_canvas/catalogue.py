@@ -27,7 +27,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import asdict, dataclass, field
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import numpy as np
 import requests
@@ -35,7 +35,7 @@ from PIL import Image
 
 from .matching import fetch_image, geometric_inliers
 from .references import file_thumb
-from .sources import classify, institutional, non_title
+from .sources import classify, institutional, non_title, rulable
 
 log = logging.getLogger(__name__)
 UA = "neural-canvas/1.0 (+https://github.com/CannonCoPilot/neural-canvas)"
@@ -43,12 +43,11 @@ LANGS = "en|de|fr|nl|it|es|ja|da|sv|no|nb|fi|cs|ru|pl|pt"
 UNAVAILABLE = {
     "Getty ULAN": "server-side TLS failure on vocab.getty.edu (2026-11-05)",
     "Rijksmuseum": "collection API retired (HTTP 410)",
-    "Harvard Art Museums": "free API key needed (docs.harvardartmuseums.org)",
-    "Europeana": "free API key needed (europeana.eu/en/apis)",
-    "RKD": "free API registration needed (rkd.nl)",
-    "Smithsonian Open Access": "free api.data.gov key needed (DEMO_KEY is throttled)",
+    "Smithsonian Open Access": "free api.data.gov key needed (https://api.data.gov/signup/)",
     "Norman Rockwell Museum": "no programmatic access (blocks automated requests)",
 }
+RKD_ARTISTS = "https://api.rkd.triply.cc/datasets/rkd/RKD-SDO-Knowledge-Graph/services/Virtuoso/sparql"
+RKD_WORKS = "https://api.rkd.triply.cc/datasets/rkd/RKD-Knowledge-Graph/services/SPARQL/sparql"
 STOP = {"the", "and", "with", "von", "van", "der", "die", "das", "les", "des", "del", "della", "of", "a", "an",
         "le", "la", "de", "du", "in", "on", "at", "en", "et", "und", "im", "am", "au", "aux"}
 DEMONYM = {"american": "united states", "french": "france", "german": "germany", "british": "united kingdom",
@@ -142,10 +141,13 @@ def institution(url_or_source: str) -> str:
     """One vote per institution: subdomains and the API of a museum are the museum (images.nga.gov =
     nga.gov; the Art Institute's API = artic.edu)."""
     s = _SAME_INSTITUTION.get(url_or_source, url_or_source)
+    if ":" in s and "://" not in s:
+        return s                                   # an aggregator's provider key ("europeana:<museum>")
     host = (urlparse(s).netloc or s).lower().removeprefix("www.")
     parts = host.split(".")
     n = 3 if len(parts) >= 3 and parts[-2] in ("co", "ac", "gov", "org", "com", "edu") and len(parts[-1]) == 2 else 2
-    return ".".join(parts[-n:])
+    reg = parts[-n:]
+    return reg[0] if len(reg) > 1 else host        # the name without its country domain: meisterdrucke.us = .uk
 
 
 @dataclass
@@ -168,6 +170,7 @@ class Record:
     artist_died: str = ""
     artist_nationality: str = ""
     text: str = ""               # an institution page's own text (folded): it supports what it states
+    authority: bool = False      # an artist authority record: rules the artist's life, never the work
 
     def states(self, value: str) -> bool:
         """An institution page supports a fact its text states (all of the value's significant words)."""
@@ -183,6 +186,8 @@ class Record:
 class Catalogue:
     def __init__(self, identifier, thresholds: dict):
         self.idf, self.t = identifier, thresholds
+        self.cfg = getattr(identifier, "cfg", None)
+        self._apikeys: dict | None = None
         self.wiki, self.emb = identifier.wiki, identifier.emb
         self.s = requests.Session()
         self.s.headers["User-Agent"] = UA
@@ -210,6 +215,158 @@ class Catalogue:
             log.info("catalogue %s failed: %s", url[:80], e)
             return {}
 
+    def keys(self) -> dict:
+        """API keys from the secrets file ("site: key" lines); never logged."""
+        if self._apikeys is None:
+            self._apikeys = {}
+            path = (self.cfg["sources"].get("api_keys_path") if self.cfg else "") or ""
+            try:
+                for line in open(path, encoding="utf-8"):
+                    name, sep, val = line.strip().partition(":")
+                    if sep and val.strip() and not name.startswith("#"):
+                        self._apikeys[name.strip().lower()] = val.strip()
+            except OSError:
+                pass
+        return self._apikeys
+
+    def _keyed(self, url: str, key: str, **params) -> dict:
+        try:
+            r = self.s.get(url, params=params, timeout=20)
+            if r.status_code != 200:
+                log.info("catalogue %s -> HTTP %s", url[:60], r.status_code)
+                return {}
+            return r.json()
+        except Exception as e:      # the key travels in the query string: never let it reach a log
+            log.info("catalogue %s failed: %s", url[:60], str(e).replace(key, "***"))
+            return {}
+
+    def _sparql(self, endpoint: str, query: str) -> list[dict]:
+        try:
+            r = self.s.post(endpoint, data={"query": query}, timeout=60,
+                            headers={"Accept": "application/sparql-results+json"})
+            r.raise_for_status()
+            return [{k: v["value"] for k, v in b.items()} for b in r.json()["results"]["bindings"]]
+        except Exception as e:
+            log.info("sparql %s failed: %s", endpoint[:60], e)
+            return []
+
+    def _rkd_artist(self, rkd_id: str) -> Record | None:
+        """RKDartists (RKD, Netherlands Institute for Art History): name, life, nationality. An authority."""
+        rows = self._sparql(RKD_ARTISTS, f"""PREFIX sdo: <https://schema.org/>
+            SELECT ?p ?o WHERE {{ <https://data.rkd.nl/artists/{int(rkd_id)}> ?p ?o .
+              VALUES ?p {{ sdo:name sdo:birthDate sdo:deathDate sdo:nationality }} }}""")
+        if not rows:
+            return None
+        v = {}
+        for r in rows:
+            v.setdefault(r["p"].rsplit("/", 1)[-1], []).append(r["o"])
+        name = (v.get("name") or [""])[0]
+        if "," in name:
+            last, first = name.split(",", 1)
+            name = f"{first.strip()} {last.strip()}"
+        yr = lambda k: (re.findall(r"\d{4}", (v.get(k) or [""])[0]) or [""])[0]
+        nat = next((n for n in v.get("nationality", []) if not n.startswith("http") and n[:1].isupper()
+                    and fold(n) in DEMONYM), "")
+        born, died = yr("birthDate"), yr("deathDate")
+        return Record("rkd.nl", f"https://rkd.nl/artists/{rkd_id}", "", [], name,
+                      f"{nat}, {born}–{died}".strip(", –"), verified_by="Wikidata P650", authority=True,
+                      artist_born=born, artist_died=died, artist_nationality=nat)
+
+    def _rkd_work(self, rkd_img: str, verified_by: str) -> Record | None:
+        """RKDimages: the work's titles (several languages) and production date."""
+        rows = self._sparql(RKD_WORKS, f"""PREFIX crm: <http://www.cidoc-crm.org/cidoc-crm/>
+            SELECT ?title ?begin ?end WHERE {{ BIND(<https://data.rkd.nl/images/{int(rkd_img)}> AS ?w)
+              OPTIONAL {{ ?w crm:P1_is_identified_by ?a . ?a a crm:E33_E41_Linguistic_Appellation ; crm:P190_has_symbolic_content ?title }}
+              OPTIONAL {{ ?w crm:P108i_was_produced_by ?p . ?p crm:P4_has_time-span ?ts .
+                         ?ts crm:P82a_begin_of_the_begin ?begin ; crm:P82b_end_of_the_end ?end }} }} LIMIT 20""")
+        titles = list(dict.fromkeys(r["title"] for r in rows if r.get("title")))
+        if not titles:
+            return None
+        b = next((r for r in rows if r.get("begin")), {})
+        lo, hi = (re.findall(r"\d{4}", b.get("begin", "")) or [""])[0], (re.findall(r"\d{4}", b.get("end", "")) or [""])[0]
+        date = lo if lo == hi else (f"{lo}–{hi}" if lo and hi else lo or hi)
+        return Record("rkd.nl", f"https://rkd.nl/images/{rkd_img}", titles[0], titles[1:], date=date, verified_by=verified_by)
+
+    def _wikipedia(self, page_title: str, verified_by: str, img=None, img_vec=None, lang: str = "en") -> Record | None:
+        d = self._get(f"https://{lang}.wikipedia.org/w/api.php", action="query", titles=page_title, prop="extracts|pageimages",
+                      explaintext=1, piprop="original", redirects=1, format="json")
+        page = next(iter(((d.get("query") or {}).get("pages") or {}).values()), {})
+        if not page or "missing" in page or not page.get("extract"):
+            return None
+        image = (page.get("original") or {}).get("source", "")
+        clip = inl = 0
+        if img is not None:                       # reached by search: its picture must be this one
+            ok, clip, inl = self._verify(img, img_vec, image)
+            if not ok:
+                return None
+        return Record("wikipedia.org", f"https://{lang}.wikipedia.org/wiki/{quote(page['title'].replace(' ', '_'))}",
+                      page["title"], [], image_url=image, verified_by=verified_by, clip=clip, inliers=inl,
+                      text=fold(page["extract"][:60000]))
+
+    def _commons(self, file: str, verified_by: str) -> Record | None:
+        d = self._get("https://commons.wikimedia.org/w/api.php", action="query", titles="File:" + file, prop="imageinfo",
+                      iiprop="extmetadata|url", iiurlwidth=800, format="json")
+        page = next(iter(((d.get("query") or {}).get("pages") or {}).values()), {})
+        info = (page.get("imageinfo") or [{}])[0]
+        meta = info.get("extmetadata") or {}
+        def val(k):   # Commons fields carry template residue ("date QS:P571,+1890"): strip it
+            v = html.unescape(re.sub(r"<[^>]+>", " ", str((meta.get(k) or {}).get("value", ""))))
+            return re.sub(r"\s+", " ", re.sub(r"\b(?:title|date)?\s*QS:\S+(?:\s+\S*\+\S+)?", " ", v)).strip()
+        title = re.sub(r"\s+", " ", val("ObjectName"))
+        if not (title or meta):
+            return None
+        text = fold(" ".join(val(k) for k in meta))
+        return Record("commons.wikimedia.org", f"https://commons.wikimedia.org/wiki/File:{quote(file)}",
+                      "" if non_title(title) else title, [], re.sub(r"\s+", " ", val("Artist"))[:120], "",
+                      val("DateTimeOriginal")[:40], "", "", "", info.get("thumburl", ""), verified_by, text=text)
+
+    def _europeana(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
+        key = self.keys().get("europeana")
+        if not key:
+            return []
+        self.consulted.append("Europeana")
+        for q in queries[:4]:
+            d = self._keyed("https://api.europeana.eu/record/v2/search.json", key, wskey=key, query=q, rows=12,
+                            media="true", qf="TYPE:IMAGE")
+            for x in d.get("items") or []:
+                creator = " ".join(x.get("dcCreator") or [])
+                if surname not in fold(creator):
+                    continue
+                url = (x.get("edmIsShownBy") or x.get("edmPreview") or [""])[0]
+                ok, sim, inl = self._verify(img, img_vec, url)
+                if ok:
+                    prov = (x.get("dataProvider") or ["Europeana"])[0]
+                    return [Record(f"europeana:{fold(prov)}", x.get("guid", ""), (x.get("title") or [""])[0], [], creator,
+                                   "", (x.get("year") or [""])[0], "", prov, "", url, "image", sim, inl)]
+        return []
+
+    def _harvard(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
+        key = self.keys().get("harvard")
+        if not key:
+            return []
+        self.consulted.append("Harvard Art Museums")
+        for q in queries[:4]:
+            d = self._keyed("https://api.harvardartmuseums.org/object", key, apikey=key, q=q, size=10, hasimage=1)
+            for x in d.get("records") or []:
+                people = " ".join(p.get("name", "") for p in x.get("people") or [])
+                if surname not in fold(people) or not x.get("primaryimageurl"):
+                    continue
+                ok, sim, inl = self._verify(img, img_vec, x["primaryimageurl"] + "?height=800")
+                if ok:
+                    bio = next((p.get("displaydate", "") for p in x.get("people") or [] if surname in fold(p.get("name", ""))), "")
+                    return [Record("harvardartmuseums.org", x.get("url", ""), x.get("title", ""), [], people, bio,
+                                   x.get("dated", ""), x.get("medium") or "", "Harvard Art Museums", x.get("style") or "",
+                                   x["primaryimageurl"], "image", sim, inl)]
+        return []
+
+    def _artist_living(self, artist: str) -> tuple[bool, str]:
+        """(living, artist QID). An artist no catalogue knows, or one with no recorded death, may be living."""
+        aq = self.wiki.find_artist(artist) if artist else None
+        if not aq:
+            return True, ""
+        ent = self.wiki.entities([aq]).get(aq, {})
+        return not self.wiki.claim_year(ent, "P570"), aq
+
     # ── Wikidata ───────────────────────────────────────────────────────────
     def _wikidata_items(self, img, img_vec, artist: str, ident: dict) -> list[str]:
         """Catalogue items of THIS picture: the identification's own item, else the artist's catalogued
@@ -232,7 +389,7 @@ class Catalogue:
 
     def _wikidata_record(self, qid: str) -> tuple[Record, dict]:
         d = self.wiki._get(self.wiki.wikidata_api, {"action": "wbgetentities", "ids": qid,
-                                                    "props": "labels|aliases|claims", "languages": LANGS})
+                                                    "props": "labels|aliases|claims|sitelinks", "languages": LANGS})
         ent = (d.get("entities") or {}).get(qid, {})
         labels = ent.get("labels") or {}
         en = (labels.get("en") or {}).get("value", "")
@@ -250,7 +407,10 @@ class Catalogue:
                      artist_born=f.get("artist_born", ""), artist_died=f.get("artist_died", ""),
                      artist_nationality=f.get("artist_nationality", ""))
         ids = {p: [c["mainsnak"]["datavalue"]["value"] for c in (ent.get("claims") or {}).get(p, [])
-                   if c.get("mainsnak", {}).get("datavalue")] for p in ("P3634", "P4610", "P973")}
+                   if c.get("mainsnak", {}).get("datavalue")] for p in ("P3634", "P4610", "P973", "P350")}
+        ids["enwiki"] = ((ent.get("sitelinks") or {}).get("enwiki") or {}).get("title", "")
+        ids["image_file"] = imgs[0]["mainsnak"]["datavalue"]["value"] if imgs else ""
+        ids["artist_qid"] = f.get("artist_wikidata", "")
         ids["pages"] = self._linked_pages(ent, imgs[0]["mainsnak"]["datavalue"]["value"] if imgs else "")
         return rec, ids
 
@@ -263,7 +423,7 @@ class Catalogue:
         claims = ent.get("claims") or {}
         ext = {p: [c["mainsnak"]["datavalue"]["value"] for c in cs if c.get("mainsnak", {}).get("datatype") == "external-id"
                    and c["mainsnak"].get("datavalue")] for p, cs in claims.items()}
-        ext = {p: v for p, v in ext.items() if v and p not in ("P3634", "P4610")}
+        ext = {p: v for p, v in ext.items() if v and p not in ("P3634", "P4610", "P350", "P650")}
         need = [p for p in ext if p not in self._formatters]
         for i in range(0, len(need), 50):
             d = self.wiki._get(self.wiki.wikidata_api, {"action": "wbgetentities", "ids": "|".join(need[i:i + 50]), "props": "claims"})
@@ -403,7 +563,7 @@ class Catalogue:
                 continue
             for r in refs:
                 host = r.domain
-                if host in seen or classify(r.page_url) != "curated":
+                if host in seen or not rulable(r.page_url, getattr(self, "_artist", ""), getattr(self, "_living", False)):
                     continue
                 ok, sim, inl = self._verify(img, img_vec, r.image_url or r.thumb_url)
                 if not ok:
@@ -417,6 +577,15 @@ class Catalogue:
                 break
         return out
 
+    def _safe(self, name: str, fn) -> list:
+        """A source that fails is recorded and skipped; it never takes the run down with it."""
+        try:
+            return fn() or []
+        except Exception as e:
+            log.warning("catalogue source %s failed: %s", name, e)
+            self.consulted.append(f"{name} (failed: {type(e).__name__})")
+            return []
+
     # ── gather + rule ─────────────────────────────────────────────────────
     def gather(self, img: Image.Image, ident: dict, leads: list[str]) -> list[Record]:
         img_vec = self.emb.embed([img])[0]
@@ -426,9 +595,23 @@ class Catalogue:
         queries = list(dict.fromkeys([f"{artist} {t}" for t in titles[:5]] + [artist]))
         recs: list[Record] = []
         self.consulted = ["Wikidata", "Art Institute of Chicago", "Metropolitan Museum", "Cleveland Museum of Art"]
+        living, artist_qid = self._artist_living(artist)
         for qid in self._wikidata_items(img, img_vec, artist, ident):
             rec, ids = self._wikidata_record(qid)
             recs.append(rec)
+            artist_qid = ids.get("artist_qid") or artist_qid
+            for v in ids.get("P350", [])[:1]:
+                r = self._rkd_work(v, f"link from Wikidata {qid}")
+                if r:
+                    recs.append(r)
+            if ids.get("enwiki"):
+                r = self._wikipedia(ids["enwiki"], f"link from Wikidata {qid}")
+                if r:
+                    recs.append(r)
+            if ids.get("image_file"):
+                r = self._commons(ids["image_file"], f"Wikidata {qid} image")
+                if r:
+                    recs.append(r)
             for v in ids.get("P4610", [])[:1]:
                 r = self._artic(v, f"link from Wikidata {qid}")
                 if r:
@@ -449,23 +632,42 @@ class Catalogue:
                     n += 1
         have = {r.source for r in recs}
         if "artic" not in have:
-            recs += self._artic_search(img, img_vec, queries, surname)
+            recs += self._safe("artic_search", lambda: self._artic_search(img, img_vec, queries, surname))
         if "met" not in have:
-            recs += self._met_search(img, img_vec, queries, surname)
-        recs += self._cleveland_search(img, img_vec, queries, surname)
-        self.consulted.append("museum and institute pages found by web search")
-        recs += self._curated_web(img, img_vec, queries, {r.source for r in recs})
+            recs += self._safe("met_search", lambda: self._met_search(img, img_vec, queries, surname))
+        recs += self._safe("cleveland_search", lambda: self._cleveland_search(img, img_vec, queries, surname))
+        recs += self._safe("europeana", lambda: self._europeana(img, img_vec, queries, surname))
+        recs += self._safe("harvard", lambda: self._harvard(img, img_vec, queries, surname))
+        if "wikipedia.org" not in {r.source for r in recs}:
+            for q in queries[:2]:
+                d = self._get("https://en.wikipedia.org/w/api.php", action="query", list="search", srsearch=q, srlimit=3, format="json")
+                hit = next((r for t in (d.get("query") or {}).get("search", [])
+                            for r in [self._wikipedia(t["title"], "image", img, img_vec)] if r), None)
+                if hit:
+                    recs.append(hit)
+                    break
+        self.consulted += ["RKD", "Wikipedia", "Wikimedia Commons", "museum, foundation and artist pages found by web search"]
+        self._living, self._artist = living, artist
+        recs += self._safe("curated_web", lambda: self._curated_web(img, img_vec, queries, {r.source for r in recs}))
+        # the artist's authority record (RKDartists via Wikidata P650): rules life and nationality only
+        if artist_qid:
+            ent = self.wiki.entities([artist_qid]).get(artist_qid, {})
+            from .references import Wikimedia
+            for c in (ent.get("claims") or {}).get("P650", [])[:1]:
+                r = self._rkd_artist(c["mainsnak"]["datavalue"]["value"])
+                if r:
+                    recs.append(r)
         # museum and institute pages on which identification itself verified the picture
         for rnd in ident.get("rounds", []):
             for m in rnd.get("confirmed_by", []):
-                if classify(m.get("page_url", "")) == "curated" and "wikidata.org" not in m.get("page_url", ""):
+                if rulable(m.get("page_url", ""), artist, living) and "wikidata.org" not in m.get("page_url", ""):
                     r = self._curated_page(m["page_url"], "image", m.get("thumb_url", ""))
                     if r:
                         r.clip, r.inliers = m.get("clip", 0.0), m.get("inliers", 0)
                         recs.append(r)
         by_source: dict[str, Record] = {}
         for r in recs:
-            key = institution(r.source)
+            key = institution(r.source) + (":authority" if r.authority else "")
             if key in by_source:                       # one vote per institution; keep the richer record
                 if not by_source[key].title and r.title:
                     by_source[key] = r
@@ -475,8 +677,14 @@ class Catalogue:
 
     def rule(self, recs: list[Record], ident: dict) -> dict:
         """Facts stated by 2+ independent curated sources; the rest is listed as unruled."""
-        pref = sorted(recs, key=lambda r: (r.source == "wikidata", r.verified_by != "image"))   # holding museums first
-        out = {"facts": {}, "support": {}, "unruled": {}, "sources": [asdict(r) for r in recs],
+        authorities = [r for r in recs if r.authority]
+        recs = [r for r in recs if not r.authority]
+        def rank(r):     # what the card prints: the holding museum's wording, then Wikidata, references last
+            if r.source in ("wikipedia.org", "commons.wikimedia.org") or "meisterdrucke" in r.source:
+                return 2
+            return 1 if r.source in ("wikidata", "rkd.nl") else 0
+        pref = sorted(recs, key=lambda r: (rank(r), r.verified_by != "image"))
+        out = {"facts": {}, "support": {}, "unruled": {}, "sources": [{k: v for k, v in asdict(r).items() if k != "text"} for r in recs],
                "consulted": self.consulted, "unavailable": UNAVAILABLE, "failures": []}
 
         def pick(name, values, agree):
@@ -519,7 +727,7 @@ class Catalogue:
         pick("movement", [(r, r.movement) for r in pref if r.movement], lambda a, b: fold(a) == fold(b))
         # the artist's life: Wikidata's years against a museum's printed biography
         wd = next((r for r in recs if r.source == "wikidata" and r.artist_born), None)
-        bios = [r for r in recs if r.artist_bio and r.source != "wikidata"]
+        bios = [r for r in recs + authorities if r.artist_bio and r.source != "wikidata"]
         if wd:
             agree = [r.source for r in bios if wd.artist_born in r.artist_bio and (not wd.artist_died or wd.artist_died in r.artist_bio)]
             agree += [r.source for r in recs if r.text and wd.artist_born and wd.artist_born in r.text
