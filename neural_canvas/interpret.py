@@ -7,6 +7,7 @@ from PIL import Image
 
 from .vlm import VLM
 
+MAX_FACE_AREA = 0.35   # fraction of the image; a larger "face" box is a whole group
 GENRES = ["landscape", "seascape", "cityscape", "portrait", "figure-group", "religious-historical",
           "genre-scene", "still-life", "animal", "interior", "abstract"]
 
@@ -86,7 +87,9 @@ def interpret(vlm: VLM, img: Image.Image, facts: dict) -> Interpretation:
     faces = []
     for f in d["faces"]:
         b = _box(f.get("box_2d")) if isinstance(f, dict) else None
-        if b:
+        # a "face" over a third of the picture is a group the model boxed whole (a choir of angels),
+        # not a head: it would gate the crop on the entire frame, so it is not taken as a face
+        if b and (b[2] - b[0]) * (b[3] - b[1]) <= MAX_FACE_AREA:
             faces.append(Subject(str(f.get("of", "")), b, 5, bool(f.get("essential"))))
     fp = d.get("focal_point") or [500, 500]
     hz = d.get("horizon_y")
