@@ -116,7 +116,8 @@ def _layout(ident: dict, scale: float, inner_w: int) -> tuple[list[tuple[str, Im
     rows = [("artist", ident["artist"]),
             ("meta", ", ".join(v for v in (ident.get("artist_nationality"), life) if v)),
             ("gap", ""),
-            ("title", ident["title"] + (f", {ident['date']}" if ident.get("date") else "")),
+            ("title", ident["title"] + (f", {ident['date']}" if ident.get("date") else "")
+             + (" (detail)" if ident.get("detail") else "")),
             ("meta", ident.get("medium", "")), ("meta", ident.get("movement", "")), ("meta", ident.get("collection", ""))]
     out, failures = [], []
     for kind, text in rows:

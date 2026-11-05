@@ -8,6 +8,7 @@ from PIL import Image
 from .vlm import VLM
 
 MAX_FACE_AREA = 0.35   # fraction of the image; a larger "face" box is a whole group
+KINDS = ("figure", "animal", "object", "region")
 GENRES = ["landscape", "seascape", "cityscape", "portrait", "figure-group", "religious-historical",
           "genre-scene", "still-life", "animal", "interior", "abstract"]
 
@@ -16,10 +17,12 @@ Verified identification (from the collection record — treat as fact): {facts}
 
 1. Classify its genre as one of: {genres}.
 2. Locate its subjects. For each give a TIGHT bounding box as [x0, y0, x1, y1] in coordinates
-   normalised to 0-1000 over the full image width and height (x right, y down), an importance
-   1-5, and "essential": true only for elements whose loss would change what the work is about
-   (the protagonists, the focal event, faces of main figures). Background, sky, ground and
-   framing elements are never essential. At most 6 essential subjects.
+   normalised to 0-1000 over the full image width and height (x right, y down), its "kind" (one of
+   "figure" for a person or a group of people, "animal", "object" for a bounded thing, "region"
+   for an area: sky, ground, water, foliage, background), an importance 1-5, and "essential": true
+   only for elements whose loss would change what the work is about (the protagonists, the focal
+   event, faces of main figures). Box a figure from the top of the head to the feet, including
+   what it holds. Regions and framing elements are never essential. At most 6 essential subjects.
 3. Locate every visible FACE, human or animal, with a TIGHT box around the head (same 0-1000
    coordinates), the label of the subject it belongs to, and "essential": true when that subject is
    essential. Include small and distant faces; give [] if there are none.
@@ -31,7 +34,7 @@ Verified identification (from the collection record — treat as fact): {facts}
    historical claim beyond the verified identification; everything else must be visible in the image.
 Reply ONLY with JSON:
 {{"genre": "...", "scene": "...", "artistic_intent": "...", "focal_point": [x, y], "horizon_y": null,
-  "subjects": [{{"label": "...", "box_2d": [x0, y0, x1, y1], "importance": 3, "essential": false}}],
+  "subjects": [{{"label": "...", "kind": "figure", "box_2d": [x0, y0, x1, y1], "importance": 3, "essential": false}}],
   "faces": [{{"of": "subject label", "box_2d": [x0, y0, x1, y1], "essential": true}}],
   "label_text": "..."}}"""
 
@@ -42,6 +45,7 @@ class Subject:
     box: tuple[float, float, float, float]   # fractions of width/height, x0 y0 x1 y1
     importance: int
     essential: bool
+    kind: str = "object"     # figure | animal | object | region; a face is a "head"
 
 
 @dataclass
@@ -78,8 +82,9 @@ def interpret(vlm: VLM, img: Image.Image, facts: dict) -> Interpretation:
     for s in d.get("subjects") or []:
         b = _box(s.get("box_2d"))
         if b:
+            kind = str(s.get("kind", "")).strip().lower()
             subjects.append(Subject(str(s.get("label", "")), b, int(s.get("importance") or 1),
-                                    bool(s.get("essential"))))
+                                    bool(s.get("essential")), kind if kind in KINDS else "object"))
     if not subjects:
         raise ValueError("interpretation located no subjects")
     if not isinstance(d.get("faces"), list):
@@ -90,7 +95,7 @@ def interpret(vlm: VLM, img: Image.Image, facts: dict) -> Interpretation:
         # a "face" over a third of the picture is a group the model boxed whole (a choir of angels),
         # not a head: it would gate the crop on the entire frame, so it is not taken as a face
         if b and (b[2] - b[0]) * (b[3] - b[1]) <= MAX_FACE_AREA:
-            faces.append(Subject(str(f.get("of", "")), b, 5, bool(f.get("essential"))))
+            faces.append(Subject(str(f.get("of", "")), b, 5, bool(f.get("essential")), "head"))
     fp = d.get("focal_point") or [500, 500]
     hz = d.get("horizon_y")
     genre = str(d.get("genre", "")).lower().strip()

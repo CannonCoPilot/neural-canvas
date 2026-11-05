@@ -19,68 +19,121 @@ def _interp(subjects, genre="genre-scene", faces=(), focal=(0.5, 0.5)):
     return Interpretation(genre, "", "", focal, None, subjects, "", list(faces))
 
 
-def test_full_bleed_keeps_essential_and_is_16x9():
-    img = _img(2000, 1500)   # 4:3 → crop vertically
-    plan = Composer(3840, 2160, 0.97).plan(img, _interp([Subject("face", (0.4, 0.05, 0.6, 0.25), 5, True)]))
-    assert plan.passed and plan.mode == "full-bleed"
-    x0, y0, x1, y1 = plan.window_px
-    assert abs((x1 - x0) / (y1 - y0) - 16 / 9) < 0.01
-    assert plan.window[1] <= 0.05 + 1e-6            # slid up to keep the face
-
-
 def _is_16x9_full_bleed(plan):
     x0, y0, x1, y1 = plan.window_px
     return plan.mode == "full-bleed" and plan.art_size == (3840, 2160) and abs((x1 - x0) / (y1 - y0) - 16 / 9) < 0.01
 
 
-def test_a_tall_work_is_cropped_to_fill_the_screen_never_matted_and_keeps_the_face():
-    img = _img(1000, 1500)
-    body = Subject("figure", (0.3, 0.1, 0.7, 0.95), 5, True)
-    face = Subject("figure", (0.42, 0.12, 0.58, 0.24), 5, True)
-    plan = Composer(3840, 2160, 0.97).plan(img, _interp([body], faces=[face]))
-    assert plan.passed and _is_16x9_full_bleed(plan)
-    assert plan.window[1] <= 0.12 - 0.01 and plan.window[3] >= 0.24 + 0.01        # the face is inside
-    assert plan.warnings and "truncated" in plan.warnings[0]                         # and the cut is reported
+def test_the_window_keeps_the_short_side_whole_and_is_16x9():
+    for w, h in ((2000, 1500), (1000, 1500), (4000, 1000)):
+        plan = Composer(3840, 2160, 0.97).plan(_img(w, h), _interp([Subject("thing", (0.4, 0.4, 0.6, 0.6), 3, True)]))
+        assert plan.passed and _is_16x9_full_bleed(plan)
+        x0, y0, x1, y1 = plan.window_px
+        assert (x1 - x0 == w) if w / h < 16 / 9 else (y1 - y0 == h)
+
+
+def test_the_window_centres_on_the_importance_weighted_centroid():
+    subs = [Subject("big", (0.60, 0.4, 0.66, 0.6), 4, True), Subject("small", (0.70, 0.4, 0.74, 0.6), 1, False)]
+    plan = Composer(3840, 2160, 0.97).plan(_img(4000, 1000), _interp(subs))
+    cx = (4 * 1.5 * 0.63 + 1 * 0.72) / 7                       # essential subjects count 1.5x
+    assert abs(plan.centroid[0] - cx) < 1e-3 and abs((plan.window[0] + plan.window[2]) / 2 - cx) < 0.01
+    assert not plan.detail and plan.costs["cut"] == 0
+
+
+def test_a_tall_figure_keeps_head_and_body_and_gives_up_the_sky():
+    # Summer Morning: a woman standing in a meadow under trees, the canvas far taller than the screen
+    img = _img(1035, 1535)
+    subs = [Subject("young woman", (0.445, 0.24, 0.855, 0.84), 5, True, "figure"),
+            Subject("sack of greenery", (0.38, 0.5, 0.6, 0.685), 4, False, "object"),
+            Subject("meadow", (0.0, 0.18, 1.0, 1.0), 3, False, "region"),
+            Subject("trees", (0.0, 0.0, 1.0, 0.44), 3, False, "region"),
+            Subject("sunlight", (0.0, 0.0, 1.0, 0.3), 2, False, "region")]
+    face = Subject("young woman", (0.605, 0.25, 0.695, 0.335), 5, True, "head")
+    plan = Composer(3840, 2160, 0.97).plan(img, _interp(subs, faces=[face]))
+    y0, y1 = plan.window[1], plan.window[3]
+    assert y0 <= 0.25 - 0.04 * (y1 - y0) and y1 > 0.6         # her head with headroom, cut below the hands
     assert plan.faces_kept == "1/1"
+    assert plan.detail and "young woman" in plan.warnings[0]   # her feet cannot fit: a detail, said so
 
 
-def test_essential_faces_that_cannot_share_one_window_block_the_run():
-    img = _img(1000, 2000)                  # the 16:9 window is 28% of the height
-    faces = [Subject("a", (0.4, 0.05, 0.5, 0.12), 5, True), Subject("b", (0.4, 0.85, 0.5, 0.92), 5, True)]
-    plan = Composer(3840, 2160, 0.97).plan(img, _interp([Subject("a", (0.3, 0.0, 0.7, 1.0), 5, True)], faces=faces))
-    assert not plan.passed and "essential face" in plan.failures[0] and _is_16x9_full_bleed(plan)
+def test_principal_faces_that_cannot_share_a_window_make_a_detail_not_a_block():
+    faces = [Subject("a", (0.4, 0.05, 0.5, 0.12), 5, True, "head"), Subject("b", (0.4, 0.85, 0.5, 0.92), 5, True, "head")]
+    plan = Composer(3840, 2160, 0.97).plan(_img(1000, 2000), _interp([Subject("a", (0.3, 0.0, 0.7, 1.0), 5, True, "figure")],
+                                                                      faces=faces))
+    assert plan.passed and plan.detail and _is_16x9_full_bleed(plan)
+    assert any("principal head" in w for w in plan.warnings)
+    assert plan.faces_kept == "1/2"                             # one head whole, not two halves
 
 
-def test_a_crowd_marked_essential_does_not_gate_the_crop_on_every_face():
-    img = _img(2326, 1586)
-    subs = [Subject("Jesus", (0.07, 0.54, 0.83, 0.99), 5, True), Subject("angels", (0.0, 0.0, 1.0, 0.85), 4, True)]
-    faces = [Subject("Jesus", (0.3, 0.62, 0.38, 0.72), 5, True), Subject("angels", (0.5, 0.02, 0.56, 0.08), 5, True)]
-    plan = Composer(3840, 2160, 0.97).plan(img, _interp(subs, faces=faces))
-    assert plan.passed and plan.window[1] <= 0.62 - 0.01 and plan.window[3] >= 0.72 + 0.01   # Jesus's face kept
+def test_a_crowd_marked_essential_still_keeps_the_principal_face():
+    subs = [Subject("Jesus", (0.07, 0.54, 0.83, 0.99), 5, True, "figure"),
+            Subject("angels", (0.0, 0.0, 1.0, 0.85), 4, True, "figure")]
+    faces = [Subject("Jesus", (0.3, 0.62, 0.38, 0.72), 5, True, "head"), Subject("angels", (0.5, 0.02, 0.56, 0.08), 5, True, "head")]
+    plan = Composer(3840, 2160, 0.97).plan(_img(2326, 1586), _interp(subs, faces=faces))
+    assert plan.window[1] <= 0.62 and plan.window[3] >= 0.72   # Jesus's face kept
 
 
-def test_a_wide_panorama_is_cropped_and_keeps_the_more_important_subject():
-    img = _img(4000, 1000)
+def test_a_wide_panorama_keeps_the_more_important_subject():
     subs = [Subject("minor", (0.02, 0.3, 0.1, 0.7), 2, False), Subject("main", (0.8, 0.3, 0.95, 0.7), 5, True)]
-    plan = Composer(3840, 2160, 0.97).plan(img, _interp(subs))
-    assert plan.passed and _is_16x9_full_bleed(plan)
-    assert _retained(subs[1].box, plan.window) == 1.0 and _retained(subs[0].box, plan.window) == 0.0
+    plan = Composer(3840, 2160, 0.97).plan(_img(4000, 1000), _interp(subs))
+    assert _retained(subs[1].box, plan.window) == 1.0 and not plan.detail
 
 
-def test_a_landscape_gives_up_height_from_the_bottom_first():
-    img = _img(1600, 1600)
-    plan = Composer(3840, 2160, 0.97).plan(img, _interp([Subject("hills", (0.0, 0.3, 1.0, 0.7), 3, False)],
-                                                       genre="landscape", focal=(0.5, 0.5)))
-    assert plan.passed and plan.window[1] < 1 - plan.window[3]                      # more cut below than above
+def test_a_landscape_keeps_its_horizon_off_the_centre_line():
+    subs = [Subject("sky", (0.0, 0.0, 1.0, 0.5), 2, False, "region"), Subject("fields", (0.0, 0.5, 1.0, 1.0), 2, False, "region")]
+    it = Interpretation("landscape", "", "", (0.5, 0.5), 0.5, subs, "", [])
+    plan = Composer(3840, 2160, 0.97).plan(_img(1600, 1600), it)
+    hz = (0.5 - plan.window[1]) / (plan.window[3] - plan.window[1])
+    assert abs(hz - 0.5) >= 1 / 6 - 0.01 and plan.window[1] < 1 - plan.window[3]   # off centre; sky kept
 
 
 def test_the_crop_keeps_faces_out_of_the_label_corner():
     img = _img(1600, 1200)                  # 4:3: the window slides vertically over 25% of the height
-    face = Subject("man", (0.88, 0.70, 0.95, 0.78), 5, True)
-    plan = Composer(3840, 2160, 0.97).plan(img, _interp([Subject("man", (0.8, 0.6, 1.0, 1.0), 5, True)], faces=[face]))
+    face = Subject("man", (0.88, 0.70, 0.95, 0.78), 5, True, "head")
+    plan = Composer(3840, 2160, 0.97).plan(img, _interp([Subject("man", (0.8, 0.6, 1.0, 1.0), 5, True, "figure")], faces=[face]))
     win = plan.window
-    fy0 = (face.box[1] - win[1]) / (win[3] - win[1])
-    assert plan.passed and fy0 < 0.894 - 0.05                                       # well above the card
+    fy1 = (face.box[3] - win[1]) / (win[3] - win[1])
+    assert fy1 < 0.894                                         # the face ends above the card
+
+
+def _noise_art(w, h, seed=0):
+    return np.random.default_rng(seed).integers(40, 220, (h, w, 3), dtype=np.uint8)
+
+
+def test_a_caption_band_is_trimmed_with_its_lettering():
+    from neural_canvas.borders import trim_borders
+    a = np.zeros((1750, 1000, 3), dtype=np.uint8)
+    a[:1518] = _noise_art(1000, 1518)
+    for x in range(300, 740, 40):                              # white "letters" inside the black band
+        a[1600:1640, x:x + 22] = 255
+    img, rec = trim_borders(Image.fromarray(a))
+    assert rec["cut"] == {"top": 0, "bottom": 232, "left": 0, "right": 0} and img.size == (1000, 1518)
+
+
+def test_a_painted_ground_is_not_a_border():
+    from neural_canvas.borders import trim_borders
+    a = np.full((1200, 900, 3), 250, dtype=np.uint8)           # a vignette: a figure drawn on white paper
+    rng = np.random.default_rng(2)
+    for y in range(80, 1150):
+        x0 = int(200 + 150 * np.sin(y / 60) + rng.integers(0, 40)); x1 = int(700 - 120 * np.cos(y / 45))
+        a[y, x0:x1] = rng.integers(30, 200, (x1 - x0, 3))
+    a[30:80, 420:470] = 90                                     # a hat above the figure
+    _, rec = trim_borders(Image.fromarray(a))
+    assert rec["cut"] == {"top": 0, "bottom": 0, "left": 0, "right": 0}
+
+
+def test_a_coloured_edge_is_part_of_the_art():
+    from neural_canvas.borders import trim_borders
+    a = _noise_art(800, 600)
+    a[:60] = (200, 40, 40)                                     # a red band painted across the top
+    _, rec = trim_borders(Image.fromarray(a))
+    assert rec["cut"]["top"] == 0
+
+
+def test_a_detail_is_named_on_the_card():
+    from neural_canvas.placard import _layout
+    lines, fails = _layout({"artist": "Emile Claus", "title": "Summer Morning", "date": "c. 1891", "detail": True}, 0.3, 221)
+    assert "Summer Morning, c. 1891 (detail)" in [t for t, _, _ in lines] and not fails
 
 
 def test_box_normalisation_and_rejects():

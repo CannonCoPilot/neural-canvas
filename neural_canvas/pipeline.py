@@ -22,6 +22,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from .config import Config
+from .borders import trim_borders
 from .crop import Composer, CropPlan
 from .dedup import ArtworkRegistry, phash
 from .deliver import AuthRequired, GooglePhotos
@@ -150,8 +151,11 @@ class Docent:
         def done(stage):
             return resume and st.get(stage, {}).get("passed")
 
-        img = load_image(source)
-        rec["source_size"] = img.size
+        raw = load_image(source)
+        rec["source_size"] = raw.size
+        img, rec["trim"] = trim_borders(raw)      # everything below sees the artwork, not its scan border
+        if img is not raw:
+            log.info("trimmed non-art borders %s -> %s", raw.size, img.size)
         try:
             stage = "identify"
             if on_stage:
@@ -178,20 +182,23 @@ class Docent:
                 rec["status"], rec["duplicate_of"], rec["reasons"] = "duplicate", twin[0], [reason]
                 save()
                 return RunResult(run_id, "duplicate", "identify", [reason], str(rec_path), "")
-            self.registry.record(run_id, phash=phash(img), artist=facts["artist"], title=facts["title"],
+            self.registry.record(run_id, phash=phash(raw), artist=facts["artist"], title=facts["title"],
                                  status="identified")
 
             stage = "interpret"
             if on_stage:
                 on_stage(stage)
             # an interpretation made before faces were located is redone: the crop needs them
-            if not done(stage) or "faces" not in st.get(stage, {}):
+            prev = st.get(stage, {})
+            # redone when made before faces or subject kinds were located, or on a differently trimmed image
+            if not done(stage) or "faces" not in prev or any("kind" not in x for x in prev.get("subjects", [])) \
+                    or tuple(prev.get("image_box", ())) != tuple(rec["trim"]["box"]):
                 t0 = time.time()
                 it = interpret(self.vlm, img, facts)
                 fails = [] if any(s.essential for s in it.subjects) else ["no essential subject marked"]
                 fails += [] if it.label_text and len(it.label_text.split()) >= 25 else ["label paragraph too short"]
                 st[stage] = {"passed": not fails, "failures": fails, "seconds": round(time.time() - t0, 1),
-                             **it.to_dict()}
+                             "image_box": list(rec["trim"]["box"]), **it.to_dict()}
                 save()
                 if fails:
                     return block(stage, fails)
@@ -202,6 +209,7 @@ class Docent:
                 on_stage(stage)
             plan = self.composer.plan(img, it)
             st[stage] = {"passed": plan.passed, **plan.to_dict()}
+            facts["detail"] = plan.detail          # the best crop cuts something essential: say so
             save()
             if not plan.passed:
                 return block(stage, plan.failures)
@@ -253,6 +261,7 @@ class Docent:
             if deliver and (redeliver or not done(stage)):
                 old = st.get(stage, {}).get("media_item_id", "") if redeliver else ""
                 desc = f"{facts['title']}" + (f", {facts['date']}" if facts["date"] else "") + \
+                       (" (detail)" if facts.get("detail") else "") + \
                        f" — {facts['artist']}. {it.label_text}"
                 try:
                     dr = self.photos.deliver(out, desc)
@@ -289,7 +298,8 @@ class Docent:
 
 
 def _interp_from(d: dict) -> Interpretation:
-    subs = [Subject(s["label"], tuple(s["box"]), s["importance"], s["essential"]) for s in d["subjects"]]
-    faces = [Subject(f["label"], tuple(f["box"]), f["importance"], f["essential"]) for f in d.get("faces", [])]
+    subs = [Subject(s["label"], tuple(s["box"]), s["importance"], s["essential"], s.get("kind", "object"))
+            for s in d["subjects"]]
+    faces = [Subject(f["label"], tuple(f["box"]), f["importance"], f["essential"], "head") for f in d.get("faces", [])]
     return Interpretation(d["genre"], d["scene"], d["artistic_intent"], tuple(d["focal_point"]),
                           d.get("horizon_y"), subs, d.get("label_text", ""), faces)
