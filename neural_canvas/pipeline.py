@@ -186,8 +186,13 @@ class Docent:
             if not done(stage):
                 t0 = time.time()
                 cat = Catalogue(self.identifier, self.cfg.thresholds)
-                found = cat.gather(img, st["identify"], catalogue_leads(st["identify"]))
+                lead_list = catalogue_leads(st["identify"])
+                found = cat.gather(img, st["identify"], lead_list)
                 ruling = cat.rule(found, st["identify"])
+                if ruling["failures"]:          # unresolved: the SerpAPI fallback, then rule once more
+                    extra = cat.fallback(img, st["identify"], found, lead_list)
+                    if extra:
+                        ruling = cat.rule(found + extra, st["identify"])
                 st[stage] = {"passed": not ruling["failures"], "seconds": round(time.time() - t0, 1), **ruling}
                 save()
                 if ruling["failures"]:

@@ -417,6 +417,21 @@ class Identifier:
             rounds.append({"round": rnd + 1, "candidates": cands, "best_matches": [_mdict(m) for m in best],
                            **({"vision_hints": self._vision_hints} if self._vision_hints else {})})
             refuted += cands
+        # unresolved after every free tier: Google Images through SerpAPI (free plan), two searches at most
+        if self.web is not None and hasattr(self.web, "serpapi_images") and refuted:
+            for q in list(dict.fromkeys(f"{c['artist']} {c.get('title', '')}".strip() for c in refuted[:3]))[:2]:
+                log.info("  tier serpapi (fallback): %s", q)
+                try:
+                    batch = self._score(img, img_vec, self.web.serpapi_images(q), q, seen)
+                except Exception as e:
+                    log.warning("serpapi fallback for %r: %s", q, e)
+                    break
+                hits = [m for m in batch if m.confirmed]
+                if hits:
+                    ident = self._finish("serpapi", hits, batch, rounds, rnd, refuted[:5], sig, summary)
+                    if ident.status == "confirmed":
+                        return ident
+                    rounds.pop()
         return Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
                               evidence={"reason": "no reference image matched on both instruments"})
 

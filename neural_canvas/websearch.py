@@ -123,6 +123,48 @@ class WebImageSearch:
                     out.append(hit)
         return out[:limit * 2]
 
+    # ── SerpAPI: Google's results on a free plan of 250 searches a month, for unresolved works only ──
+    SERPAPI_RESERVE = 10        # searches always left untouched on the plan
+
+    def serpapi_left(self) -> int:
+        """Searches left on the SerpAPI plan, from its own account endpoint (which costs no search)."""
+        key = self._key("serpapi")
+        if not key:
+            return 0
+        try:
+            r = requests.get("https://serpapi.com/account.json", params={"api_key": key}, timeout=20)
+            r.raise_for_status()
+            return int(r.json().get("total_searches_left") or 0)
+        except Exception as e:
+            log.warning("serpapi account check failed: %s", str(e).replace(key, "***")[:200])
+            return 0
+
+    def _serpapi(self, params: dict) -> dict:
+        left = self.serpapi_left()
+        if left <= self.SERPAPI_RESERVE:
+            raise RuntimeError(f"SerpAPI monthly searches spent ({left} left, {self.SERPAPI_RESERVE} kept in reserve)")
+        key = self._key("serpapi")
+        try:
+            r = requests.get("https://serpapi.com/search.json", params={**params, "api_key": key}, timeout=60)
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as e:
+            raise RuntimeError(str(e).replace(key, "***")) from None
+
+    def serpapi_pages(self, query: str, limit: int = 20) -> list[tuple[str, str]]:
+        d = self._serpapi({"engine": "google", "q": query, "num": min(limit, 20)})
+        return [(x["link"], x.get("title", "")) for x in d.get("organic_results", []) if x.get("link", "").startswith("http")]
+
+    def serpapi_images(self, query: str, limit: int = 30) -> list[WebReference]:
+        d = self._serpapi({"engine": "google_images", "q": query})
+        out = []
+        for x in d.get("images_results", [])[:limit]:
+            img = x.get("original") or ""
+            if img.startswith("http"):
+                out.append(WebReference(x.get("title", ""), hash(img) & 0x7FFFFFFFFFFF, x.get("thumbnail") or img,
+                                        x.get("link", ""), img, {"source": "serpapi"}))
+        return out
+
     def _searx_pages(self, query: str, limit: int) -> list[tuple[str, str]]:
         r = requests.get(f"{self.searxng_url}/search", params={"q": query, "format": "json"}, timeout=30)
         r.raise_for_status()

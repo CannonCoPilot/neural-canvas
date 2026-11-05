@@ -802,17 +802,19 @@ class Catalogue:
                                    text=fold(f"{m.get('title', '')} {m.get('date', '')} {m.get('artist', '')} {m.get('origin', '')}"))]
         return []
 
-    def _web_text(self, img, img_vec, queries: list[str], have: set[str]) -> list[Record]:
+    def _web_text(self, img, img_vec, queries: list[str], have: set[str], search=None,
+                  label: str = "web search (text)") -> list[Record]:
         """Ordinary web search, as a person would run it: credible and supporting pages among the results,
         each read and verified by its own preview image."""
         web = getattr(self.idf, "web", None)
-        if web is None or not hasattr(web, "pages"):
+        search = search or (getattr(web, "pages", None) if web is not None else None)
+        if search is None:
             return []
-        self.consulted.append("web search (text)")
+        self.consulted.append(label)
         out, seen = [], set(have)
         for q in queries[:4]:
             try:
-                hits = web.pages(q, 20)
+                hits = search(q, 20)
             except Exception as e:
                 log.info("text web search %r failed: %s", q, e)
                 continue
@@ -832,6 +834,21 @@ class Catalogue:
             if sum(not x.support for x in out) >= 2:
                 break
         return out
+
+    def fallback(self, img: Image.Image, ident: dict, recs: list[Record], leads_: list[str]) -> list[Record]:
+        """For a work the ruling could not settle, and only then: Google's results through SerpAPI (a free
+        plan of 250 searches a month), at most 3 searches, read and image-verified like any other page."""
+        web = getattr(self.idf, "web", None)
+        if web is None or not hasattr(web, "serpapi_pages"):
+            return []
+        artist = ident.get("artist", "")
+        titles = [t for t in leads_ if t][:2]
+        queries = list(dict.fromkeys([f"{artist} {t}" for t in titles] + [f"{artist} painting"]))[:3]
+        img_vec = self.emb.embed([img])[0]
+        have = {institution(r.source) for r in recs}
+        self._artist = artist
+        return self._safe("serpapi", lambda: self._web_text(img, img_vec, queries, have, web.serpapi_pages,
+                                                            "Google via SerpAPI (fallback for an unresolved work)"))
 
     def _safe(self, name: str, fn) -> list:
         """A source that fails is recorded and skipped; it never takes the run down with it."""

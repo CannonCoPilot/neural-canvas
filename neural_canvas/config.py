@@ -68,7 +68,7 @@ DEFAULTS: dict[str, Any] = {
         # keyed text-search engines beside SearXNG; each is used only when its key is in the store
         "text_search": {
             "credentials_path": str(Path.home() / "Claude" / "Project_Aion" / ".claude" / "secrets" / "credentials.yaml"),
-            "providers": {"serper": "search.serper", "brave": "search.brave"},
+            "providers": {"serper": "search.serper", "brave": "search.brave", "serpapi": "search.serpapi"},
         },
     },
     # free reverse-image arm: the local Imify service (~/Claude/Staging/verified/imify/run-imify.sh)

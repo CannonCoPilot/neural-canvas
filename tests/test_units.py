@@ -807,3 +807,17 @@ def test_text_search_merges_engines_and_never_logs_a_key(caplog):
     hits = w.pages("klee", 10)
     assert [u for u, _ in hits] == ["https://a.org/1", "https://b.org/2"]
     assert "SECRET-KEY-123" not in caplog.text and "***" in caplog.text
+
+
+def test_serpapi_is_a_fallback_with_a_reserve_and_never_an_everyday_engine(monkeypatch):
+    import pytest
+    from neural_canvas.websearch import WebImageSearch
+    w = WebImageSearch(searxng_url="http://searx.test")
+    w._keys = {"serper": "", "brave": "", "serpapi": "SERP-KEY"}
+    called = []
+    w._searx_pages = lambda q, n: [("https://a.org/1", "a")]
+    monkeypatch.setattr(w, "serpapi_pages", lambda q, n=20: called.append(q) or [])
+    assert w.pages("klee") == [("https://a.org/1", "a")] and not called      # everyday search: no SerpAPI
+    monkeypatch.setattr(w, "serpapi_left", lambda: WebImageSearch.SERPAPI_RESERVE)
+    with pytest.raises(RuntimeError, match="spent"):
+        w._serpapi({"engine": "google", "q": "x"})                           # the reserve is never touched
