@@ -25,6 +25,7 @@ from PIL import Image
 
 from .matching import Embedder, fetch_image, geometric_inliers
 from .references import Reference, Wikimedia, file_thumb
+from .artsites import Arthur, Artvee
 from .imify import Imify
 from .style import StyleShortlist
 from .vision_web import VisionWebDetection
@@ -133,6 +134,8 @@ class Identifier:
         self.cache_dir.mkdir(exist_ok=True)
         self._artist_qids: dict[str, str] = {}
         self._free_sweeps = 0
+        self.artvee = Artvee(cfg.path("state_dir"), embedder)
+        self.arthur = Arthur(web) if web else None
 
     # ── catalogue sweep: an artist's whole Wikidata oeuvre, embedded once and cached ──
     def _oeuvre_vectors(self, artist_qid: str) -> tuple[list[dict], np.ndarray]:
@@ -279,6 +282,18 @@ class Identifier:
                 for ph in self._phrases[:2]:
                     q = f"{a} {ph}"
                     out.append(("web", q, lambda q=q: self.web.search(q, 20)))
+        # Artvee and Arthur.io (Sir, 2026-11-05): the picture in two large collections. Their captions are
+        # leads, never rulings. Titles first, then each likely artist's whole Artvee catalogue by embedding.
+        titled = [c for c in cands if c.get("title")]
+        insc = (self._signature.get("inscribed_title") or "").strip()
+        for q in dict.fromkeys([insc] + [c["title"] for c in titled]):
+            if len(q) >= 4:
+                out.append(("artvee", f"artvee: {q}", lambda q=q: self.artvee.search(q)))
+        for a in artists[:2]:
+            words = [c["title"] for c in titled if c["artist"] == a] + ([insc] if insc else [])
+            if self.arthur:
+                out.append(("arthur", f"arthur: {a}", lambda a=a, w=words: self.arthur.search(a, w)))
+            out.append(("artvee", f"artvee catalogue: {a}", lambda a=a: self.artvee.nearest(a, self._img_vec, 6)))
         for a in by_style[2:max(4, self._free_sweeps)]:  # four per round (cached catalogues are free)
             out.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, self._img_vec)))
         if self.web:

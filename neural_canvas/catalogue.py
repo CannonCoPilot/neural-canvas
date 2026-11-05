@@ -36,7 +36,7 @@ from PIL import Image
 
 from .matching import fetch_image, geometric_inliers
 from .references import file_thumb
-from .sources import classify, institutional, non_title, rulable
+from .sources import classify, institutional, non_title, rulable, supporting
 
 log = logging.getLogger(__name__)
 UA = "neural-canvas/1.0 (+https://github.com/CannonCoPilot/neural-canvas)"
@@ -184,6 +184,7 @@ class Record:
     artist_nationality: str = ""
     text: str = ""               # an institution page's own text (folded): it supports what it states
     authority: bool = False      # an artist authority record: rules the artist's life, never the work
+    support: bool = False        # an auction house or the press: corroborates, never counts
 
     def states(self, value: str) -> bool:
         """An institution page supports a fact its text states (all of the value's significant words)."""
@@ -732,17 +733,18 @@ class Catalogue:
                 continue
             for r in refs:
                 host = r.domain
-                if host in seen or not rulable(r.page_url, getattr(self, "_artist", ""), getattr(self, "_living", False)):
+                support = supporting(r.page_url)
+                if host in seen or not (support or rulable(r.page_url, getattr(self, "_artist", ""), getattr(self, "_living", False))):
                     continue
                 ok, sim, inl = self._verify(img, img_vec, r.image_url or r.thumb_url)
                 if not ok:
                     continue
                 rec = self._curated_page(r.page_url, "image", r.image_url, "" if non_title(r.file_title) else r.file_title)
                 if rec:
-                    rec.clip, rec.inliers = sim, inl
+                    rec.clip, rec.inliers, rec.support = sim, inl, support
                     out.append(rec)
                     seen.add(host)
-            if len(out) >= 3:
+            if sum(not x.support for x in out) >= 3:
                 break
         return out
 
@@ -853,14 +855,22 @@ class Catalogue:
     def rule(self, recs: list[Record], ident: dict) -> dict:
         """Facts stated by 2+ independent curated sources; the rest is listed as unruled."""
         authorities = [r for r in recs if r.authority]
-        recs = [r for r in recs if not r.authority]
+        corroborating = [r for r in recs if r.support]
+        recs = [r for r in recs if not r.authority and not r.support]
+        # Sir, 2026-11-05: a title the artist wrote on the work is one credible source (never a signature)
+        insc = (ident.get("inscribed_title") or "").strip()
+        if inscription_is_title(insc, ident.get("artist", "")):
+            recs.append(Record("inscription", "", insc, verified_by="written on the work"))
         def rank(r):     # what the card prints: the holding museum's wording, then Wikidata, references last
+            if r.source == "inscription":
+                return 3     # the inscription is shown after a catalogue's title, in quotes, when they differ
             if r.source in ("wikipedia.org", "commons.wikimedia.org") or "meisterdrucke" in r.source:
                 return 2
             return 1 if r.source in ("wikidata", "rkd.nl") else 0
         pref = sorted(recs, key=lambda r: (rank(r), r.verified_by != "image"))
         out = {"facts": {}, "support": {}, "unruled": {}, "sources": [{k: v for k, v in asdict(r).items() if k != "text"} for r in recs],
-               "consulted": self.consulted, "unavailable": UNAVAILABLE, "failures": []}
+               "consulted": self.consulted, "unavailable": UNAVAILABLE, "failures": [],
+               "corroborating": [{"source": r.source, "url": r.url, "title": r.title} for r in corroborating]}
 
         def pick(name, values, agree):
             for r, v in values:
@@ -937,6 +947,16 @@ class Catalogue:
         return out
 
 
+def inscription_is_title(text: str, artist: str) -> bool:
+    """A legible inscription that names the work: not a signature, initials, a date or a number."""
+    t = fold(text)
+    if not t or re.fullmatch(r"(?:[a-z]\s*){1,3}", t.replace(" ", "")):
+        return False                                    # initials ("PK", "J. M. W.")
+    names = set(fold(artist).split())
+    rest = [w for w in t.split() if w not in names and not w.isdigit()]
+    return len("".join(rest)) >= 3                      # something besides the artist's name and numbers
+
+
 def leads(ident: dict) -> list[str]:
     """Search text from identification: titles, inscriptions, the matched copies' captions and file names.
     Non-titles (board names, shop wording) are kept as search text with the furniture removed."""
@@ -949,6 +969,7 @@ def leads(ident: dict) -> list[str]:
     for t in out:
         t = re.sub(r"\b(\d+\+?\s+|ideas?|pin on|for sale|prints?|poster|paintings?|art print|wall art|fine art america|pinterest)\b", " ", t, flags=re.I)
         t = re.split(r"\s[|–—]\s", t)[0]                         # "Title | Site" -> "Title"
+        t = re.sub(r"\s*\((?:c\.\s*)?\d{4}[^)]*\)|\s+by\s+[^|]*$", " ", t)   # "Title (1920) by Artist" -> "Title"
         t = re.sub(r"\b(?=\w*\d)(?=\w*[a-z])\w{3,}\b", " ", t)   # hash fragments mix letters and digits
         t = re.sub(r"\(\s*\)", " ", t)
         t = re.sub(r"\s+", " ", t).strip(" -|,.")

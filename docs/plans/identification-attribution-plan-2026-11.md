@@ -62,8 +62,8 @@ What remains is reach: finding two credible sources for works that have them.
 | Remington catalogue raisonné (Center of the West) | Plain HTTP, `/artworks/view/<id>` | **Adapter** (Phase 2) |
 | Norman Rockwell Museum | Collection site bot-walled; `prints.nrm.org` / `store.nrm.org` load | Store pages as curated pages (Phase 2) |
 | Crystal Bridges | Main domain loads; the `.emuseum.com` mirror is walled | Curated pages (exists) |
-| Arthur.io | Cloudflare-walled; robots.txt names Claude and Anthropic | **Not used** |
-| Artvee | Loads; no medium or collection; robots.txt names Claude and Anthropic | **Lead only; no fetcher built** |
+| Arthur.io | Pages and sub-sitemaps Cloudflare-challenged; image server open; robots.txt allows `*` for search and reference (blocks AI training and named AI crawlers) | **Lead** via site-restricted image search (built) |
+| Artvee | Search and artist pages load (plain `neural-canvas/1.0` agent); robots.txt allows `*` | **Lead**: search + whole-artist catalogue by embedding, parsed with artvee-scraper (built) |
 | artera.ae | Re-hosts Artvee records | Lead only (classified commercial, built) |
 | api-evangelist profiles | README signposts, not APIs | Read once; never a source |
 | Getty ULAN | Server-side TLS failure | Unavailable (remediable) |
@@ -170,12 +170,14 @@ data into `~/Claude/Staging/` under the bulk-download policy.
 - **MCP tools** (agent D): `identify_candidates`, `catalogue_lookup`, `rule_card`, `cite`. Every
   response says what was consulted and what agreed.
 
-## 5. Decisions for Sir
+## 5. Sir's decisions (2026-11-05)
 
-1. **The artist's inscription:** can a title the artist wrote on the work count as one of the two
-   credible sources? Klee's *Giftbeeren* has no Wikidata, Commons or Zentrum Paul Klee record. Its
-   evidence is the inscription, an auction-house entry and commercial pages.
-2. **Auction houses and reputable press:** are Sotheby's and Christie's catalogue entries, and
-   magazines such as Smithsonian Magazine, credible, leads only, or corroboration that never rules?
-3. **Artvee and Arthur.io:** both name Claude and Anthropic in robots.txt. The plan honours that:
-   leads from search results only, no fetcher.
+1. **Inscriptions are credible:** a title written on the work is one credible vote, unless it is the
+   artist's name, initials, a date or a number (built: `inscription_is_title`).
+2. **Auction houses and press are leads and support:** a verified page is listed as corroboration
+   beside the ruling and never counts toward the two (built: `sources.supporting`). Auction
+   aggregators stay leads only.
+3. **Artvee and Arthur.io are pipeline tools:** built as identification tiers (`artsites.py`). Artvee
+   is read with artvee-scraper's parsers. Arthur.io's index and artist pages are Cloudflare-challenged,
+   which the pipeline does not work around; its pictures are reached through search engines that
+   indexed them, and its image server.

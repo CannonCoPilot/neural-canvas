@@ -112,6 +112,22 @@ _RECORD_PATH = re.compile(r"/(collections?|artworks?|objects?|object-page|kunstw
 ALSO_RULING = ("wikipedia.org", "commons.wikimedia.org", "meisterdrucke")
 
 
+# Sir, 2026-11-05: auction houses and reputable press are "leads and support". A verified page from one
+# is listed beside a ruling as corroboration; it never counts toward the two credible sources.
+# Auction aggregators (MutualArt, artnet, Invaluable, ...) stay leads only.
+AUCTION_HOUSES = ("christies.com", "sothebys.com", "bonhams.com", "phillips.com", "ha.com", "lempertz.com",
+                  "dorotheum.com", "doyle.com", "swanngalleries.com")
+PRESS = ("smithsonianmag.com", "nytimes.com", "theguardian.com", "washingtonpost.com", "bbc.com", "bbc.co.uk",
+         "artnews.com", "theartnewspaper.com", "apollo-magazine.com", "burlington.org.uk", "frieze.com",
+         "artforum.com", "newyorker.com", "economist.com", "ft.com", "wsj.com", "npr.org", "pbs.org")
+
+
+def supporting(url: str) -> bool:
+    """An auction house's own catalogue or a reputable publication: corroborates, never rules."""
+    host = urlparse(url or "").netloc.lower().removeprefix("www.")
+    return any(host == d or host.endswith("." + d) for d in AUCTION_HOUSES + PRESS)
+
+
 def rulable(url: str, artist: str = "", living: bool = False, linked: bool = False) -> bool:
     """May this page's statements count toward a ruling? Curated and institutional pages; Wikipedia,
     Commons and Meisterdrucke (Sir's list); an artist's foundation or estate; and, for a LIVING artist,

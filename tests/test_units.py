@@ -725,3 +725,49 @@ def test_a_paced_host_keeps_its_gap_across_threads_and_a_retry_after_pauses_them
     t = time.time(); matching._wait_turn(host, 0.0)
     assert time.time() - t >= 0.25
     assert matching._gate("upload.wikimedia.org") is matching._gate("commons.wikimedia.org") and matching._gate("example.org") is None
+
+
+def test_an_inscribed_title_is_a_vote_but_a_signature_is_not():
+    from neural_canvas.catalogue import Catalogue, inscription_is_title
+    assert inscription_is_title("Giftbeeren", "Paul Klee") and inscription_is_title("Rote Ideen", "Paul Klee")
+    assert not any(inscription_is_title(x, "Paul Klee") for x in ("Klee", "P K", "PK 1920", "1920.92", "Klee 1920", "J. M. W."))
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    wd = _rec("wikidata", "Poisonous Berries", titles=["Giftbeeren"], artist="Paul Klee")
+    page = _rec("zpk.org", "", text="paul klee 1920")
+    ru = cat.rule([wd, page], {"artist": "Paul Klee", "inscribed_title": "Giftbeeren"})
+    assert ru["facts"]["title"] == "Poisonous Berries" and "inscription" in ru["support"]["title"]
+    alone = cat.rule([page], {"artist": "Paul Klee", "inscribed_title": "Klee"})       # a signature: no vote
+    assert "title" not in alone["facts"]
+
+
+def test_an_auction_house_corroborates_and_never_counts():
+    from neural_canvas.catalogue import Catalogue
+    from neural_canvas.sources import supporting
+    assert supporting("https://www.sothebys.com/en/buy/auction/x") and supporting("https://www.smithsonianmag.com/a")
+    assert not supporting("https://www.mutualart.com/Artwork/x") and not supporting("https://www.artic.edu/artworks/1")
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    wd = _rec("wikidata", "Giftbeeren", artist="Paul Klee")
+    sale = _rec("sothebys.com", "Giftbeeren", artist="Paul Klee", support=True)
+    ru = cat.rule([wd, sale], {"artist": "Paul Klee", "inscribed_title": ""})
+    assert "title" not in ru["facts"] and ru["corroborating"][0]["source"] == "sothebys.com"
+
+
+def test_artvee_cards_and_arthur_images_read_into_references():
+    from pathlib import Path
+    from neural_canvas.artsites import Arthur, Artvee
+    from neural_canvas.catalogue import leads
+    from neural_canvas.websearch import WebReference
+    html = (Path(__file__).parent / "fixtures" / "artvee_card.html").read_text()
+    [r] = Artvee.parse(html)
+    assert r.meta["title"] == "Giftbeeren (Poisonous Berries)" and r.meta["date"] == "1920" and r.meta["artist"] == "Paul Klee"
+    assert r.thumb_url == "https://mdl.artvee.com/ft/102435ab.jpg" and r.page_url.endswith("/dl/giftbeeren-poisonous-berries/")
+    assert leads({"evidence": {"web_references": [f"file: 102435ab | page: {r.file_title} | site: artvee.com"]}}) == \
+        ["Giftbeeren (Poisonous Berries)"]
+    class Web:
+        def search(self, q, n):
+            img = "https://arthur.io/img/art/jpg/00017344a235a55cd/andrew-wyeth/airborne/small/andrew-wyeth--airborne.jpg"
+            return [WebReference("Andrew Wyeth - Airborne, 1996", 1, img, "https://arthur.io/art/andrew-wyeth/airborne", img),
+                    WebReference("pin", 2, "https://i.pinimg.com/x.jpg", "https://pinterest.com/x", "https://i.pinimg.com/x.jpg")]
+    hits = Arthur(Web()).search("Andrew Wyeth")
+    assert len(hits) == 1 and hits[0].image_url.endswith("/large/andrew-wyeth--airborne.jpg")
+    assert hits[0].meta["title_from_file"] == "airborne" and hits[0].file_title == "Andrew Wyeth - Airborne, 1996"
