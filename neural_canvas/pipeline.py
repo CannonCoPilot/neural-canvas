@@ -29,7 +29,9 @@ from .deliver import AuthRequired, GooglePhotos
 from .identify import Identifier
 from .imify import Imify
 from .interpret import Interpretation, Subject, interpret
-from .matching import Embedder
+from .colour import rebalance
+from .identify import WEB_UA
+from .matching import Embedder, fetch_image
 from .movement import classify as classify_movement
 from .placard import card_margin, card_size, compose, viewer_grid
 from .references import Wikimedia
@@ -127,6 +129,14 @@ class Docent:
         return self._upscaler
 
     # ── one run ──────────────────────────────────────────────────────────
+    def _versions(self, st: dict) -> list:
+        out = []
+        for u in _version_urls(st):
+            im = fetch_image(u, WEB_UA)
+            if im is not None:
+                out.append((u, im))
+        return out
+
     def run(self, run_id: str, source: Path, resume: bool = True, deliver: bool = True,
             on_stage=None, redeliver: bool = False) -> RunResult:
         work = source.parent
@@ -204,6 +214,13 @@ class Docent:
                 if fails:
                     return block(stage, fails)
             it = _interp_from(st["interpret"])
+
+            stage = "colour"
+            if on_stage:
+                on_stage(stage)
+            img, st[stage] = rebalance(img, self._versions(st))
+            st[stage]["passed"] = True     # a work with too few copies keeps its own colour; it is recorded
+            save()
 
             stage = "compose"
             if on_stage:
@@ -296,6 +313,13 @@ class Docent:
             rec["status"], rec["error"] = "error", traceback.format_exc()[-3000:]
             save()
             return RunResult(run_id, "error", stage, [f"{type(e).__name__}: {e}"], str(rec_path))
+
+
+def _version_urls(st: dict) -> list[str]:
+    """Every verified copy of the work: the identification's confirmed matches and the catalogue's images."""
+    urls = [m.get("thumb_url") for r in st.get("identify", {}).get("rounds", []) for m in r.get("confirmed_by", [])]
+    urls += [c.get("image_url") for c in st.get("catalogue", {}).get("records", []) if c.get("image_url")]
+    return list(dict.fromkeys(u for u in urls if u))
 
 
 def _interp_from(d: dict) -> Interpretation:

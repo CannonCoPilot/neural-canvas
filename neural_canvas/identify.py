@@ -53,8 +53,11 @@ Reply ONLY with JSON:
 
 SIGNATURE_PROMPT = """These are enlarged corners of a painting, where artists sign. Read any signature,
 monogram, initials or date EXACTLY as painted (letters you cannot read: use ?). If the signature names a
-known artist, give that artist's full name. Reply ONLY with JSON:
-{"signature_text": "exact text or empty string", "artist": "full name or empty string", "confidence": 0.0}"""
+known artist, give that artist's full name. Some artists also write the work's TITLE on it or on its mount
+(e.g. Paul Klee: "1920.92 Giftbeeren"): give such a title exactly as written, without the signature, date or
+catalogue number, and say whether every letter of it is clearly legible. Reply ONLY with JSON:
+{"signature_text": "exact text or empty string", "artist": "full name or empty string", "confidence": 0.0,
+ "inscribed_title": "title as written or empty string", "inscribed_title_legible": false}"""
 
 TITLE_PROMPT = """A museum photograph file is catalogued as:
 file name: {file_title}
@@ -106,6 +109,7 @@ class Identification:
     evidence: dict = field(default_factory=dict)
     rounds: list = field(default_factory=list)
     signature_text: str = ""
+    inscribed_title: str = ""        # a title written on the work, kept only when every letter is legible
     visual_summary: str = ""
 
     def to_dict(self) -> dict:
@@ -232,6 +236,8 @@ class Identifier:
         sig = self._signature
         sig_note = (f"A close reading of the corners found this signature: {sig.get('signature_text')!r}"
                     + (f" (suggesting {sig['artist']})." if sig.get("artist") else ".")) if sig.get("signature_text") else ""
+        if sig.get("inscribed_title"):
+            sig_note += f" A title appears to be written on the work: {sig['inscribed_title']!r}."
         return self.vlm.ask_json(PROPOSE_PROMPT.format(refuted=note, signature=sig_note), [img],
                                  required=("candidates",), max_side=1280)
 
@@ -296,6 +302,11 @@ class Identifier:
             self._imify_pending.add_done_callback(lambda f: log.info(
                 "late imify result (unused): %s", f.exception() or f"{len(f.result())} candidates"))
         ident.evidence["vision_web_calls"] = (self.vision.calls - calls0) if self.vision else 0
+        sig = getattr(self, "_signature", None) or {}
+        it = str(sig.get("inscribed_title") or "").strip()
+        if it and sig.get("inscribed_title_legible") is True and "?" not in it:
+            ident.inscribed_title = it
+        ident.evidence["signature"] = sig
         return ident
 
     def _identify(self, img: Image.Image, pool: ThreadPoolExecutor) -> Identification:

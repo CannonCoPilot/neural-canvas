@@ -47,21 +47,28 @@ def _gray(img: Image.Image, side: int = 900) -> np.ndarray:
     return np.asarray(im)
 
 
-def geometric_inliers(a: Image.Image, b: Image.Image) -> int:
+def homography(a: Image.Image, b: Image.Image) -> tuple[np.ndarray | None, int, float]:
+    """ORB + RANSAC: (H mapping b's working-size pixels onto a's, inlier count, a's working scale).
+    The working copies are at most 900 px on a side; ``scale`` converts a's working pixels to its own."""
     ga, gb = _gray(a), _gray(b)
+    scale = a.width / ga.shape[1]
     orb = cv2.ORB_create(nfeatures=3000)
     ka, da = orb.detectAndCompute(ga, None)
     kb, db = orb.detectAndCompute(gb, None)
     if da is None or db is None or len(ka) < 8 or len(kb) < 8:
-        return 0
+        return None, 0, scale
     pairs = cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(da, db, k=2)
     good = [m for m, *rest in pairs if rest and m.distance < 0.75 * rest[0].distance]
     if len(good) < 8:
-        return 0
+        return None, 0, scale
     src = np.float32([ka[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     dst = np.float32([kb[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-    _, mask = cv2.findHomography(src, dst, cv2.RANSAC, 6.0)
-    return int(mask.sum()) if mask is not None else 0
+    H, mask = cv2.findHomography(dst, src, cv2.RANSAC, 6.0)       # b -> a
+    return H, (int(mask.sum()) if mask is not None else 0), scale
+
+
+def geometric_inliers(a: Image.Image, b: Image.Image) -> int:
+    return homography(a, b)[1]
 
 
 _CACHE: dict[str, Image.Image] = {}

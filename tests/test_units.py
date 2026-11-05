@@ -535,3 +535,64 @@ def test_artist_names_lose_bracketed_and_trailing_facts():
     assert clean_artist("Eyvind Earle (1916-2000)") == "Eyvind Earle"
     assert clean_artist("Thomas Moran, 1837–1926") == "Thomas Moran"
     assert clean_artist("Jim Musil") == "Jim Musil" and clean_artist("Carl Heinrich Bloch") == "Carl Heinrich Bloch"
+
+
+def _structured_art(w=600, h=400, seed=3):
+    """A picture with real structure (ORB needs corners): coloured rectangles and circles on noise."""
+    import cv2
+    rng = np.random.default_rng(seed)
+    a = rng.integers(60, 120, (h, w, 3), dtype=np.uint8)
+    for _ in range(60):
+        x, y = int(rng.integers(0, w - 40)), int(rng.integers(0, h - 40))
+        col = tuple(int(c) for c in rng.integers(0, 255, 3))
+        if rng.random() < 0.5:
+            cv2.rectangle(a, (x, y), (x + int(rng.integers(10, 60)), y + int(rng.integers(10, 60))), col, -1)
+        else:
+            cv2.circle(a, (x, y), int(rng.integers(5, 30)), col, -1)
+    return a
+
+
+def _cast(a, rgb_gain):
+    return Image.fromarray(np.clip(a.astype(float) * np.array(rgb_gain), 0, 255).astype(np.uint8))
+
+
+def test_colour_moves_to_the_middle_ground_of_several_copies():
+    from neural_canvas.colour import _lab, rebalance
+    a = _structured_art()
+    src = _cast(a, (1.25, 1.0, 0.8))                          # the input: too warm
+    copies = [("m1", _cast(a, (1.0, 1.0, 1.0))), ("m2", _cast(a, (0.98, 1.0, 1.03))),
+              ("bw", Image.fromarray(a).convert("L").convert("RGB"))]
+    out, rec = rebalance(src, copies)
+    assert rec["applied"] and len(rec["copies_used"]) == 2
+    assert any("greyscale" in s["why"] for s in rec["copies_skipped"])
+    b_in, b_out, b_ref = (_lab(im)[..., 2].mean() for im in (src, out, Image.fromarray(a)))
+    assert abs(b_out - b_ref) < abs(b_in - b_ref)           # moved toward the copies' colour
+
+
+def test_one_copy_is_not_a_middle_ground():
+    from neural_canvas.colour import rebalance
+    a = _structured_art()
+    src = _cast(a, (1.2, 1.0, 0.9))
+    out, rec = rebalance(src, [("m1", Image.fromarray(a))])
+    assert not rec["applied"] and "needed" in rec["why_not"] and out is src
+
+
+def test_upscale_drift_is_matched_back_without_blurring_detail():
+    from neural_canvas.colour import match_low_frequency
+    from neural_canvas.upscale import _mean_delta_e
+    ref = Image.fromarray(_structured_art(800, 450))
+    drifted = _cast(np.asarray(ref), (1.1, 0.95, 0.9))
+    fixed = match_low_frequency(drifted, ref)
+    assert _mean_delta_e(fixed, ref) < 0.4 * _mean_delta_e(drifted, ref)
+    edges = lambda im: np.abs(np.diff(np.asarray(im.convert("L"), float), axis=1)).mean()
+    assert edges(fixed) > 0.9 * edges(drifted)
+
+
+def test_page_reliability_and_non_titles():
+    from neural_canvas.sources import classify, non_title
+    assert classify("https://www.mutualart.com/Artwork/x") == "market"           # not "art.com"
+    assert classify("https://www.metmuseum.org/art/collection/search/436121") == "curated"
+    assert classify("https://www.pinterest.com/pin/123/") == "social"
+    assert classify("https://jmcnwhistler.wordpress.com/2020/06/x") == "blog"
+    assert non_title("200 Klee REd ideas") and non_title("Venice") and non_title("Shin Paintings for Sale - Fine Art America")
+    assert non_title("Giftbeeren") == "" and non_title("Shot in the Dark") == ""

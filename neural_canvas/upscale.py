@@ -1,5 +1,7 @@
 """Stage 4 — local super-resolution (Real-ESRGAN x4plus on Apple MPS) to the exact display size.
 
+The network's colour and tone drift is removed by matching the result's large-scale colour back to the
+source (``colour.match_low_frequency``); the drift it had before that is recorded (``delta_e_raw``).
 Gates: the result is exactly the planned size, the needed scale is within what one x4 pass is
 trusted for, and the super-resolved image keeps the source's colour (mean CIELAB ΔE against a plain
 Lanczos resize, measured at low resolution where the two should agree).
@@ -29,6 +31,7 @@ class UpscaleResult:
     seconds: float
     passed: bool
     failures: list
+    delta_e_raw: float = 0.0          # the network's drift before its colour was matched back
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -78,13 +81,17 @@ class Upscaler:
             method = "lanczos"
             out = img.convert("RGB").resize(size, Image.LANCZOS)
         ref = img.convert("RGB").resize(size, Image.LANCZOS)
+        de_raw = round(_mean_delta_e(out, ref), 3)
+        if method != "lanczos":
+            from .colour import match_low_frequency
+            out = match_low_frequency(out, ref)
         de = _mean_delta_e(out, ref)
         if out.size != tuple(size):
             failures.append(f"output {out.size} != planned {size}")
         if de > MAX_DELTA_E:
             failures.append(f"colour drift ΔE {de:.2f} > {MAX_DELTA_E}")
         return out, UpscaleResult(method, round(scale, 3), out.size, round(de, 3), round(time.time() - t0, 1),
-                                  not failures, failures)
+                                  not failures, failures, de_raw)
 
 
 def _mean_delta_e(a: Image.Image, b: Image.Image, side: int = 256) -> float:
