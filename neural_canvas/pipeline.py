@@ -95,7 +95,7 @@ class Docent:
         self.embedder = Embedder(m["clip"])
         im, vw = cfg["imify"], cfg["vision_web"]
         self.identifier = Identifier(cfg, self.vlm, self.wiki, self.embedder,
-                                     WebImageSearch(searxng_url=s.get("searxng_url", "")),
+                                     WebImageSearch(searxng_url=s.get("searxng_url", ""), text_search=s.get("text_search")),
                                      Imify(im) if im.get("enabled") else None,
                                      VisionWebDetection(vw, cfg.path("state_dir") / "vision_web")
                                      if vw.get("enabled") else None)

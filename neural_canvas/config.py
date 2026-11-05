@@ -65,6 +65,11 @@ DEFAULTS: dict[str, Any] = {
         "searxng_url": "http://127.0.0.1:8888",
         # "site: key" lines (europeana, harvard, smithsonian ...); outside every repo, read at run time
         "api_keys_path": str(Path.home() / "Claude" / "Project_Aion" / ".claude" / "secrets" / "neural-canvas-api-keys.txt"),
+        # keyed text-search engines beside SearXNG; each is used only when its key is in the store
+        "text_search": {
+            "credentials_path": str(Path.home() / "Claude" / "Project_Aion" / ".claude" / "secrets" / "credentials.yaml"),
+            "providers": {"serper": "search.serper", "brave": "search.brave"},
+        },
     },
     # free reverse-image arm: the local Imify service (~/Claude/Staging/verified/imify/run-imify.sh)
     "imify": {"enabled": True, "url": "http://127.0.0.1:8890", "timeout_s": 90, "num_results": 40},

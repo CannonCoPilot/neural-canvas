@@ -794,3 +794,16 @@ def test_rijksmuseum_picks_the_artist_among_makers_and_leads_drop_the_site_name(
     L = leads({"evidence": {"web_references": ["file: a | page: Giftbeeren (Poisonous Berries) - Artvee | site: artvee.com",
                                                "file: b | page: The Riva - Sunset: Red and Gold | site: yale.edu"]}})
     assert L[:1] == ["Giftbeeren (Poisonous Berries)"] and "The Riva - Sunset: Red and Gold" in L
+
+
+def test_text_search_merges_engines_and_never_logs_a_key(caplog):
+    from neural_canvas.websearch import WebImageSearch
+    w = WebImageSearch(searxng_url="http://searx.test")
+    w._keys = {"serper": "SECRET-KEY-123", "brave": ""}
+    w._searx_pages = lambda q, n: [("https://a.org/1", "a"), ("https://b.org/2", "b")]
+    def boom(q, n):
+        raise RuntimeError("401 for https://google.serper.dev/search?key=SECRET-KEY-123")
+    w._serper_pages = boom
+    hits = w.pages("klee", 10)
+    assert [u for u, _ in hits] == ["https://a.org/1", "https://b.org/2"]
+    assert "SECRET-KEY-123" not in caplog.text and "***" in caplog.text

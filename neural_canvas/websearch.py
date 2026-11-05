@@ -7,6 +7,10 @@ Custom Search JSON API, which the estate holds a key for but which is not enable
 (HTTP 403 "This project does not have the access to Custom Search JSON API").
 Results are only ever *candidates*: a web image becomes a reference solely by passing the same
 two-instrument match as a Commons file.
+
+Text (page) search, ``pages()``, also asks keyed engines when their keys are in the credentials store
+(2026-11-05): Serper (Google's results) and Brave's own Search API. Google's Custom Search JSON API is
+closed to new customers and ends for all on 2027-01-01, so it is not used.
 """
 from __future__ import annotations
 
@@ -36,10 +40,23 @@ class WebReference:
 
 
 class WebImageSearch:
-    def __init__(self, min_interval_s: float = 1.5, searxng_url: str = ""):
+    def __init__(self, min_interval_s: float = 1.5, searxng_url: str = "", text_search: dict | None = None):
         self.min_interval_s = min_interval_s
         self.searxng_url = searxng_url.rstrip("/")
         self._last = 0.0
+        self.text_search = text_search or {}      # {"credentials_path": ..., "providers": {name: key path}}
+        self._keys: dict[str, str] = {}
+
+    def _key(self, provider: str) -> str:
+        """A keyed provider's key from the credentials store, read once; "" when absent."""
+        if provider not in self._keys:
+            from .vision_web import _read_key
+            path = (self.text_search.get("providers") or {}).get(provider, "")
+            try:
+                self._keys[provider] = _read_key(self.text_search["credentials_path"], path) if path else ""
+            except (KeyError, OSError):
+                self._keys[provider] = ""
+        return self._keys[provider]
 
     def search(self, query: str, limit: int = 12) -> list[WebReference]:
         """Both engines at once; their hits interleaved, duplicates (same image URL) dropped.
@@ -80,13 +97,49 @@ class WebImageSearch:
         return out
 
     def pages(self, query: str, limit: int = 20) -> list[tuple[str, str]]:
-        """Ordinary web search (not images): (url, title) of each result page. Collection pages that no
-        image search returns are often the first text hit."""
-        if not self.searxng_url:
+        """Ordinary web search (not images): (url, title) of each result page, from every available
+        engine at once, interleaved and deduplicated. Collection pages that no image search returns are
+        often the first text hit. One engine failing is logged; the others stand."""
+        engines = {"searxng": self._searx_pages} if self.searxng_url else {}
+        engines.update({p: getattr(self, f"_{p}_pages") for p in ("serper", "brave") if self._key(p)})
+        if not engines:
             return []
+        with ThreadPoolExecutor(len(engines)) as ex:
+            futs = {name: ex.submit(fn, query, limit) for name, fn in engines.items()}
+        lists = []
+        for name, f in futs.items():
+            try:
+                lists.append(f.result())
+            except Exception as e:
+                msg = str(e)
+                for k in self._keys.values():
+                    msg = msg.replace(k, "***") if k else msg
+                log.warning("text search %s failed for %r: %s", name, query, msg[:200])
+        out, seen = [], set()
+        for row in zip(*[l + [None] * (limit - len(l)) for l in lists]) if lists else []:
+            for hit in row:
+                if hit and hit[0] not in seen:
+                    seen.add(hit[0])
+                    out.append(hit)
+        return out[:limit * 2]
+
+    def _searx_pages(self, query: str, limit: int) -> list[tuple[str, str]]:
         r = requests.get(f"{self.searxng_url}/search", params={"q": query, "format": "json"}, timeout=30)
         r.raise_for_status()
         return [(x["url"], x.get("title", "")) for x in r.json().get("results", [])[:limit] if x.get("url", "").startswith("http")]
+
+    def _serper_pages(self, query: str, limit: int) -> list[tuple[str, str]]:
+        r = requests.post("https://google.serper.dev/search", json={"q": query, "num": min(limit, 20)},
+                          headers={"X-API-KEY": self._key("serper")}, timeout=30)
+        r.raise_for_status()
+        return [(x["link"], x.get("title", "")) for x in r.json().get("organic", []) if x.get("link", "").startswith("http")]
+
+    def _brave_pages(self, query: str, limit: int) -> list[tuple[str, str]]:
+        r = requests.get("https://api.search.brave.com/res/v1/web/search", params={"q": query, "count": min(limit, 20)},
+                         headers={"X-Subscription-Token": self._key("brave"), "Accept": "application/json"}, timeout=30)
+        r.raise_for_status()
+        return [(x["url"], x.get("title", "")) for x in (r.json().get("web") or {}).get("results", [])
+                if x.get("url", "").startswith("http")]
 
     def _ddg(self, query: str, limit: int) -> list[WebReference]:
         from ddgs import DDGS
