@@ -110,7 +110,9 @@ _RECORD_PATH = re.compile(r"/(collections?|artworks?|objects?|object-page|kunstw
 
 # Sir, 2026-11-05: Wikipedia and Wikimedia Commons count, and so does Meisterdrucke (a fine-art print
 # publisher whose pages carry catalogue-style captions)
-ALSO_RULING = ("wikipedia.org", "commons.wikimedia.org", "meisterdrucke", "artvee.com")   # Artvee: Sir, 2026-11-05
+ALSO_RULING = ("wikipedia.org", "commons.wikimedia.org", "meisterdrucke", "artvee.com",   # Artvee: Sir, 2026-11-05
+               # promoted from reference to votes, Sir 2026-11-05
+               "wikiart.org", "artchive.com", "wga.hu", "britannica.com", "oxfordartonline.com", "jstor.org")
 
 
 # Sir, 2026-11-05: auction houses and reputable press are "leads and support". A verified page from one

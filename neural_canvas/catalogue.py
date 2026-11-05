@@ -202,6 +202,7 @@ class Record:
     authority: bool = False      # an artist authority record: rules the artist's life, never the work
     support: bool = False        # an auction house or the press: corroborates, never counts
     images: list = field(default_factory=list)       # the page's other pictures, tried when image_url is not the work
+    overrule: bool = False       # Wikidata and what it links, a museum's own API, a catalogue raisonné (Sir, 2026-11-05)
 
     def states(self, value: str) -> bool:
         """An institution page supports a fact its text states (all of the value's significant words)."""
@@ -919,6 +920,13 @@ class Catalogue:
                     break
         return out
 
+    @staticmethod
+    def _over(recs: list) -> list:
+        """Mark records of the OVERRULE tier: they vote among themselves; lower-tier disagreement is discarded."""
+        for r in recs:
+            r.overrule = True
+        return recs
+
     def _safe(self, name: str, fn) -> list:
         """A source that fails is recorded and skipped; it never takes the run down with it."""
         try:
@@ -939,6 +947,7 @@ class Catalogue:
         recs: list[Record] = []
         self.consulted = ["Wikidata", "Art Institute of Chicago", "Metropolitan Museum", "Cleveland Museum of Art"]
         living, artist_qid = self._artist_living(artist)
+        over = self._over
         for qid in self._wikidata_items(img, img_vec, artist, ident):
             rec, ids = self._wikidata_record(qid)
             recs.append(rec)
@@ -973,20 +982,21 @@ class Catalogue:
                         r.collection = rec.collection        # the holding institution's own site
                     recs.append(r)
                     n += 1
+        over(recs)                      # the Wikidata item and every record it links to
         have = {r.source for r in recs}
         if "artic" not in have:
-            recs += self._safe("artic_search", lambda: self._artic_search(img, img_vec, queries, surname, artist, titles))
+            recs += over(self._safe("artic_search", lambda: self._artic_search(img, img_vec, queries, surname, artist, titles)))
         if "met" not in have:
-            recs += self._safe("met_search", lambda: self._met_search(img, img_vec, queries, surname, artist, titles))
-        recs += self._safe("cleveland_search", lambda: self._cleveland_search(img, img_vec, queries, surname))
-        recs += self._safe("europeana", lambda: self._europeana(img, img_vec, queries, surname))
-        recs += self._safe("harvard", lambda: self._harvard(img, img_vec, queries, surname, titles))
+            recs += over(self._safe("met_search", lambda: self._met_search(img, img_vec, queries, surname, artist, titles)))
+        recs += over(self._safe("cleveland_search", lambda: self._cleveland_search(img, img_vec, queries, surname)))
+        recs += over(self._safe("europeana", lambda: self._europeana(img, img_vec, queries, surname)))
+        recs += over(self._safe("harvard", lambda: self._harvard(img, img_vec, queries, surname, titles)))
         if "si" not in {institution(r.source) for r in recs}:
-            recs += self._safe("smithsonian", lambda: self._smithsonian(img, img_vec, queries, surname))
+            recs += over(self._safe("smithsonian", lambda: self._smithsonian(img, img_vec, queries, surname)))
         if "yale" not in {institution(r.source) for r in recs}:
-            recs += self._safe("yale", lambda: self._yale(img, img_vec, queries, surname))
+            recs += over(self._safe("yale", lambda: self._yale(img, img_vec, queries, surname)))
         if "rijksmuseum" not in {institution(r.source) for r in recs}:
-            recs += self._safe("rijksmuseum", lambda: self._rijksmuseum(img, img_vec, titles, artist, surname))
+            recs += over(self._safe("rijksmuseum", lambda: self._rijksmuseum(img, img_vec, titles, artist, surname)))
         if "wikipedia.org" not in {r.source for r in recs}:
             for q in queries[:2]:
                 d = self._get("https://en.wikipedia.org/w/api.php", action="query", list="search", srsearch=q, srlimit=3, format="json")
@@ -997,8 +1007,8 @@ class Catalogue:
                     break
         self.consulted += ["RKD", "Wikipedia", "Wikimedia Commons", "museum, foundation and artist pages found by web search"]
         self._living, self._artist = living, artist
-        recs += self._safe("catalogue_sites", lambda: self._registry(img, img_vec, artist, titles,
-                                                                  {institution(r.source) for r in recs}))
+        recs += over(self._safe("catalogue_sites", lambda: self._registry(img, img_vec, artist, titles,
+                                                                  {institution(r.source) for r in recs})))
         recs += self._safe("artvee", lambda: self._artvee(img, img_vec, titles, artist, surname))
         recs += self._safe("curated_web", lambda: self._curated_web(img, img_vec, queries, {r.source for r in recs}))
         recs += self._safe("web_text", lambda: self._web_text(img, img_vec, queries, {institution(r.source) for r in recs}))
@@ -1040,36 +1050,56 @@ class Catalogue:
         def rank(r):     # what the card prints: the holding museum's wording, then Wikidata, references last
             if r.source == "inscription":
                 return 3     # the inscription is shown after a catalogue's title, in quotes, when they differ
-            if r.source in ("wikipedia.org", "commons.wikimedia.org", "artvee.com") or "meisterdrucke" in r.source:
+            if r.source in ("wikipedia.org", "commons.wikimedia.org", "artvee.com") or "meisterdrucke" in r.source \
+                    or any(d in r.source for d in ("wikiart", "artchive", "wga.hu", "britannica", "oxfordartonline", "jstor")):
                 return 2
             return 1 if r.source in ("wikidata", "rkd.nl") else 0
         pref = sorted(recs, key=lambda r: (rank(r), r.verified_by != "image"))
         out = {"facts": {}, "support": {}, "unruled": {}, "sources": [{k: v for k, v in asdict(r).items() if k not in ("text", "images")} for r in recs],
                "consulted": self.consulted, "unavailable": UNAVAILABLE, "failures": [],
-               "corroborating": [{"source": r.source, "url": r.url, "title": r.title} for r in corroborating]}
+               "corroborating": [{"source": r.source, "url": r.url, "title": r.title} for r in corroborating],
+               "discarded": {}}
+        over = {r.source for r in recs if r.overrule}
+
+        def choose(name, values, support_of):
+            """Sir, 2026-11-05: the overrule tier (Wikidata and its links, museum APIs, catalogues raisonnés)
+            votes among itself. When it states a fact, only its values can be ruled; lower-tier sources may
+            add support by agreeing, and their disagreeing values are discarded. Most overrule support wins."""
+            top = [(r, v) for r, v in values if r.overrule]
+            best = None
+            for r, v in top or values:
+                sup = support_of(r, v)
+                key = (len(over & set(sup)), len(sup))
+                if len(sup) >= 2 and (best is None or key > best[0]):
+                    best = (key, v, sup)
+            if not best:
+                return None
+            if top:
+                gone = [f"{r.source}: {v}" for r, v in values if not r.overrule and r.source not in best[2]]
+                if gone:
+                    out["discarded"][name] = gone
+            return best[1], best[2]
 
         def pick(name, values, agree):
-            for r, v in values:
-                sup = sorted({r2.source for r2, v2 in values if agree(v, v2)} |
-                             {r2.source for r2 in recs if r2.text and r2.states(v)})
-                if len(sup) >= 2:
-                    out["facts"][name], out["support"][name] = v, sup
-                    return v
+            got = choose(name, values, lambda r, v: sorted({r2.source for r2, v2 in values if agree(v, v2)} |
+                                                           {r2.source for r2 in recs if r2.text and r2.states(v)}))
+            if got:
+                out["facts"][name], out["support"][name] = got
+                return got[0]
             out["unruled"][name] = [f"{r.source}: {v}" for r, v in values] or ["no curated source states it"]
             return ""
 
         # title: any of a source's titles (languages, aliases) may agree; the display is the preferred source's
         tvals = [(r, r.title) for r in pref if r.title]
         title = ""
-        for r, t in tvals:
-            # a near-same title in another medium is another work (Whistler's Riva pastel, the Salute oil)
-            sup = sorted({r2.source for r2 in recs if not medium_clash(r.medium, r2.medium)
-                          and (any(same_title(t, t2) for t2 in r2.all_titles()) or r2.states(t))})
-            if len(sup) >= 2:
-                wd = next((x for x in recs if x.source == "wikidata"), None)
-                title = wd.title if (wd and "wikidata" in sup and wd.title) else t   # English, when Wikidata agrees
-                out["facts"]["title"], out["support"]["title"] = title, sup
-                break
+        # a near-same title in another medium is another work (Whistler's Riva pastel, the Salute oil)
+        got = choose("title", tvals, lambda r, t: sorted({r2.source for r2 in recs if not medium_clash(r.medium, r2.medium)
+                                                          and (any(same_title(t, t2) for t2 in r2.all_titles()) or r2.states(t))}))
+        if got:
+            t, sup = got
+            wd = next((x for x in recs if x.source == "wikidata"), None)
+            title = wd.title if (wd and "wikidata" in sup and wd.title) else t   # English, when Wikidata agrees
+            out["facts"]["title"], out["support"]["title"] = title, sup
         if not title:
             out["unruled"]["title"] = [f"{r.source}: {t}" for r, t in tvals] or ["no curated source names the work"]
         surname = _surname(ident.get("artist", ""))

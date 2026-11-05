@@ -837,3 +837,30 @@ def test_catalogue_pages_read_labelled_fields_and_titles_without_the_byline():
     f = labelled("M.0807 The Riva - Sunset; red and gold Artist: James McNeill Whistler Date: 1880 "
                  "Collection: Yale University Art Gallery Accession Number: 1966.9.27 Medium: chalk and pastel Support: paper")
     assert f["Date"] == "1880" and f["Collection"] == "Yale University Art Gallery" and f["Medium"] == "chalk and pastel"
+
+
+def test_the_overrule_tier_decides_and_lower_disagreement_is_discarded():
+    from neural_canvas.catalogue import Catalogue
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    ident = {"artist": "Andrew Wyeth", "inscribed_title": ""}
+    museum = _rec("crystalbridges", "Airborne", artist="Andrew Wyeth", date="1996", overrule=True)
+    wikiart = _rec("wikiart.org", "Airborne", artist="Andrew Wyeth", date="1996")
+    artchive = _rec("artchive.com", "Wind from the Sea", artist="Andrew Wyeth", date="1947")
+    blog_like = _rec("wga.hu", "Wind from the Sea", artist="Andrew Wyeth", date="1947")
+    ru = cat.rule([museum, wikiart, artchive, blog_like], ident)
+    # two lower-tier sources agree on the wrong title, but the overrule tier states the fact: it decides
+    assert ru["facts"]["title"] == "Airborne" and ru["facts"]["date"] == "1996"
+    assert "artchive.com: Wind from the Sea" in ru["discarded"]["title"]
+    # with no overrule source, the ordinary votes decide
+    ru2 = cat.rule([artchive, blog_like], ident)
+    assert ru2["facts"]["title"] == "Wind from the Sea"
+
+
+def test_overrule_sources_vote_among_themselves():
+    from neural_canvas.catalogue import Catalogue
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    a = _rec("yale", "The Riva—Sunset: Red and Gold", artist="James McNeill Whistler", overrule=True)
+    b = _rec("gla", "The Riva - Sunset; red and gold", artist="James McNeill Whistler", overrule=True)
+    c = _rec("artvee.com", "Venice", artist="James McNeill Whistler")
+    ru = cat.rule([c, a, b], {"artist": "James McNeill Whistler", "inscribed_title": ""})
+    assert ru["support"]["title"] == ["gla", "yale"] and ru["discarded"]["title"] == ["artvee.com: Venice"]
