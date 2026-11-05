@@ -46,7 +46,7 @@ _REFERENCE = ("wikipedia.org", "wikimedia.org", "wikiart.org", "britannica.com",
 _MARKET = ("christies.com", "sothebys.com", "bonhams.com", "phillips.com", "ha.com", "fineart.ha.com", "invaluable.com",
            "mutualart.com", "artnet.com", "liveauctioneers.com", "lempertz.com", "dorotheum.com", "artprice.com",
            "the-saleroom.com", "artsy.net", "doyle.com", "swanngalleries.com")
-_COMMERCIAL = ("etsy.com", "amazon.", "ebay.", "fineartamerica.com", "pixels.com", "meisterdrucke", "artvee.com",
+_COMMERCIAL = ("etsy.com", "amazon.", "ebay.", "fineartamerica.com", "pixels.com", "meisterdrucke",
                "redbubble.com", "society6.com", "posterlounge", "juniqe", "allposters", "art.com", "artsdot",
                "1st-art-gallery", "overstockart", "wahooart", "paintingmania", "canvasprints", "displate",
                "onlly.art", "joy-cadeaux", "artprintimages", "mediastorehouse", "alamy.com", "shutterstock.com",
@@ -109,7 +109,7 @@ _RECORD_PATH = re.compile(r"/(collections?|artworks?|objects?|object-page|kunstw
 
 # Sir, 2026-11-05: Wikipedia and Wikimedia Commons count, and so does Meisterdrucke (a fine-art print
 # publisher whose pages carry catalogue-style captions)
-ALSO_RULING = ("wikipedia.org", "commons.wikimedia.org", "meisterdrucke")
+ALSO_RULING = ("wikipedia.org", "commons.wikimedia.org", "meisterdrucke", "artvee.com")   # Artvee: Sir, 2026-11-05
 
 
 # Sir, 2026-11-05: auction houses and reputable press are "leads and support". A verified page from one

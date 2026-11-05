@@ -79,6 +79,15 @@ class WebImageSearch:
                                     image_url=img, meta={"source": "searxng", "engine": x.get("engine", "")}))
         return out
 
+    def pages(self, query: str, limit: int = 20) -> list[tuple[str, str]]:
+        """Ordinary web search (not images): (url, title) of each result page. Collection pages that no
+        image search returns are often the first text hit."""
+        if not self.searxng_url:
+            return []
+        r = requests.get(f"{self.searxng_url}/search", params={"q": query, "format": "json"}, timeout=30)
+        r.raise_for_status()
+        return [(x["url"], x.get("title", "")) for x in r.json().get("results", [])[:limit] if x.get("url", "").startswith("http")]
+
     def _ddg(self, query: str, limit: int) -> list[WebReference]:
         from ddgs import DDGS
         wait = self.min_interval_s - (time.time() - self._last)

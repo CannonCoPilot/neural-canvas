@@ -110,6 +110,10 @@ def _gate(host: str) -> threading.Semaphore | None:
         return _in_flight.setdefault(family, threading.Semaphore(1))
 
 
+_walled: dict[str, float] = {}           # host -> until when its rate challenge is assumed to hold
+WALL_S = 300.0
+
+
 def _back_off(host: str, seconds: float) -> None:
     """A host that says "retry after" is paused for every thread, not just the one it told."""
     with _slot_lock:
@@ -125,12 +129,14 @@ def _session() -> requests.Session:
 
 def fetch_image(url: str, user_agent: str) -> Image.Image | None:
     """Fetch a reference image into memory (never written to disk). Successes are cached; failures are
-    not, so a transient error is retried next time. Rate-limited hosts are paced (HOST_INTERVAL_S); a 429,
-    a 5xx or a rate challenge backs off (Retry-After when given) and tries again."""
+    not, so a transient error is retried next time. Rate-limited hosts are paced (HOST_INTERVAL_S); a 429
+    or a 5xx backs off (Retry-After when given) and tries again; a rate challenge skips the host a while."""
     if url in _CACHE:
         return _CACHE[url]
     host = urlparse(url).netloc
     gap = _interval(host)
+    if _walled.get(host, 0.0) > time.time():
+        return None                          # challenged a moment ago: every image would be refused alike
     gate = _gate(host)
     for attempt in range(4):
         _wait_turn(host, gap)
@@ -140,8 +146,11 @@ def fetch_image(url: str, user_agent: str) -> Image.Image | None:
                     r = _session().get(url, headers={"User-Agent": user_agent}, timeout=12)
             else:
                 r = _session().get(url, headers={"User-Agent": user_agent}, timeout=12)
-            challenged = r.status_code == 403 and r.headers.get("cf-mitigated") == "challenge"
-            if r.status_code == 429 or r.status_code >= 500 or challenged:
+            if r.status_code == 403 and r.headers.get("cf-mitigated") == "challenge":
+                _walled[host] = time.time() + WALL_S   # a challenge holds for minutes: skip the host, do not retry
+                log.warning("reference host %s answers with a rate challenge; skipped for %d s", host, WALL_S)
+                return None
+            if r.status_code == 429 or r.status_code >= 500:
                 _back_off(host, min(30.0, float(r.headers.get("Retry-After") or 2 ** (attempt + 1))))
                 continue
             r.raise_for_status()

@@ -771,3 +771,26 @@ def test_artvee_cards_and_arthur_images_read_into_references():
     hits = Arthur(Web()).search("Andrew Wyeth")
     assert len(hits) == 1 and hits[0].image_url.endswith("/large/andrew-wyeth--airborne.jpg")
     assert hits[0].meta["title_from_file"] == "airborne" and hits[0].file_title == "Andrew Wyeth - Airborne, 1996"
+
+
+def test_an_artist_named_only_in_page_text_is_ruled_by_two_pages():
+    from neural_canvas.catalogue import Catalogue
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    md = _rec("meisterdrucke.uk", "Poisonous Berries, 1920", text="poisonous berries 1920 by paul klee fine art print")
+    av = _rec("artvee.com", "Giftbeeren (Poisonous Berries)", text="giftbeeren poisonous berries 1920 paul klee german 1879 1940")
+    ru = cat.rule([md, av], {"artist": "Paul Klee", "inscribed_title": "Giftbeeren"})
+    assert ru["facts"]["artist"] == "Paul Klee" and ru["support"]["artist"] == ["artvee.com", "meisterdrucke.uk"]
+    one = cat.rule([md], {"artist": "Paul Klee", "inscribed_title": "Giftbeeren"})
+    assert "artist" not in one["facts"] and any("each fact needs 2" in f for f in one["failures"])
+
+
+def test_rijksmuseum_picks_the_artist_among_makers_and_leads_drop_the_site_name():
+    from neural_canvas.catalogue import Catalogue, leads
+    x = {"id": "https://id.rijksmuseum.nl/1", "identified_by": [{"type": "Name", "content": "Hauptweg"}],
+         "produced_by": {"part": [{"carried_out_by": [{"notation": {"@language": "nl", "@value": "Staatliches Bauhaus"}}]},
+                                  {"carried_out_by": [{"notation": {"@language": "nl", "@value": "Paul Klee"}}]}]}}
+    r = Catalogue._rijks_rec(x, "klee")
+    assert r.artist == "Paul Klee" and r.states("staatliches bauhaus")
+    L = leads({"evidence": {"web_references": ["file: a | page: Giftbeeren (Poisonous Berries) - Artvee | site: artvee.com",
+                                               "file: b | page: The Riva - Sunset: Red and Gold | site: yale.edu"]}})
+    assert L[:1] == ["Giftbeeren (Poisonous Berries)"] and "The Riva - Sunset: Red and Gold" in L

@@ -28,7 +28,7 @@ import re
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from itertools import chain
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import numpy as np
 import requests
@@ -51,6 +51,11 @@ UNAVAILABLE = {
 SI_UNITS = "SAAM OR NPG OR HMSG OR NMAA OR CHNDM OR NMAfA"   # NMAA = Freer|Sackler (FSG matches nothing)
 ARTIC_FIELDS = "id,title,alt_titles,artist_title,artist_display,date_display,medium_display,style_title,image_id"
 LUX = "https://lux.collections.yale.edu"     # Yale: Linked Art records, Yale-provided metadata CC0
+TRANSLATE_PROMPT = """Artwork titles, possibly in German, French, Dutch, Italian, Spanish or another language:
+{titles}
+For each, give the language and the plain English title a museum would print (Giftbeeren -> Poisonous Berries).
+Translate only; never add words that are not in the title. Reply JSON:
+{{"titles": [{{"original": "...", "language": "...", "english": "..."}}]}}"""
 # Getty AAT ids the Rijksmuseum's Linked Art uses in place of labels
 AAT_ENGLISH, AAT_PREFERRED, AAT_MATERIALS = "300388277", "300404670", "300435429"
 RKD_ARTISTS = "https://api.rkd.triply.cc/datasets/rkd/RKD-SDO-Knowledge-Graph/services/Virtuoso/sparql"
@@ -457,7 +462,7 @@ class Catalogue:
         return []
 
     @staticmethod
-    def _rijks_rec(x: dict) -> Record | None:
+    def _rijks_rec(x: dict, surname: str = "") -> Record | None:
         """A Rijksmuseum Linked Art object: its labels are Getty AAT ids, not text."""
         if not x.get("id"):
             return None
@@ -469,9 +474,12 @@ class Catalogue:
         pref = [n for n in names if AAT_PREFERRED in ids(n)] or names
         title = next((n["content"] for n in pref if en(n)), pref[0]["content"] if pref else "")
         prod = x.get("produced_by") or {}
-        makers = [a for part in [prod, *(prod.get("part") or [])] for a in part.get("carried_out_by") or []]
-        notes = (makers[0].get("notation") or []) if makers else []
-        artist = next((n.get("@value", "") for n in notes if n.get("@language") == "en"), notes[0].get("@value", "") if notes else "")
+        def name(maker):          # notation is a list of language forms, or a single one
+            notes = maker.get("notation") or []
+            notes = [notes] if isinstance(notes, dict) else notes
+            return next((n.get("@value", "") for n in notes if n.get("@language") == "en"), notes[0].get("@value", "") if notes else "")
+        makers = [name(a) for part in [prod, *(prod.get("part") or [])] for a in part.get("carried_out_by") or []]
+        artist = next((m for m in makers if surname and surname in fold(m)), makers[0] if makers else "")
         stamps = (prod.get("timespan") or {}).get("identified_by") or []
         date = next((t.get("content", "") for t in stamps if en(t)), stamps[0].get("content", "") if stamps else "")
         refs = x.get("referred_to_by") or []
@@ -479,7 +487,7 @@ class Catalogue:
         image = next((a.get("id", "") for s in x.get("subject_of") or [] for d in s.get("digitally_carried_by") or []
                       for a in d.get("access_point") or [] if "iiif" in a.get("id", "")), "")
         image = image.replace("/full/max/", "/full/800,/")
-        text = fold(" ".join([*(n["content"] for n in names), artist, *(str(r.get("content", "")) for r in refs)]))
+        text = fold(" ".join([*(n["content"] for n in names), *makers, *(str(r.get("content", "")) for r in refs)]))
         others = list(dict.fromkeys(n["content"] for n in names if n["content"] != title))
         return Record("rijksmuseum.nl", x["id"], title, others, artist, "",
                       date, medium, "Rijksmuseum", "", image, "image", text=text)
@@ -499,7 +507,7 @@ class Catalogue:
                 if u in seen:
                     continue
                 seen.add(u)
-                rec = self._rijks_rec(self._get(u))
+                rec = self._rijks_rec(self._get(u), surname)
                 if not rec or surname not in fold(rec.artist) or not rec.image_url:
                     continue
                 ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url)
@@ -714,6 +722,10 @@ class Catalogue:
         if EVENT.search(title) or EVENT.search(urlparse(url).path):
             return None                                   # an events or shop page shows the picture, it is no record of it
         title = re.split(r"\s+[|–—]\s+|\s+-\s+", title)[0].strip()
+        if not image_url:            # the page's own preview image: how a text search hit is image-verified
+            og = re.search(r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)', raw) or \
+                 re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', raw)
+            image_url = html.unescape(og.group(1)) if og else ""
         rec = Record(institution(url), url, "" if non_title(title) else title, [], verified_by=verified_by,
                      image_url=image_url, text=text)
         return rec
@@ -748,6 +760,79 @@ class Catalogue:
                 break
         return out
 
+    def _translations(self, titles: list[str]) -> list[str]:
+        """English forms of foreign titles (Giftbeeren -> Poisonous Berries). Searched beside the original,
+        never instead of it: museums and catalogues keep the original wording too."""
+        vlm = getattr(self.idf, "vlm", None)
+        todo = [t for t in titles[:5] if re.search(r"[^\W\d_]{3,}", t or "")]   # the model names each language
+        if vlm is None or not todo:
+            return []
+        try:
+            d = vlm.ask_json(TRANSLATE_PROMPT.format(titles="\n".join(f"- {t}" for t in todo)), required=("titles",),
+                             num_predict=512)
+        except Exception as e:
+            log.info("title translation failed: %s", e)
+            return []
+        out = []
+        for x in d.get("titles") or []:
+            en, orig = str(x.get("english", "")).strip(), str(x.get("original", "")).strip()
+            if en and orig and fold(en) != fold(orig) and str(x.get("language", "")).lower() not in ("en", "english"):
+                out.append(en)
+        have = {fold(t) for t in titles}
+        return [t for t in dict.fromkeys(out) if fold(t) not in have]
+
+    def _artvee(self, img, img_vec, titles: list[str], artist: str, surname: str) -> list[Record]:
+        """Artvee (credible, Sir 2026-11-05): its search by each title form, then the artist's whole Artvee
+        catalogue ranked by embedding. The picture must match on both instruments."""
+        av = getattr(self.idf, "artvee", None)
+        if av is None:
+            return []
+        self.consulted.append("Artvee")
+        seen: set[str] = set()
+        for refs in chain((av.search(t) for t in titles[:6] if len(t) >= 4), [av.nearest(artist, img_vec, 6)] if artist else []):
+            for r in refs:
+                m = r.meta
+                if r.page_url in seen or (surname and surname not in fold(m.get("artist", ""))):
+                    continue
+                seen.add(r.page_url)
+                ok, sim, inl = self._verify(img, img_vec, r.thumb_url)
+                if ok:
+                    return [Record("artvee.com", r.page_url, m.get("title", ""), [], m.get("artist", ""), m.get("origin", ""),
+                                   m.get("date", ""), "", "", "", r.thumb_url, "image", sim, inl,
+                                   text=fold(f"{m.get('title', '')} {m.get('date', '')} {m.get('artist', '')} {m.get('origin', '')}"))]
+        return []
+
+    def _web_text(self, img, img_vec, queries: list[str], have: set[str]) -> list[Record]:
+        """Ordinary web search, as a person would run it: credible and supporting pages among the results,
+        each read and verified by its own preview image."""
+        web = getattr(self.idf, "web", None)
+        if web is None or not hasattr(web, "pages"):
+            return []
+        self.consulted.append("web search (text)")
+        out, seen = [], set(have)
+        for q in queries[:4]:
+            try:
+                hits = web.pages(q, 20)
+            except Exception as e:
+                log.info("text web search %r failed: %s", q, e)
+                continue
+            for url, _ in hits:
+                host = institution(url)
+                support = supporting(url)
+                if host in seen or not (support or rulable(url, getattr(self, "_artist", ""), getattr(self, "_living", False))):
+                    continue
+                rec = self._curated_page(url, "image")
+                if not rec or not rec.image_url:
+                    continue
+                ok, rec.clip, rec.inliers = self._verify(img, img_vec, urljoin(url, rec.image_url))
+                if ok:
+                    rec.support = support
+                    out.append(rec)
+                    seen.add(host)
+            if sum(not x.support for x in out) >= 2:
+                break
+        return out
+
     def _safe(self, name: str, fn) -> list:
         """A source that fails is recorded and skipped; it never takes the run down with it."""
         try:
@@ -763,7 +848,8 @@ class Catalogue:
         artist = ident.get("artist", "")
         surname = _surname(artist)
         titles = [t for t in leads if t]
-        queries = list(dict.fromkeys([f"{artist} {t}" for t in titles[:5]] + [artist]))
+        titles = list(dict.fromkeys(titles[:5] + self._safe("translate", lambda: self._translations(titles)) + titles[5:]))
+        queries = list(dict.fromkeys([f"{artist} {t}" for t in titles[:6]] + [artist]))
         recs: list[Record] = []
         self.consulted = ["Wikidata", "Art Institute of Chicago", "Metropolitan Museum", "Cleveland Museum of Art"]
         living, artist_qid = self._artist_living(artist)
@@ -825,7 +911,9 @@ class Catalogue:
                     break
         self.consulted += ["RKD", "Wikipedia", "Wikimedia Commons", "museum, foundation and artist pages found by web search"]
         self._living, self._artist = living, artist
+        recs += self._safe("artvee", lambda: self._artvee(img, img_vec, titles, artist, surname))
         recs += self._safe("curated_web", lambda: self._curated_web(img, img_vec, queries, {r.source for r in recs}))
+        recs += self._safe("web_text", lambda: self._web_text(img, img_vec, queries, {institution(r.source) for r in recs}))
         # the artist's authority record (RKDartists via Wikidata P650): rules life and nationality only
         if artist_qid:
             ent = self.wiki.entities([artist_qid]).get(artist_qid, {})
@@ -864,7 +952,7 @@ class Catalogue:
         def rank(r):     # what the card prints: the holding museum's wording, then Wikidata, references last
             if r.source == "inscription":
                 return 3     # the inscription is shown after a catalogue's title, in quotes, when they differ
-            if r.source in ("wikipedia.org", "commons.wikimedia.org") or "meisterdrucke" in r.source:
+            if r.source in ("wikipedia.org", "commons.wikimedia.org", "artvee.com") or "meisterdrucke" in r.source:
                 return 2
             return 1 if r.source in ("wikidata", "rkd.nl") else 0
         pref = sorted(recs, key=lambda r: (rank(r), r.verified_by != "image"))
@@ -899,10 +987,11 @@ class Catalogue:
         surname = _surname(ident.get("artist", ""))
         avals = [(r, r.artist) for r in pref if r.artist and _surname(r.artist) == surname]
         artist = pick("artist", avals, lambda a, b: _surname(a) == _surname(b))
-        if not artist and avals:      # pages name the artist in their text, not in a field
-            sup = sorted({avals[0][0].source} | {r.source for r in recs if r.text and surname and surname in r.text.split()})
-            if len(sup) >= 2:
-                artist = avals[0][1]
+        if not artist:                # pages name the artist in their text, not in a field
+            name = avals[0][1] if avals else ident.get("artist", "")
+            sup = sorted(({avals[0][0].source} if avals else set()) | {r.source for r in recs if r.text and r.states(name)})
+            if name and len(sup) >= 2:
+                artist = name
                 out["facts"]["artist"], out["support"]["artist"] = artist, sup
                 out["unruled"].pop("artist", None)
         if artist:            # Wikidata's form of the name when it is among the agreeing sources
@@ -943,7 +1032,7 @@ class Catalogue:
             out["failures"].append("artist not ruled: " + "; ".join(out["unruled"].get("artist", ["no curated source"]))[:300])
         if out["failures"]:
             out["failures"].append(f"{len(recs)} curated source(s) matched the picture ({', '.join(r.source for r in recs) or 'none'}); "
-                                   "2 are needed. Unavailable: " + "; ".join(f"{k} ({v})" for k, v in UNAVAILABLE.items()))
+                                   "each fact needs 2 that state it. Unavailable: " + "; ".join(f"{k} ({v})" for k, v in UNAVAILABLE.items()))
         return out
 
 
@@ -962,9 +1051,13 @@ def leads(ident: dict) -> list[str]:
     Non-titles (board names, shop wording) are kept as search text with the furniture removed."""
     out = [ident.get("inscribed_title", ""), ident.get("title", "")]
     for line in ident.get("evidence", {}).get("web_references", []) or []:
-        m = re.match(r"file: (.*?) \| page: (.*?) \| site:", line)
+        m = re.match(r"file: (.*?) \| page: (.*?) \| site: (\S*)", line)
         if m:
-            out += [m.group(2), m.group(1)]
+            page, site = m.group(2), fold(m.group(3).split(".")[-2] if "." in m.group(3) else m.group(3))
+            tail = re.search(r"\s[-–—]\s([^-–—]{2,40})$", page)
+            if tail and site and site in fold(tail.group(1)).replace(" ", ""):
+                page = page[:tail.start()]                       # "Giftbeeren - Artvee" -> "Giftbeeren"
+            out += [page, m.group(1)]
     clean = []
     for t in out:
         t = re.sub(r"\b(\d+\+?\s+|ideas?|pin on|for sale|prints?|poster|paintings?|art print|wall art|fine art america|pinterest)\b", " ", t, flags=re.I)

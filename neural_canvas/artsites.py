@@ -1,8 +1,8 @@
 """Artvee and Arthur.io: two large picture collections, searched for the picture itself (Sir, 2026-11-05).
 
-Neither rules a fact. Artvee sells prints of public-domain scans; Arthur.io is contributor pages, "a
-systematised Pinterest". Both find the picture and print a caption for it, and a caption is a LEAD:
-the catalogue stage searches curated sources with it.
+Artvee is a credible source (Sir, 2026-11-05): its public-domain scans carry title, date and the artist's
+nationality and life, and the catalogue stage counts it as one vote. Arthur.io is contributor pages, "a
+systematised Pinterest": its captions are LEADS that the catalogue stage searches curated sources with.
 
 * Artvee: its search and artist pages are read with artvee-scraper's own card parsers. An artist's
   whole Artvee catalogue is listed once, its thumbnails embedded once, both cached under
