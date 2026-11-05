@@ -132,6 +132,8 @@ def same_collection(a: str, b: str) -> bool:
 
 JUNK = re.compile(r"just a moment|page not found|not found|404|403|access denied|forbidden|service status|"
                   r"log ?in|logg p|sign in|anmelden|captcha|attention required|error|unavailable|cookies?", re.I)
+EVENT = re.compile(r"\b(events?|talks?|webinars?|lectures?|exhibitions?/upcoming|shop|store|tickets?|blog|news|press)\b|"
+                   r"\bplate \d+\b", re.I)
 _SAME_INSTITUTION = {"artic": "artic.edu", "met": "metmuseum.org", "cleveland": "clevelandart.org",
                      "wikidata": "wikidata.org"}
 
@@ -300,7 +302,8 @@ class Catalogue:
     @staticmethod
     def _artic_rec(x: dict, verified_by: str) -> Record:
         bio = (x.get("artist_display") or "").split("\n", 1)[-1]
-        img = f"https://www.artic.edu/iiif/2/{x['image_id']}/full/600,/0/default.jpg" if x.get("image_id") else ""
+        # 843 px is the Art Institute's standard derivative; other widths are refused (HTTP 403)
+        img = f"https://www.artic.edu/iiif/2/{x['image_id']}/full/843,/0/default.jpg" if x.get("image_id") else ""
         return Record("artic", f"https://www.artic.edu/artworks/{x['id']}", x.get("title", ""), x.get("alt_titles") or [],
                       x.get("artist_title") or "", bio, x.get("date_display") or "", x.get("medium_display") or "",
                       "Art Institute of Chicago", x.get("style_title") or "", img, verified_by)
@@ -369,10 +372,17 @@ class Catalogue:
         m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)', r.text) or \
             re.search(r"<title[^>]*>([^<]+)</title>", r.text)
         title = html.unescape(m.group(1)).strip() if m else title_hint
-        body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", r.text[:400_000], flags=re.S | re.I)
-        text = fold(html.unescape(re.sub(r"<[^>]+>", " ", body)))
+        raw = r.text[:400_000]
+        # what a script-rendered page still says: its meta tags, its schema.org data, and its own address
+        meta = " ".join(re.findall(r'<meta[^>]+content=["\']([^"\']{3,400})["\']', raw))
+        ld = " ".join(re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', raw, flags=re.S | re.I))
+        body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw, flags=re.S | re.I)
+        path = re.sub(r"[-_/.]+", " ", urlparse(url).path)
+        text = fold(" ".join([html.unescape(re.sub(r"<[^>]+>", " ", body)), html.unescape(meta), ld, path]))
         if JUNK.search(title) or len(text) < 400:
             return None
+        if EVENT.search(title) or EVENT.search(urlparse(url).path):
+            return None                                   # an events or shop page shows the picture, it is no record of it
         title = re.split(r"\s+[|–—]\s+|\s+-\s+", title)[0].strip()
         rec = Record(institution(url), url, "" if non_title(title) else title, [], verified_by=verified_by,
                      image_url=image_url, text=text)
