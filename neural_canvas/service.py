@@ -33,6 +33,11 @@ from .pipeline import IMAGE_EXTS, Docent, ingest, load_image
 
 log = logging.getLogger(__name__)
 ACTOR = "neural-canvas"
+# Pulse fills any pipeline dimension a new task leaves out with its default, and staging's default is
+# "wait" (= ready to run). A record-only task must therefore say every dimension is finished. The
+# completed dimension has no "duplicate" value; outcome: is a free label and survives the close.
+FINISHED = ["staging:done", "evaluated:done", "queued:done", "active:done", "completed:done", "blocked:no"]
+RETRY_S = 600          # a file whose task could not be created is retried after this long
 
 
 class Pulse:
@@ -44,12 +49,16 @@ class Pulse:
         r = self.s.request(method, f"{self.url}{path}", timeout=30, **kw)
         if r.status_code == 409:
             return None
-        r.raise_for_status()
+        if r.status_code >= 400:     # Pulse explains a rejection in the body; keep it in the error
+            raise requests.HTTPError(f"{r.status_code} {method} {path}: {r.text[:300]}", response=r)
         return r.json() if r.content else {}
 
     def create(self, title: str, description: str, labels: list[str], metadata: dict) -> dict:
-        return self._r("POST", "/tasks", json={"title": title, "description": description, "priority": "medium",
-                                              "labels": labels, "metadata": metadata, "actor": ACTOR})
+        t = self._r("POST", "/tasks", json={"title": title, "description": description, "priority": "medium",
+                                           "labels": labels, "metadata": metadata, "actor": ACTOR})
+        if not t or not t.get("id"):
+            raise requests.HTTPError(f"Pulse created no task for {title!r}")
+        return t
 
     def list(self, label: str, status: str | None = None) -> list[dict]:
         params = {"label": label, "limit": 500, **({"status": status} if status else {})}
@@ -117,6 +126,7 @@ class Service:
         self.known_path = self.state / "known.json"
         self.known: dict = json.loads(self.known_path.read_text()) if self.known_path.exists() else {}
         self._sizes: dict[str, int] = {}
+        self._failed: dict[tuple[str, int], float] = {}     # (name, size) -> when its task create failed
         self.registry = ArtworkRegistry(cfg.path("state_dir"))
         self.photos = GooglePhotos(cfg["google_photos"], cfg.path("state_dir"))
         self._auth_alerted = 0.0
@@ -130,6 +140,8 @@ class Service:
 
     # ── watcher: folder → tasks ────────────────────────────────────────────
     def scan(self) -> list[str]:
+        """Queue every stable new image. A file leaves the inbox only once its task exists, so a Pulse
+        failure leaves it where it is (retried after RETRY_S) instead of moving it with no task."""
         created = []
         self.registry.reload()
         for f in sorted(self.watch.iterdir()):
@@ -139,56 +151,77 @@ class Service:
             if self._sizes.get(f.name) != size:     # still being written: wait for a stable size
                 self._sizes[f.name] = size
                 continue
-            self._sizes.pop(f.name, None)
+            key = (f.name, size)
+            if time.time() - self._failed.get(key, 0.0) < RETRY_S:
+                continue
             try:
-                ph = phash(load_image(f))
-            except Exception as e:          # unreadable: queue it anyway, the run will block and say why
-                log.warning("could not hash %s: %s", f.name, e)
-                ph = None
-            twin = self.registry.near(ph) if ph is not None and not f.name.startswith("requeue-") else None
-            if twin:
-                dest = self.duplicates / f.name
-                dest = dest if not dest.exists() else self.duplicates / f"{int(time.time())}-{f.name}"
-                like = twin[1].get("original_name") or twin[1].get("title", "")
-                t = self.pulse.create(
-                    title=f"Docent: duplicate set aside — {f.name[:60]}",
-                    description=(f"{f.name} is {twin[2]} bits (of 64) from run {twin[0]} ({like}) by perceptual hash, "
-                                 f"so it was not queued. It was moved to {dest}.\n\nIf it is a different work, move it "
-                                 "back into the watch folder with its name prefixed 'requeue-' and it will be queued."),
-                    labels=[self.runner_label, self.project_label, "agent:aifred", "type:docent-run",
-                            "completed:duplicate", "blocked:no"],
-                    metadata={"original_name": f.name, "duplicate_of": twin[0], "hamming": twin[2], "path": str(dest)})
-                shutil.move(str(f), dest)
-                self.pulse.close(t["id"], f"duplicate of run {twin[0][:8]} ({twin[2]} bits)")
-                log.info("duplicate set aside: %s is %d bits from run %s (%s)", f.name, twin[2], twin[0][:8], like)
+                tid = self._intake(f)
+            except requests.RequestException as e:
+                first = key not in self._failed
+                self._failed[key] = time.time()
+                log.error("could not queue %s, left in the inbox (retry in %ds): %s", f.name, RETRY_S, e)
+                if first:
+                    self.pulse.alert("warning", f"neural-canvas could not queue {f.name}",
+                                     {"file": f.name, "error": str(e)[:300]})
                 continue
-            rid, src = ingest(self.cfg, f)
-            dest = self.ingested / f.name
-            shutil.move(str(f), dest if not dest.exists() else self.ingested / f"{rid[:8]}-{f.name}")
-            if rid in self.known:
-                log.info("already known %s (%s) — not re-queued", f.name, self.known[rid])
-                continue
-            t = self.pulse.create(
-                title=f"Docent: new artwork {rid[:8]}",
-                description=(f"New image detected in the neural-canvas watch folder.\n\nRun id: {rid}\n"
-                             f"Original file: {f.name}\nWork dir: {src.parent}\n\n"
-                             "Owned by the neural-canvas runner (local models). Stages: identify → interpret → "
-                             "compose → upscale → label → deliver."),
-                labels=[self.runner_label, self.project_label, "agent:aifred", "type:docent-run",
-                        "staging:wait", "blocked:no"],
-                metadata={"run_id": rid, "source_path": str(src), "original_name": f.name})
-            self.known[rid] = t["id"]
-            self.registry.record(rid, phash=ph, status="queued", original_name=f.name)
-            self.known_path.write_text(json.dumps(self.known, indent=1))
-            log.info("queued %s as %s", f.name, t["id"])
-            created.append(t["id"])
+            self._sizes.pop(f.name, None)
+            self._failed.pop(key, None)
+            if tid:
+                created.append(tid)
         return created
+
+    def _intake(self, f: Path) -> str | None:
+        try:
+            ph = phash(load_image(f))
+        except Exception as e:          # unreadable: queue it anyway, the run will block and say why
+            log.warning("could not hash %s: %s", f.name, e)
+            ph = None
+        twin = self.registry.near(ph) if ph is not None and not f.name.startswith("requeue-") else None
+        if twin:
+            dest = self.duplicates / f.name
+            dest = dest if not dest.exists() else self.duplicates / f"{int(time.time())}-{f.name}"
+            like = twin[1].get("original_name") or twin[1].get("title", "")
+            t = self.pulse.create(
+                title=f"Docent: duplicate set aside — {f.name[:60]}",
+                description=(f"{f.name} is {twin[2]} bits (of 64) from run {twin[0]} ({like}) by perceptual hash, "
+                             f"so it was not queued. It was moved to {dest}.\n\nIf it is a different work, move it "
+                             "back into the watch folder with its name prefixed 'requeue-' and it will be queued."),
+                labels=[self.runner_label, self.project_label, "agent:aifred", "type:docent-run",
+                        "outcome:duplicate", *FINISHED],
+                metadata={"original_name": f.name, "duplicate_of": twin[0], "hamming": twin[2], "path": str(dest)})
+            shutil.move(str(f), dest)
+            self.pulse.close(t["id"], f"duplicate of run {twin[0][:8]} ({twin[2]} bits)")
+            log.info("duplicate set aside: %s is %d bits from run %s (%s)", f.name, twin[2], twin[0][:8], like)
+            return None
+        rid, src = ingest(self.cfg, f)
+        dest = self.ingested / f.name
+        dest = dest if not dest.exists() else self.ingested / f"{rid[:8]}-{f.name}"
+        if rid in self.known:
+            shutil.move(str(f), dest)
+            log.info("already known %s (%s) — not re-queued", f.name, self.known[rid])
+            return None
+        t = self.pulse.create(
+            title=f"Docent: new artwork {rid[:8]}",
+            description=(f"New image detected in the neural-canvas watch folder.\n\nRun id: {rid}\n"
+                         f"Original file: {f.name}\nWork dir: {src.parent}\n\n"
+                         "Owned by the neural-canvas runner (local models). Stages: identify → interpret → "
+                         "compose → upscale → label → deliver."),
+            labels=[self.runner_label, self.project_label, "agent:aifred", "type:docent-run",
+                    "staging:wait", "blocked:no"],
+            metadata={"run_id": rid, "source_path": str(src), "original_name": f.name})
+        self.known[rid] = t["id"]
+        self.known_path.write_text(json.dumps(self.known, indent=1))
+        self.registry.record(rid, phash=ph, status="queued", original_name=f.name)
+        shutil.move(str(f), dest)
+        log.info("queued %s as %s", f.name, t["id"])
+        return t["id"]
 
     # ── runner: tasks → runs ──────────────────────────────────────────────
     def run_ready(self) -> int:
         n = 0
         ready = [t for t in self.pulse.list(self.runner_label)
-                 if t.get("status") != "closed" and "staging:wait" in t.get("labels", [])]
+                 if t.get("status") != "closed" and "staging:wait" in t.get("labels", [])
+                 and (t.get("metadata") or {}).get("run_id")]     # record-only tasks carry no run
         for i, t in enumerate(ready):
             # checked before EVERY claim: a run takes minutes, the queue days, and a sign-in can lapse
             # midway. Every run would then end blocked at deliver, so leave the queue untouched and say so.
@@ -234,7 +267,8 @@ class Service:
                                  f"→ {res.frame_path}", metadata={**meta, "result": summary})
             self.pulse.close(tid, f"delivered: {summary['artist']} — {summary['title']}")
         elif res.status == "duplicate":
-            self.pulse.labels(tid, add=["active:done", "completed:duplicate"], remove=["active:running"])
+            self.pulse.labels(tid, add=["active:done", "completed:done", "outcome:duplicate"],
+                              remove=["active:running"])
             self.pulse.note(tid, f"DUPLICATE: {'; '.join(res.reasons)}", metadata={**meta, "result": summary})
             self.pulse.close(tid, "duplicate of a delivered artwork")
         else:

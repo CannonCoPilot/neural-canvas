@@ -289,8 +289,8 @@ def test_runner_pauses_without_claiming_when_delivery_cannot_sign_in(tmp_path, m
     cfg = Config(_merge(DEFAULTS, {"paths": {k: str(tmp_path / k) for k in ("watch_dir", "work_dir", "output_dir", "state_dir")}}))
     s = svc.Service(cfg)
     alerts, claims = [], []
-    monkeypatch.setattr(s.pulse, "list", lambda label: [{"id": "t1", "labels": ["staging:wait"]},
-                                                       {"id": "t2", "labels": ["staging:wait"]}])
+    monkeypatch.setattr(s.pulse, "list", lambda label: [{"id": t, "labels": ["staging:wait"], "metadata": {"run_id": t}}
+                                                       for t in ("t1", "t2")])
     monkeypatch.setattr(s.pulse, "claim", lambda tid, label: claims.append(tid) or False)
     monkeypatch.setattr(s.pulse, "alert", lambda sev, text, data: alerts.append((sev, data)))
     monkeypatch.setattr(s.photos, "check", lambda: "Google Photos sign-in expired: re-run auth-photos.")
@@ -349,3 +349,68 @@ def test_a_long_title_shrinks_then_wraps_and_an_impossible_one_fails():
 def test_a_missing_card_texture_is_an_error_not_a_flat_card(tmp_path):
     with pytest.raises(FileNotFoundError):
         _card({"artist": "A", "title": "B"}, texture=str(tmp_path / "nope.jpg"))
+
+
+# Pulse's pipeline dimensions (alfred/pulse/app.py PIPELINE_DIMENSIONS): any other value is a 400.
+PULSE_DIMENSIONS = {"staging": {"wait", "processing", "done", "blocked"}, "evaluated": {"no", "processing", "done", "blocked"},
+                    "queued": {"no", "done", "blocked"}, "active": {"no", "claiming", "running", "done", "blocked"},
+                    "completed": {"no", "reviewing", "done"}, "blocked": {"no", "yes", "diagnosing"}}
+
+
+def _service(tmp_path):
+    from neural_canvas import service as svc
+    from neural_canvas.config import DEFAULTS, Config, _merge
+    paths = {k: tmp_path / k for k in ("watch_dir", "work_dir", "output_dir", "state_dir")}
+    for p in paths.values():
+        p.mkdir()
+    cfg = Config(_merge(DEFAULTS, {"paths": {k: str(v) for k, v in paths.items()}}))
+    return svc, svc.Service(cfg), paths["watch_dir"]
+
+
+def _pulse_labels_valid(labels):
+    for lbl in labels:
+        dim, _, val = lbl.partition(":")
+        assert dim not in PULSE_DIMENSIONS or val in PULSE_DIMENSIONS[dim], lbl
+
+
+def test_a_failed_task_create_leaves_the_file_in_the_inbox(tmp_path, monkeypatch):
+    import requests
+    svc, s, watch = _service(tmp_path)
+    _img(64, 48).save(watch / "work.png")
+    alerts = []
+
+    def refuse(**kw):
+        raise requests.HTTPError("400 POST /tasks: Invalid value")
+    monkeypatch.setattr(s.pulse, "create", refuse)
+    monkeypatch.setattr(s.pulse, "alert", lambda sev, text, data: alerts.append(text))
+    s.scan(); s.scan(); s.scan()                    # first look sees the size; then fails; then waits
+    assert (watch / "work.png").exists() and not list((watch / "ingested").iterdir())
+    assert len(alerts) == 1 and s.known == {}
+    made = []
+    monkeypatch.setattr(s.pulse, "create", lambda **kw: made.append(kw) or {"id": "AION-1"})
+    monkeypatch.setattr(svc.time, "time", lambda: 1e12)     # past the retry wait
+    assert s.scan() == ["AION-1"]
+    assert not (watch / "work.png").exists() and (watch / "ingested" / "work.png").exists()
+    _pulse_labels_valid(made[0]["labels"])
+
+
+def test_a_duplicate_notice_is_valid_on_pulse_and_never_runnable(tmp_path, monkeypatch):
+    from neural_canvas.dedup import phash
+    svc, s, watch = _service(tmp_path)
+    img = _img(64, 48)
+    img.save(watch / "again.png")
+    s.registry.record("r-delivered", phash=phash(img), status="delivered", original_name="first.png")
+    made, closed = [], []
+    monkeypatch.setattr(s.pulse, "create", lambda **kw: made.append(kw) or {"id": "AION-d"})
+    monkeypatch.setattr(s.pulse, "close", lambda tid, reason: closed.append(tid))
+    s.scan(); s.scan()
+    labels = made[0]["labels"]
+    _pulse_labels_valid(labels)
+    assert "outcome:duplicate" in labels and "staging:done" in labels and "staging:wait" not in labels
+    assert closed == ["AION-d"] and (watch / "duplicates" / "again.png").exists()
+    # a task without a run is never claimed, whatever its labels say
+    claims = []
+    monkeypatch.setattr(s.pulse, "list", lambda label: [{"id": "AION-d", "labels": ["staging:wait"], "metadata": {}}])
+    monkeypatch.setattr(s.pulse, "claim", lambda tid, label: claims.append(tid) or False)
+    monkeypatch.setattr(s.photos, "check", lambda: "")
+    assert s.run_ready() == 0 and claims == []
