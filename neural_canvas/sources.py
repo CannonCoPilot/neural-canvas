@@ -51,7 +51,8 @@ _COMMERCIAL = ("etsy.com", "amazon.", "ebay.", "fineartamerica.com", "pixels.com
                "1st-art-gallery", "overstockart", "wahooart", "paintingmania", "canvasprints", "displate",
                "onlly.art", "joy-cadeaux", "artprintimages", "mediastorehouse", "alamy.com", "shutterstock.com",
                "gettyimages.", "istockphoto", "dreamstime", "depositphotos", "123rf", "bridgemanimages",
-               "magnoliabox", "king-and-mcgaw", "galeriesoftheworld", "reproduction", "prints")
+               "magnoliabox", "king-and-mcgaw", "galeriesoftheworld", "reproduction", "prints",
+               "artera.ae")       # an aggregator re-hosting Artvee: its /artworks/ path is no museum's
 _SOCIAL = ("pinterest.", "pinimg.com", "tumblr.com", "twitter.com", "x.com", "facebook.com", "instagram.com",
            "reddit.com", "flickr.com", "deviantart.com", "yandex.", "vk.com", "threads.net", "tiktok.com",
            "bing.net", "bing.com", "googleusercontent.com")

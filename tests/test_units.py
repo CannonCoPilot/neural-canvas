@@ -687,3 +687,25 @@ def test_a_yale_linked_art_record_reads_into_a_record():
     assert (r.title, r.artist, r.artist_bio, r.date) == ("The Riva—Sunset: Red and Gold", "James McNeill Whistler", "American, 1834–1903", "1879–80")
     assert r.medium == "Pastel and black chalk" and r.collection == "Yale University Art Gallery" and r.image_url.endswith("/8121")
     assert r.states("with butterfly") and r.titles == []
+
+
+def test_a_rijksmuseum_linked_art_record_reads_its_aat_codes():
+    from neural_canvas.catalogue import Catalogue
+    aat = lambda n: [{"id": f"http://vocab.getty.edu/aat/{n}"}]
+    lang = lambda n: [{"id": f"http://vocab.getty.edu/aat/{n}"}]
+    x = {"id": "https://id.rijksmuseum.nl/200108369",
+         "identified_by": [{"type": "Identifier", "content": "SK-A-2344"},
+                           {"type": "Name", "classified_as": aat(300404670), "content": "Het melkmeisje", "language": lang(300388256)},
+                           {"type": "Name", "classified_as": aat(300404670), "content": "The Milkmaid", "language": lang(300388277)},
+                           {"type": "Name", "classified_as": [{"id": "https://id.rijksmuseum.nl/22015528"}], "content": "De keukenmeid"}],
+         "produced_by": {"part": [{"carried_out_by": [{"notation": [{"@language": "nl", "@value": "Johannes Vermeer"},
+                                                                     {"@language": "en", "@value": "Johannes Vermeer"}]}]}],
+                         "timespan": {"identified_by": [{"content": "ca. 1660", "language": lang(300388256)},
+                                                        {"content": "c. 1660", "language": lang(300388277)}]}},
+         "referred_to_by": [{"classified_as": aat(300435429), "content": "olieverf op doek", "language": lang(300388256)},
+                            {"classified_as": aat(300435429), "content": "oil on canvas", "language": lang(300388277)}],
+         "subject_of": [{"digitally_carried_by": [{"access_point": [{"id": "https://iiif.micr.io/QkOGy/full/max/0/default.jpg"}]}]}]}
+    r = Catalogue._rijks_rec(x)
+    assert (r.title, r.artist, r.date, r.medium) == ("The Milkmaid", "Johannes Vermeer", "c. 1660", "oil on canvas")
+    assert "Het melkmeisje" in r.titles and "De keukenmeid" in r.titles
+    assert r.image_url == "https://iiif.micr.io/QkOGy/full/800,/0/default.jpg" and r.source == "rijksmuseum.nl"

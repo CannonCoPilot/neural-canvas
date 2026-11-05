@@ -43,7 +43,6 @@ UA = "neural-canvas/1.0 (+https://github.com/CannonCoPilot/neural-canvas)"
 LANGS = "en|de|fr|nl|it|es|ja|da|sv|no|nb|fi|cs|ru|pl|pt"
 UNAVAILABLE = {
     "Getty ULAN": "server-side TLS failure on vocab.getty.edu (2026-11-05)",
-    "Rijksmuseum": "collection API retired (HTTP 410)",
     "National Gallery of Art": "nga.gov answers plain HTTP with a Cloudflare challenge (403, 2026-11-05); its open "
                                "data is a 5.3 GB CSV repository, not wired in",
     "Norman Rockwell Museum": "collection.nrm.org answers every automated request with a bot challenge (2026-11-05)",
@@ -52,6 +51,8 @@ UNAVAILABLE = {
 SI_UNITS = "SAAM OR NPG OR HMSG OR FSG OR CHNDM OR NMAfA"
 ARTIC_FIELDS = "id,title,alt_titles,artist_title,artist_display,date_display,medium_display,style_title,image_id"
 LUX = "https://lux.collections.yale.edu"     # Yale: Linked Art records, Yale-provided metadata CC0
+# Getty AAT ids the Rijksmuseum's Linked Art uses in place of labels
+AAT_ENGLISH, AAT_PREFERRED, AAT_MATERIALS = "300388277", "300404670", "300435429"
 RKD_ARTISTS = "https://api.rkd.triply.cc/datasets/rkd/RKD-SDO-Knowledge-Graph/services/Virtuoso/sparql"
 RKD_WORKS = "https://api.rkd.triply.cc/datasets/rkd/RKD-Knowledge-Graph/services/SPARQL/sparql"
 STOP = {"the", "and", "with", "von", "van", "der", "die", "das", "les", "des", "del", "della", "of", "a", "an",
@@ -450,6 +451,57 @@ class Catalogue:
                     return [rec]
         return []
 
+    @staticmethod
+    def _rijks_rec(x: dict) -> Record | None:
+        """A Rijksmuseum Linked Art object: its labels are Getty AAT ids, not text."""
+        if not x.get("id"):
+            return None
+        def ids(e):
+            return {c.get("id", "").rsplit("/", 1)[-1] for c in e.get("classified_as") or []}
+        def en(e):
+            return any(l.get("id", "").endswith(AAT_ENGLISH) for l in e.get("language") or [])
+        names = [n for n in x.get("identified_by") or [] if n.get("type") == "Name" and n.get("content")]
+        pref = [n for n in names if AAT_PREFERRED in ids(n)] or names
+        title = next((n["content"] for n in pref if en(n)), pref[0]["content"] if pref else "")
+        prod = x.get("produced_by") or {}
+        makers = [a for part in [prod, *(prod.get("part") or [])] for a in part.get("carried_out_by") or []]
+        notes = (makers[0].get("notation") or []) if makers else []
+        artist = next((n.get("@value", "") for n in notes if n.get("@language") == "en"), notes[0].get("@value", "") if notes else "")
+        stamps = (prod.get("timespan") or {}).get("identified_by") or []
+        date = next((t.get("content", "") for t in stamps if en(t)), stamps[0].get("content", "") if stamps else "")
+        refs = x.get("referred_to_by") or []
+        medium = next((r.get("content", "") for r in refs if AAT_MATERIALS in ids(r) and en(r)), "")
+        image = next((a.get("id", "") for s in x.get("subject_of") or [] for d in s.get("digitally_carried_by") or []
+                      for a in d.get("access_point") or [] if "iiif" in a.get("id", "")), "")
+        image = image.replace("/full/max/", "/full/800,/")
+        text = fold(" ".join([*(n["content"] for n in names), artist, *(str(r.get("content", "")) for r in refs)]))
+        others = list(dict.fromkeys(n["content"] for n in names if n["content"] != title))
+        return Record("rijksmuseum.nl", x["id"], title, others, artist, "",
+                      date, medium, "Rijksmuseum", "", image, "image", text=text)
+
+    def _rijksmuseum(self, img, img_vec, titles: list[str], artist: str, surname: str) -> list[Record]:
+        """Rijksmuseum data services (keyless Linked Art; the old key API is retired): artist AND title,
+        then the artist's works with images."""
+        if not artist:
+            return []
+        self.consulted.append("Rijksmuseum")
+        seen: set[str] = set()
+        searches = [{"creator": artist, "title": t} for t in titles[:4]] + [{"creator": artist, "imageAvailable": "true"}]
+        for params in searches:
+            d = self._get("https://data.rijksmuseum.nl/search/collection", **params)
+            for stub in (d.get("orderedItems") or [])[:6]:
+                u = stub.get("id", "")
+                if u in seen:
+                    continue
+                seen.add(u)
+                rec = self._rijks_rec(self._get(u))
+                if not rec or surname not in fold(rec.artist) or not rec.image_url:
+                    continue
+                ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url)
+                if ok:
+                    return [rec]
+        return []
+
     def _artist_living(self, artist: str) -> tuple[bool, str]:
         """(living, artist QID). An artist no catalogue knows, or one with no recorded death, may be living."""
         aq = self.wiki.find_artist(artist) if artist else None
@@ -746,6 +798,8 @@ class Catalogue:
             recs += self._safe("smithsonian", lambda: self._smithsonian(img, img_vec, queries, surname))
         if "yale" not in {institution(r.source) for r in recs}:
             recs += self._safe("yale", lambda: self._yale(img, img_vec, queries, surname))
+        if "rijksmuseum" not in {institution(r.source) for r in recs}:
+            recs += self._safe("rijksmuseum", lambda: self._rijksmuseum(img, img_vec, titles, artist, surname))
         if "wikipedia.org" not in {r.source for r in recs}:
             for q in queries[:2]:
                 d = self._get("https://en.wikipedia.org/w/api.php", action="query", list="search", srsearch=q, srlimit=3, format="json")
