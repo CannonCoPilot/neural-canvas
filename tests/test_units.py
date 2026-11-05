@@ -452,3 +452,19 @@ def test_a_paper_photo_too_small_for_the_card_is_refused(tmp_path):
     art = Image.new("RGB", (3840, 2160), (90, 110, 80))
     with pytest.raises(ValueError, match="smaller than the card"):
         compose(art, None, (3840, 2160), IDENT, [], 4.5, 0.5, _paper(tmp_path, 600, 600), grain=0.47, grid=2)
+
+
+def test_caption_facts_that_cannot_be_right_are_blanked_with_a_reason():
+    from types import SimpleNamespace
+    from neural_canvas.identify import check_facts
+    tomioka = SimpleNamespace(artist_born="1922", artist_died="1994", date="1922-1994", medium="")
+    assert "artist's life" in check_facts(tomioka)["date"] and tomioka.date == ""
+    lovell = SimpleNamespace(artist_born="1909", artist_died="1997", date="1943", medium="Oil on")
+    r = check_facts(lovell)
+    assert list(r) == ["medium"] and lovell.medium == "" and lovell.date == "1943"
+    tissot = SimpleNamespace(artist_born="1836", artist_died="1902", date="1886–1894", medium="Oil paint on canvas")
+    assert check_facts(tissot) == {} and tissot.date == "1886–1894"
+    later = SimpleNamespace(artist_born="1836", artist_died="1902", date="1921", medium="Oil on canvas")
+    assert "outside" in check_facts(later)["date"]
+    living = SimpleNamespace(artist_born="", artist_died="", date="2025", medium="Acrylic")
+    assert check_facts(living) == {}

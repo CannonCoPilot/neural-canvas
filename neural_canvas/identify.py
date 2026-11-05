@@ -73,7 +73,9 @@ with the image's own file name and the title of the page it appeared on:
 An image's file name usually names the pictured work; a page title may describe a DIFFERENT work shown on
 the same page (shop pages, related-items strips, galleries). Weigh the evidence across all lines.
 Give the artwork's artist (full name), its own title (no artist, gallery, size, price or "print" wording),
-creation year and medium if any line states them. Use "" for anything no line states. Reply ONLY with JSON:
+creation year and medium if any line states them. Use "" for anything no line states. Two years in brackets
+beside the artist's name, e.g. "(Japan, 1922-1994)", are the artist's life, NOT the work's date. A medium
+cut off mid-phrase (e.g. "Oil on |") is not stated: use "". Reply ONLY with JSON:
 {{"artist": "...", "title": "...", "date": "...", "medium": "..."}}"""
 
 
@@ -499,6 +501,10 @@ class Identifier:
                 ident.evidence["reason"] = f"title {ident.title!r} is not written in any verified reference"
         if ident.facts_source != "wikidata" and ident.artist:
             ident.__dict__.update(self._artist_facts(ident.artist))
+            rejected = check_facts(ident)
+            if rejected:   # a missing fact closes its row; a wrong one would be printed on the card
+                ident.evidence["rejected_facts"] = rejected
+                log.warning("facts rejected for %s — %s: %s", ident.artist, ident.title, rejected)
         if not (ident.title and ident.artist):
             ident.status = "unconfirmed"
             ident.evidence["reason"] = "image matched but the reference carries no usable title/artist"
@@ -519,6 +525,27 @@ class Identifier:
                         "artist_nationality": self.wiki.label(self.wiki.entities(nat[:1]).get(nat[0], {}))
                         if nat else ""}
         return {}
+
+
+_DANGLING = re.compile(r"\b(on|and|with|of|in|over|en|sur|auf|su|y|et|und)\s*[|,;:.\u2026-]*\s*$|\.\.\.$|\u2026$", re.I)
+
+
+def check_facts(ident) -> dict:
+    """Blank the facts read from captions that cannot be right, and say why. A date made of the artist's
+    birth and death years is their life, not the work's; a date outside that life is another work's; a
+    medium ending mid-phrase ("Oil on") was cut off by a page title."""
+    rejected = {}
+    born, died = (int(v) if str(v or "").isdigit() else None for v in (ident.artist_born, ident.artist_died))
+    years = [int(y) for y in re.findall(r"\b(1[0-9]{3}|20[0-9]{2})\b", ident.date or "")]
+    if years and born and died and sorted(set(years)) == sorted({born, died}):
+        rejected["date"] = f"{ident.date!r} is the artist's life ({born}-{died})"
+    elif years and ((born and min(years) < born) or (died and min(years) > died)):
+        rejected["date"] = f"{ident.date!r} falls outside the artist's life ({born or '?'}-{died or '?'})"
+    if ident.medium and _DANGLING.search(ident.medium.strip()):
+        rejected["medium"] = f"{ident.medium!r} is cut off mid-phrase"
+    for k in rejected:
+        setattr(ident, k, "")
+    return rejected
 
 
 def _web_line(r) -> str:
