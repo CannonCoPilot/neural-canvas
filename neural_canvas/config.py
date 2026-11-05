@@ -32,11 +32,15 @@ DEFAULTS: dict[str, Any] = {
         "upscaler_weights": str(Path.home() / "Claude" / "Staging" / "verified" / "models"
                                 / "realesrgan" / "RealESRGAN_x4plus.pth"),
     },
-    # placard_scale: the wall label's size; 1.0 is the original 940 px card
-    "display": {"width": 3840, "height": 2160, "placard_scale": 0.5,
-                # photographed watercolour card stock (Art_AI input/card_stock.jpg); local asset, not in git
+    # placard_scale: the wall label's size; 1.0 is the original 940 px card.
+    # viewer_height: the lines the TV actually shows (measured 2026-11-04 with a stripe chart: 1080);
+    # the card is drawn on that grid. 0 draws it at frame resolution.
+    "display": {"width": 3840, "height": 2160, "placard_scale": 0.5, "viewer_height": 1080,
+                # photographed white paper (unblast.com white-paper-texture-2, 2000 px; chosen on the TV
+                # 2026-11-04); local asset, not in git. grain: frame pixels per photo pixel
                 "card_texture": str(Path.home() / "Claude" / "Staging" / "verified" / "neural-canvas"
-                                    / "assets" / "card_stock.jpg")},
+                                    / "assets" / "card_stock_unblast.jpg"),
+                "card_texture_grain": 0.47},
     "thresholds": {
         # identification: a candidate is CONFIRMED only when a reference image of it from an
         # open collection matches the input on both instruments (embedding + geometry).

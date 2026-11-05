@@ -30,7 +30,7 @@ from .imify import Imify
 from .interpret import Interpretation, Subject, interpret
 from .matching import Embedder
 from .movement import classify as classify_movement
-from .placard import card_margin, card_size, compose
+from .placard import card_margin, card_size, compose, viewer_grid
 from .references import Wikimedia
 from .upscale import Upscaler
 from .vision_web import VisionWebDetection
@@ -97,8 +97,10 @@ class Docent:
                                      VisionWebDetection(vw, cfg.path("state_dir") / "vision_web")
                                      if vw.get("enabled") else None)
         W, H = cfg["display"]["width"], cfg["display"]["height"]
-        cw, ch = card_size(cfg["display"]["placard_scale"])
-        m = card_margin(cfg["display"]["placard_scale"])
+        dsp = cfg["display"]
+        self.grid = viewer_grid(dsp["height"], dsp.get("viewer_height", 0))
+        cw, ch = card_size(dsp["placard_scale"], self.grid)
+        m = card_margin(dsp["placard_scale"], self.grid)
         self.composer = Composer(W, H, cfg.thresholds["essential_retained_min"],
                                  card=((W - m - cw) / W, (H - m - ch) / H, (W - m) / W, (H - m) / H))
         self._upscaler = None
@@ -232,7 +234,7 @@ class Docent:
             disp = (self.cfg["display"]["width"], self.cfg["display"]["height"])
             frame, pl = compose(art, plan, disp, facts, ess, self.cfg.thresholds["placard_min_contrast"],
                                 self.cfg["display"]["placard_scale"], self.cfg["display"]["card_texture"],
-                                faces=faces)
+                                faces=faces, grain=self.cfg["display"]["card_texture_grain"], grid=self.grid)
             name = f"{_slug(facts['artist'])}--{_slug(facts['title'])}--{run_id[:8]}.jpg"
             out = self.cfg.path("output_dir") / name
             frame.save(out, "JPEG", quality=92, optimize=True)

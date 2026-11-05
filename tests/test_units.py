@@ -414,3 +414,41 @@ def test_a_duplicate_notice_is_valid_on_pulse_and_never_runnable(tmp_path, monke
     monkeypatch.setattr(s.pulse, "claim", lambda tid, label: claims.append(tid) or False)
     monkeypatch.setattr(s.photos, "check", lambda: "")
     assert s.run_ready() == 0 and claims == []
+
+
+def _paper(tmp_path, w=2000, h=2000):
+    rng = np.random.default_rng(1)
+    p = tmp_path / "paper.png"
+    Image.fromarray(rng.integers(200, 255, (h, w, 3), dtype=np.uint8)).save(p)
+    return str(p)
+
+
+IDENT = {"artist": "Paul Gauguin", "artist_nationality": "France", "artist_born": "1848", "artist_died": "1903",
+         "title": "The Field of Derout-Lollichon", "date": "1886", "medium": "Oil paint on canvas",
+         "movement": "Impressionism", "collection": "Los Angeles County Museum of Art"}
+
+
+def test_a_card_drawn_for_a_1080_viewer_halves_back_exactly(tmp_path):
+    from neural_canvas.placard import compose, viewer_grid
+    grid = viewer_grid(2160, 1080)
+    assert grid == 2
+    art = Image.new("RGB", (3840, 2160), (90, 110, 80))
+    frame, pl = compose(art, None, (3840, 2160), IDENT, [], 4.5, 0.5, _paper(tmp_path), grain=0.47, grid=grid)
+    assert pl.passed, pl.failures
+    x0, y0, x1, y1 = pl.box
+    assert all(v % 2 == 0 for v in pl.box)              # the card sits on the viewer's pixel grid
+    card = np.asarray(frame.crop(pl.box), dtype=int)
+    small = card[::2, ::2]
+    for dy in (0, 1):
+        for dx in (0, 1):
+            assert (card[dy::2, dx::2] == small).all()   # every viewer pixel is a solid 2x2 block
+    # so a 2:1 box reduction of the frame returns the card exactly as drawn
+    halved = np.asarray(frame.resize((1920, 1080), Image.BOX), dtype=int)[y0 // 2:y1 // 2, x0 // 2:x1 // 2]
+    assert np.abs(halved - small).max() <= 1
+
+
+def test_a_paper_photo_too_small_for_the_card_is_refused(tmp_path):
+    from neural_canvas.placard import compose
+    art = Image.new("RGB", (3840, 2160), (90, 110, 80))
+    with pytest.raises(ValueError, match="smaller than the card"):
+        compose(art, None, (3840, 2160), IDENT, [], 4.5, 0.5, _paper(tmp_path, 600, 600), grain=0.47, grid=2)
