@@ -48,7 +48,7 @@ UNAVAILABLE = {
     "Norman Rockwell Museum": "collection.nrm.org answers every automated request with a bot challenge (2026-11-05)",
 }
 # Smithsonian art units. The API ignores its fq filter; a fielded unit_code term inside q filters (2026-11-05).
-SI_UNITS = "SAAM OR NPG OR HMSG OR FSG OR CHNDM OR NMAfA"
+SI_UNITS = "SAAM OR NPG OR HMSG OR NMAA OR CHNDM OR NMAfA"   # NMAA = Freer|Sackler (FSG matches nothing)
 ARTIC_FIELDS = "id,title,alt_titles,artist_title,artist_display,date_display,medium_display,style_title,image_id"
 LUX = "https://lux.collections.yale.edu"     # Yale: Linked Art records, Yale-provided metadata CC0
 # Getty AAT ids the Rijksmuseum's Linked Art uses in place of labels
@@ -354,13 +354,16 @@ class Catalogue:
                                    "", (x.get("year") or [""])[0], "", prov, "", url, "image", sim, inl)]
         return []
 
-    def _harvard(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
+    def _harvard(self, img, img_vec, queries: list[str], surname: str, titles: list[str] = ()) -> list[Record]:
         key = self.keys().get("harvard")
         if not key:
             return []
         self.consulted.append("Harvard Art Museums")
-        for q in queries[:4]:
-            d = self._keyed("https://api.harvardartmuseums.org/object", key, apikey=key, q=q, size=10, hasimage=1)
+        url = "https://api.harvardartmuseums.org/object"
+        # person + title together is a fielded AND (either alone does not filter); free text q is the fallback
+        fielded = (self._keyed(url, key, apikey=key, person=surname, title=t, size=10) for t in titles[:4] if surname)
+        plain = (self._keyed(url, key, apikey=key, q=q, size=10, hasimage=1) for q in queries[:4])
+        for d in chain(fielded, plain):
             for x in d.get("records") or []:
                 people = " ".join(p.get("name", "") for p in x.get("people") or [])
                 if surname not in fold(people) or not x.get("primaryimageurl"):
@@ -368,7 +371,8 @@ class Catalogue:
                 ok, sim, inl = self._verify(img, img_vec, x["primaryimageurl"] + "?height=800")
                 if ok:
                     bio = next((p.get("displaydate", "") for p in x.get("people") or [] if surname in fold(p.get("name", ""))), "")
-                    return [Record("harvardartmuseums.org", x.get("url", ""), x.get("title", ""), [], people, bio,
+                    former = [t.get("title", "") for t in x.get("titles") or [] if t.get("title") and t.get("title") != x.get("title")]
+                    return [Record("harvardartmuseums.org", x.get("url", ""), x.get("title", ""), former, people, bio,
                                    x.get("dated", ""), x.get("medium") or "", "Harvard Art Museums", x.get("style") or "",
                                    x["primaryimageurl"], "image", sim, inl)]
         return []
@@ -647,10 +651,19 @@ class Catalogue:
                       d.get("artistDisplayName", ""), d.get("artistDisplayBio", ""), d.get("objectDate", ""), d.get("medium", ""),
                       "The Metropolitan Museum of Art", "", d.get("primaryImageSmall") or "", verified_by)
 
-    def _met_search(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
-        for q in queries[:3]:
-            d = self._get("https://collectionapi.metmuseum.org/public/collection/v1.1/search", q=q)
-            for oid in (d.get("objectIDs") or [])[:5]:
+    def _met_search(self, img, img_vec, queries: list[str], surname: str, artist: str = "",
+                    titles: list[str] = ()) -> list[Record]:
+        api = "https://collectionapi.metmuseum.org/public/collection/v1.1/search"
+        # the Met honours one field flag per call: artist-only AND title-only, intersected here
+        both = []
+        by_artist = set(self._get(api, q=artist, artistOrCulture="true").get("objectIDs") or []) if artist and titles else set()
+        for t in titles[:3] if by_artist else []:
+            ids = [i for i in self._get(api, q=t, title="true").get("objectIDs") or [] if i in by_artist]
+            if ids:
+                both.append(ids)
+        plain = ((self._get(api, q=q).get("objectIDs") or []) for q in queries[:3])
+        for ids in chain(both, plain):
+            for oid in ids[:5]:
                 rec = self._met(oid, "image")
                 if not rec or surname not in fold(rec.artist) or not rec.image_url:
                     continue                      # the Met's records rarely carry an image now: unverifiable
@@ -790,10 +803,10 @@ class Catalogue:
         if "artic" not in have:
             recs += self._safe("artic_search", lambda: self._artic_search(img, img_vec, queries, surname, artist, titles))
         if "met" not in have:
-            recs += self._safe("met_search", lambda: self._met_search(img, img_vec, queries, surname))
+            recs += self._safe("met_search", lambda: self._met_search(img, img_vec, queries, surname, artist, titles))
         recs += self._safe("cleveland_search", lambda: self._cleveland_search(img, img_vec, queries, surname))
         recs += self._safe("europeana", lambda: self._europeana(img, img_vec, queries, surname))
-        recs += self._safe("harvard", lambda: self._harvard(img, img_vec, queries, surname))
+        recs += self._safe("harvard", lambda: self._harvard(img, img_vec, queries, surname, titles))
         if "si" not in {institution(r.source) for r in recs}:
             recs += self._safe("smithsonian", lambda: self._smithsonian(img, img_vec, queries, surname))
         if "yale" not in {institution(r.source) for r in recs}:
