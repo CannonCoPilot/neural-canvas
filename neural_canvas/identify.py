@@ -33,6 +33,7 @@ from .vlm import VLM
 
 log = logging.getLogger(__name__)
 WEB_UA = "Mozilla/5.0 (compatible; neural-canvas/1.0; +https://github.com/CannonCoPilot/neural-canvas)"
+FETCH_WORKERS = 6     # reference fetches in flight across hosts; Wikimedia and the Art Institute take one at a time
 
 PROPOSE_PROMPT = """You are a museum curator identifying an artwork from a photograph of it.
 Nothing is known about it except the image. It IS a work of art — a painting, print or drawing — even
@@ -144,7 +145,7 @@ class Identifier:
         todo = [w for w in works if w["qid"] not in have]
         if todo:
             log.info("embedding %d catalogued works for %s", len(todo), artist_qid)
-            ims = [fetch_image(file_thumb(w["file"], 250), self.ua) for w in todo]   # serial, paced
+            ims = [fetch_image(file_thumb(w["file"], 250), self.ua) for w in todo]   # one host: serial, paced
             ok = [(w, im) for w, im in zip(todo, ims) if im is not None]
             for i in range(0, len(ok), 64):
                 chunk = ok[i:i + 64]
@@ -186,11 +187,8 @@ class Identifier:
             if isinstance(r, WebReference):
                 return fetch_image(r.image_url, WEB_UA) or fetch_image(r.thumb_url, WEB_UA)
             return fetch_image(r.thumb_url, self.ua)
-        if refs and all(isinstance(r, WebReference) for r in refs):
-            with ThreadPoolExecutor(6) as ex:   # many independent sites: no shared rate limit
-                pairs = list(zip(refs, ex.map(get, refs)))
-        else:                                    # Wikimedia: serial and paced inside fetch_image
-            pairs = [(r, get(r)) for r in refs]
+        with ThreadPoolExecutor(FETCH_WORKERS) as ex:   # rate-limited hosts are paced inside fetch_image
+            pairs = list(zip(refs, ex.map(get, refs)))
         pairs = [(r, im) for r, im in pairs if im is not None]
         if not pairs:
             return []
@@ -321,6 +319,7 @@ class Identifier:
         self._used_phrases: set[str] = set()
         self._used_keywords: set[str] = set()
         self._vision_hints: dict = {}
+        self._hint_round = False
         vision_due = bool(self.vision and self.vision.enabled)
         max_rounds = self.t["id_max_rounds"]
         self._signature = self.read_signature(img)
@@ -368,6 +367,13 @@ class Identifier:
                 if not pending:
                     break
                 tier, q, fn = pending.pop(0)
+                if tier == "oeuvre" and vision_due and not self._oeuvre_cached(q.removeprefix("oeuvre:")):
+                    # one web-detection call answers in seconds; a cold catalogue sweep takes many minutes
+                    vision_due = False
+                    ident = self._vision_tier(img, img_vec, "before a catalogue sweep", seen, matches, rounds, rnd,
+                                              cands, sig, summary)
+                    if ident:
+                        return ident
                 log.info("  tier %s: %s", tier, q[:80])
                 try:
                     batch = self._score(img, img_vec, fn(), q, seen)
@@ -384,31 +390,40 @@ class Identifier:
                     rounds.pop()          # facts failed their gate; keep searching
             near = [m for m in matches if m.clip >= self.cfg["vision_web"]["near_miss_clip"]]
             if vision_due and (near or rnd + 1 == max_rounds):
-                vision_due = False   # one billed call per image, ever (the response is cached on disk)
-                why = "near-miss" if near else "free rounds exhausted"
-                log.info("  tier vision_web (%s)", why)
-                try:
-                    web = self.vision.detect(img)
-                    self._vision_hints = VisionWebDetection.hints(web)
-                    batch = self._score(img, img_vec, VisionWebDetection.references(web), f"vision web detection ({why})", seen)
-                except Exception as e:
-                    log.warning("vision web detection failed: %s", e)
-                    batch = [Match(f"ERROR vision_web: {e}", "", "", 0.0, 0, False, "vision web detection")]
-                matches += batch
-                hits = [m for m in batch if m.confirmed]
-                if hits:
-                    ident = self._finish("vision_web", hits, matches, rounds, rnd, cands, sig, summary)
-                    if ident.status == "confirmed":
-                        return ident
-                    rounds.pop()
-                if self._vision_hints and rnd + 1 == max_rounds:
-                    max_rounds += 1   # its hints name new candidates: they get one round of their own
+                vision_due = False
+                ident = self._vision_tier(img, img_vec, "near-miss" if near else "free rounds exhausted", seen, matches,
+                                          rounds, rnd, cands, sig, summary)
+                if ident:
+                    return ident
+            if self._vision_hints and rnd + 1 == max_rounds and not self._hint_round:
+                self._hint_round = True
+                max_rounds += 1   # its hints name new candidates: they get one round of their own
             best = sorted(matches, key=lambda m: (-m.clip, -m.inliers))[:5]
             rounds.append({"round": rnd + 1, "candidates": cands, "best_matches": [_mdict(m) for m in best],
                            **({"vision_hints": self._vision_hints} if self._vision_hints else {})})
             refuted += cands
         return Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
                               evidence={"reason": "no reference image matched on both instruments"})
+
+    def _vision_tier(self, img, img_vec, why, seen, matches, rounds, rnd, cands, sig, summary) -> Identification | None:
+        """Web detection: one billed call per image, ever (the response is cached on disk). Its pages are
+        scored like any other tier; its entity hints steer the next round's candidates."""
+        log.info("  tier vision_web (%s)", why)
+        try:
+            web = self.vision.detect(img)
+            self._vision_hints = VisionWebDetection.hints(web)
+            batch = self._score(img, img_vec, VisionWebDetection.references(web), f"vision web detection ({why})", seen)
+        except Exception as e:
+            log.warning("vision web detection failed: %s", e)
+            batch = [Match(f"ERROR vision_web: {e}", "", "", 0.0, 0, False, "vision web detection")]
+        matches += batch
+        hits = [m for m in batch if m.confirmed]
+        if hits:
+            ident = self._finish("vision_web", hits, matches, rounds, rnd, cands, sig, summary)
+            if ident.status == "confirmed":
+                return ident
+            rounds.pop()
+        return None
 
     def _corroborate(self, hits: list, cands: list[dict]) -> list:
         """After a first web match, look for the same image on more sites so the facts rest on several
@@ -462,8 +477,10 @@ class Identifier:
         else:
             hits = self._corroborate(hits, cands)
             caption_artist = self._caption_artist(hits)
-            # upgrade: find the same image in the caption artist's catalogued works -> Wikidata facts
-            if caption_artist:
+            # upgrade: find the same image in the caption artist's catalogued works -> Wikidata facts.
+            # Only from a catalogue already embedded: a first sweep after a confirmed match buys nothing
+            # the catalogue stage does not do anyway (its Wikidata item search sweeps the same oeuvre).
+            if caption_artist and self._oeuvre_cached(caption_artist):
                 try:
                     cat = [m for m in self._score(self._img, self._img_vec,
                                                   self._oeuvre_refs(caption_artist, self._img_vec), f"oeuvre:{caption_artist}",

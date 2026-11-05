@@ -709,3 +709,19 @@ def test_a_rijksmuseum_linked_art_record_reads_its_aat_codes():
     assert (r.title, r.artist, r.date, r.medium) == ("The Milkmaid", "Johannes Vermeer", "c. 1660", "oil on canvas")
     assert "Het melkmeisje" in r.titles and "De keukenmeid" in r.titles
     assert r.image_url == "https://iiif.micr.io/QkOGy/full/800,/0/default.jpg" and r.source == "rijksmuseum.nl"
+
+
+def test_a_paced_host_keeps_its_gap_across_threads_and_a_retry_after_pauses_them_all():
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from neural_canvas import matching
+    host = "pace.test"
+    starts = []
+    with ThreadPoolExecutor(4) as ex:
+        list(ex.map(lambda _: (matching._wait_turn(host, 0.05), starts.append(time.time())), range(6)))
+    starts.sort()
+    assert all(b - a >= 0.045 for a, b in zip(starts, starts[1:]))
+    matching._back_off(host, 0.3)
+    t = time.time(); matching._wait_turn(host, 0.0)
+    assert time.time() - t >= 0.25
+    assert matching._gate("upload.wikimedia.org") is matching._gate("commons.wikimedia.org") and matching._gate("example.org") is None

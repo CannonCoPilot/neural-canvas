@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import threading
 import time
 from urllib.parse import urlparse
 
@@ -72,15 +73,53 @@ def geometric_inliers(a: Image.Image, b: Image.Image) -> int:
 
 
 _CACHE: dict[str, Image.Image] = {}
-_last_by_host: dict[str, float] = {}
-WIKIMEDIA_INTERVAL_S = 0.12   # serial and paced: Wikimedia answers bursts with HTTP 429
+_next_slot: dict[str, float] = {}         # per host: the earliest moment the next fetch may start
+_slot_lock = threading.Lock()
+_local = threading.local()                # one kept-alive connection pool per thread
+WIKIMEDIA_INTERVAL_S = 0.12   # paced: Wikimedia answers bursts with HTTP 429
 # seconds between fetches per host family. The Art Institute allows 60 a minute; a burst past that is met
 # with a Cloudflare challenge (HTTP 403, cf-mitigated) on every image for some minutes (2026-11-05).
 HOST_INTERVAL_S = {"wikimedia.org": WIKIMEDIA_INTERVAL_S, "wikipedia.org": WIKIMEDIA_INTERVAL_S, "artic.edu": 1.0}
+# hosts that take one request at a time. Measured 2026-11-05 on 27 Wikimedia thumbnails: serial 0.12 s each,
+# six in flight 0.54 s each (its thumbnail allowance answers bursts with 429, Retry-After 11 s).
+SERIAL_HOSTS = ("wikimedia.org", "wikipedia.org", "artic.edu")
+_in_flight: dict[str, threading.Semaphore] = {}
 
 
 def _interval(host: str) -> float:
     return next((v for k, v in HOST_INTERVAL_S.items() if host == k or host.endswith("." + k)), 0.0)
+
+
+def _wait_turn(host: str, gap: float) -> None:
+    """Fetches to one host start at least ``gap`` apart however many threads ask: each takes the next
+    free slot under the lock and sleeps outside it."""
+    with _slot_lock:
+        now = time.time()
+        slot = max(now, _next_slot.get(host, 0.0))
+        _next_slot[host] = slot + gap
+    if slot > now:
+        time.sleep(slot - now)
+
+
+def _gate(host: str) -> threading.Semaphore | None:
+    family = next((k for k in SERIAL_HOSTS if host == k or host.endswith("." + k)), None)
+    if family is None:
+        return None
+    with _slot_lock:
+        return _in_flight.setdefault(family, threading.Semaphore(1))
+
+
+def _back_off(host: str, seconds: float) -> None:
+    """A host that says "retry after" is paused for every thread, not just the one it told."""
+    with _slot_lock:
+        _next_slot[host] = max(_next_slot.get(host, 0.0), time.time() + seconds)
+
+
+def _session() -> requests.Session:
+    s = getattr(_local, "session", None)
+    if s is None:
+        s = _local.session = requests.Session()
+    return s
 
 
 def fetch_image(url: str, user_agent: str) -> Image.Image | None:
@@ -91,23 +130,25 @@ def fetch_image(url: str, user_agent: str) -> Image.Image | None:
         return _CACHE[url]
     host = urlparse(url).netloc
     gap = _interval(host)
+    gate = _gate(host)
     for attempt in range(4):
-        if gap:
-            wait = gap - (time.time() - _last_by_host.get(host, 0.0))
-            if wait > 0:
-                time.sleep(wait)
-            _last_by_host[host] = time.time()
+        _wait_turn(host, gap)
         try:
-            r = requests.get(url, headers={"User-Agent": user_agent}, timeout=12)
+            if gate:
+                with gate:
+                    r = _session().get(url, headers={"User-Agent": user_agent}, timeout=12)
+            else:
+                r = _session().get(url, headers={"User-Agent": user_agent}, timeout=12)
             challenged = r.status_code == 403 and r.headers.get("cf-mitigated") == "challenge"
             if r.status_code == 429 or r.status_code >= 500 or challenged:
-                time.sleep(min(30.0, float(r.headers.get("Retry-After") or 2 ** (attempt + 1))))
+                _back_off(host, min(30.0, float(r.headers.get("Retry-After") or 2 ** (attempt + 1))))
                 continue
             r.raise_for_status()
             im = Image.open(io.BytesIO(r.content)).convert("RGB")
-            if len(_CACHE) > 600:
-                _CACHE.pop(next(iter(_CACHE)))
-            _CACHE[url] = im
+            with _slot_lock:
+                if len(_CACHE) > 600:
+                    _CACHE.pop(next(iter(_CACHE)), None)
+                _CACHE[url] = im
             return im
         except Exception as e:  # a dead reference is just a non-match; logged, not hidden
             log.warning("reference fetch failed %s: %s", url[:120], e)
