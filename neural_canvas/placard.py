@@ -5,8 +5,8 @@ collection. Facts come from the verified identification; the movement line is th
 the catalogue is silent, the interpreter's (see ``movement``). The interpreter's paragraph is not
 printed: it travels as the photo's description instead.
 
-Every card is identical in size, layout, type and stock; only the facts change. At ``scale`` 0.5 it
-is 470 x 194 px on a 3840 x 2160 frame: artist, nationality and life, a gap, then "title, date" on ONE
+Every card is identical in size, layout, type and stock; only the facts change. At ``scale`` 0.6 it
+is 494 x 224 px on a 3840 x 2160 frame: artist, nationality and life, a gap, then "title, date" on ONE
 line, medium, movement, collection. Rows with nothing to say close up; the card does not shrink. A
 line too long for the card is set smaller (to 60% for the title, 70% otherwise); a title still too
 long takes two lines at 60%, in the same height. Past that the label FAILS rather than spill.
@@ -41,7 +41,7 @@ SERIF = FONT_DIR + "Georgia.ttf"
 SERIF_BOLD = FONT_DIR + "Georgia Bold.ttf"
 SERIF_ITALIC = FONT_DIR + "Georgia Italic.ttf"
 
-CARD_W, PAD, GAP = 940, 44, 22     # at scale 1.0; every card is CARD_W wide
+CARD_W, PAD, GAP = 822, 44, 22     # at scale 1.0; every card is CARD_W wide (940 trimmed 12.5%, Sir 2026-11-04)
 SIZES = {"artist": 46, "meta": 30, "title": 44}   # px at scale 1.0
 INK = (29, 28, 26)
 PAPER = (244, 241, 234)

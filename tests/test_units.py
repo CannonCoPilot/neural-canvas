@@ -144,7 +144,7 @@ def test_the_label_never_covers_a_face():
 
 def test_placard_is_facts_only_fixed_half_size_and_bottom_right():
     from neural_canvas.crop import CropPlan
-    from neural_canvas.placard import compose
+    from neural_canvas.placard import card_size, compose
     art = _img(3840, 2160)
     plan = CropPlan("full-bleed", (0, 0, 1, 1), (0, 0, 3840, 2160), (3840, 2160), (0, 0), passed=True)
     ident = {"artist": "Paul Gauguin", "artist_nationality": "France", "artist_born": "1848", "artist_died": "1903",
@@ -156,7 +156,7 @@ def test_placard_is_facts_only_fixed_half_size_and_bottom_right():
     assert text[-2:] == ["Impressionism", "Los Angeles County Museum of Art"]   # movement right above it
     assert len(text) == 6 and "The Field of Derout-Lollichon, 1886" in text   # no paragraph; title one line
     x0, y0, x1, y1 = pl.box
-    assert (x1, y1) == (3840 - 40, 2160 - 40) and (x1 - x0, y1 - y0) == (470, 190)   # fixed, half of 940
+    assert (x1, y1) == (3840 - 40, 2160 - 40) and (x1 - x0, y1 - y0) == card_size(0.5) == (411, 190)   # fixed, half of 822
 
 
 def test_wikidata_movement_labels_print_as_names():
@@ -332,7 +332,7 @@ def test_every_card_is_the_same_size_and_keeps_title_and_date_on_one_line():
                   "collection": "Brooklyn Museum"})
     for pl in (short, full):
         x0, y0, x1, y1 = pl.box
-        assert (x1 - x0, y1 - y0) == (470, 190) and pl.passed, pl.failures
+        assert (x1 - x0, y1 - y0) == (411, 190) and pl.passed, pl.failures
     assert "The Miracle of the Loaves and Fishes, 1886–1894" in full.lines     # one line
 
 
