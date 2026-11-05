@@ -727,17 +727,15 @@ def test_a_paced_host_keeps_its_gap_across_threads_and_a_retry_after_pauses_them
     assert matching._gate("upload.wikimedia.org") is matching._gate("commons.wikimedia.org") and matching._gate("example.org") is None
 
 
-def test_an_inscribed_title_is_a_vote_but_a_signature_is_not():
+def test_an_inscription_is_support_and_a_lead_never_a_vote():
     from neural_canvas.catalogue import Catalogue, inscription_is_title
     assert inscription_is_title("Giftbeeren", "Paul Klee") and inscription_is_title("Rote Ideen", "Paul Klee")
     assert not any(inscription_is_title(x, "Paul Klee") for x in ("Klee", "P K", "PK 1920", "1920.92", "Klee 1920", "J. M. W."))
     cat = Catalogue.__new__(Catalogue); cat.consulted = []
-    wd = _rec("wikidata", "Poisonous Berries", titles=["Giftbeeren"], artist="Paul Klee")
-    page = _rec("zpk.org", "", text="paul klee 1920")
-    ru = cat.rule([wd, page], {"artist": "Paul Klee", "inscribed_title": "Giftbeeren"})
-    assert ru["facts"]["title"] == "Poisonous Berries" and "inscription" in ru["support"]["title"]
-    alone = cat.rule([page], {"artist": "Paul Klee", "inscribed_title": "Klee"})       # a signature: no vote
-    assert "title" not in alone["facts"]
+    one = _rec("artvee.com", "Giftbeeren (Poisonous Berries)", artist="Paul Klee")
+    ru = cat.rule([one], {"artist": "Paul Klee", "inscribed_title": "Giftbeeren"})
+    assert "title" not in ru["facts"]                                        # one source + an inscription: not ruled
+    assert {"source": "inscription", "url": "", "title": "Giftbeeren"} in ru["corroborating"]
 
 
 def test_an_auction_house_corroborates_and_never_counts():

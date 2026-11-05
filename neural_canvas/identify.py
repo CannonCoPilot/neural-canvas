@@ -235,10 +235,14 @@ class Identifier:
                      + f". The search engine's best guess: {', '.join(h['best_guess'])}; "
                      + f"related names: {', '.join(h['entities'])}. These are leads, not facts.")
         sig = self._signature
-        sig_note = (f"A close reading of the corners found this signature: {sig.get('signature_text')!r}"
-                    + (f" (suggesting {sig['artist']})." if sig.get("artist") else ".")) if sig.get("signature_text") else ""
+        # Sir, 2026-11-05: signatures and inscriptions are leads only. A faint signature is easily misread
+        # (an Aivazovsky read as "A. Sisley" steered a whole run), so it never outweighs the painting itself.
+        sig_note = (f"A machine reading of the corners suggests a signature like {sig.get('signature_text')!r}"
+                    + (f" (perhaps {sig['artist']})" if sig.get("artist") else "")
+                    + ". Signatures are often faint and misread: treat this as an unverified lead, and let the "
+                      "painting's style, subject and technique decide the candidates.") if sig.get("signature_text") else ""
         if sig.get("inscribed_title"):
-            sig_note += f" A title appears to be written on the work: {sig['inscribed_title']!r}."
+            sig_note += f" Something like a title may be written on the work: {sig['inscribed_title']!r} (unverified)."
         return self.vlm.ask_json(PROPOSE_PROMPT.format(refuted=note, signature=sig_note), [img],
                                  required=("candidates",), max_side=1280)
 
@@ -261,8 +265,11 @@ class Identifier:
             mixed = [a for pair in zip(model, styled) for a in pair] + model + styled
             prio = list(dict.fromkeys(a for a in mixed if a in artists))
             cached = [a for a in prio if self._oeuvre_cached(a)]
-            by_style = list(dict.fromkeys(cached + prio))
-            self._free_sweeps = len(cached)
+            # the closest style and the model's first pick sweep first; cached catalogues (free) come next,
+            # never ahead of them (Turner and Monet, cached, once took both early slots from Aivazovsky)
+            early = list(dict.fromkeys([styled[0]] + [a for a in prio if a != styled[0]][:1]))
+            by_style = list(dict.fromkeys(early + cached + prio))
+            self._free_sweeps = len(set(early) | set(cached))
         for a in by_style[:2]:   # the two closest styles: one catalogue sweep each, early
             out.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, self._img_vec)))
         for kw in self._keywords:      # artist-agnostic on the catalogued collection: short keyword AND query
@@ -370,7 +377,7 @@ class Identifier:
                     log.warning("style shortlist unavailable: %s", e)
             sa = (self._signature.get("artist") or "").strip()
             if sa and _norm(sa) not in {_norm(c["artist"]) for c in cands}:
-                cands.append({"artist": sa, "title": "", "year": "", "confidence": self._signature.get("confidence", 0)})
+                cands.append({"artist": sa, "title": "", "year": "", "confidence": 0, "source": "signature"})
             log.info("round %d candidates: %s", rnd + 1, [(c["artist"], c.get("title")) for c in cands])
             matches: list[Match] = []
             pending = self._tiers(cands, swept)
@@ -382,8 +389,9 @@ class Identifier:
                 if not pending:
                     break
                 tier, q, fn = pending.pop(0)
-                if tier == "oeuvre" and vision_due and not self._oeuvre_cached(q.removeprefix("oeuvre:")):
-                    # one web-detection call answers in seconds; a cold catalogue sweep takes many minutes
+                if vision_due and (tier not in ("commons", "imify")
+                                   or (tier == "oeuvre" and not self._oeuvre_cached(q.removeprefix("oeuvre:")))):
+                    # one web-detection call answers in seconds; sweeps and web searches take many minutes
                     vision_due = False
                     ident = self._vision_tier(img, img_vec, "before a catalogue sweep", seen, matches, rounds, rnd,
                                               cands, sig, summary)

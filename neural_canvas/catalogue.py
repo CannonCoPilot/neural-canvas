@@ -1099,10 +1099,11 @@ class Catalogue:
         authorities = [r for r in recs if r.authority]
         corroborating = [r for r in recs if r.support]
         recs = [r for r in recs if not r.authority and not r.support]
-        # Sir, 2026-11-05: a title the artist wrote on the work is one credible source (never a signature)
+        # Sir, 2026-11-05 (revised): signatures and inscriptions are supporting data and search leads, never
+        # a vote. A legible inscribed title is listed as corroboration beside the ruling.
         insc = (ident.get("inscribed_title") or "").strip()
         if inscription_is_title(insc, ident.get("artist", "")):
-            recs.append(Record("inscription", "", insc, verified_by="written on the work"))
+            corroborating.append(Record("inscription", "", insc, verified_by="written on the work", support=True))
         def rank(r):     # what the card prints: the holding museum's wording, then Wikidata, references last
             if r.source == "inscription":
                 return 3     # the inscription is shown after a catalogue's title, in quotes, when they differ
