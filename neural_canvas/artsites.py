@@ -94,20 +94,37 @@ class Artvee:
     def search(self, query: str) -> list[WebReference]:
         return self.parse(self._get(f"{ARTVEE}/main/?s={quote(query)}"))
 
+    def artist_pages(self, artist: str) -> list[str]:
+        """Artvee's artist page slugs for this artist, found by searching the surname rather than guessing
+        the address: names are spelt variously ("Frederick" for frederic-remington) and one artist can be
+        filed under two pages (james-mcneill-whistler, james-abbott-mcneill-whistler)."""
+        sur = slug(artist).rsplit("-", 1)[-1]
+        if len(sur) < 3:
+            return [slug(artist)]
+        page = self._get(f"{ARTVEE}/main/?s={quote(sur)}")
+        found = re.findall(r'href="https://artvee\.com/artist/([a-z0-9-]+)/"', page)
+        slugs = [x for x in dict.fromkeys(found) if x.split("-")[-1] == sur]   # not remington-schuyler
+        return list(dict.fromkeys([slug(artist)] + slugs))[:4]
+
     def artist_works(self, artist: str) -> list[WebReference]:
-        """The artist's whole Artvee catalogue, listed page by page once and cached."""
+        """The artist's whole Artvee catalogue (every page Artvee files the artist under), listed once
+        and cached."""
         path = self.dir / f"{slug(artist)}.json"
         if path.exists() and time.time() - path.stat().st_mtime < LIST_TTL_S:
             return [WebReference(**d) for d in json.loads(path.read_text())]
         works: list[WebReference] = []
-        for n in range(1, ARTVEE_MAX_PAGES + 1):
-            url = f"{ARTVEE}/artist/{slug(artist)}/" + (f"page/{n}/" if n > 1 else "")
-            batch = self.parse(self._get(url))
-            if not batch:
-                break
-            works += batch
+        for page_slug in self.artist_pages(artist):
+            for n in range(1, ARTVEE_MAX_PAGES + 1):
+                url = f"{ARTVEE}/artist/{page_slug}/" + (f"page/{n}/" if n > 1 else "")
+                batch = self.parse(self._get(url))
+                if not batch:
+                    break
+                works += batch
+        seen: set[str] = set()
+        works = [w for w in works if not (w.page_url in seen or seen.add(w.page_url))]
         log.info("artvee: %d works listed for %s", len(works), artist)
-        path.write_text(json.dumps([w.__dict__ for w in works]))
+        if works:                             # an empty listing may be a misspelling or an outage: not kept
+            path.write_text(json.dumps([w.__dict__ for w in works]))
         return works
 
     def nearest(self, artist: str, img_vec: np.ndarray, k: int = 6) -> list[WebReference]:

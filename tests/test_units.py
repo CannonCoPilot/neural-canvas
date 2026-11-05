@@ -821,3 +821,12 @@ def test_serpapi_is_a_fallback_with_a_reserve_and_never_an_everyday_engine(monke
     monkeypatch.setattr(w, "serpapi_left", lambda: WebImageSearch.SERPAPI_RESERVE)
     with pytest.raises(RuntimeError, match="spent"):
         w._serpapi({"engine": "google", "q": "x"})                           # the reserve is never touched
+
+
+def test_artvee_finds_every_page_an_artist_is_filed_under(tmp_path, monkeypatch):
+    from neural_canvas.artsites import Artvee
+    av = Artvee(tmp_path)
+    page = ('<a href="https://artvee.com/artist/frederic-remington/">x</a>'
+            '<a href="https://artvee.com/artist/remington-schuyler/">y</a>')
+    monkeypatch.setattr(av, "_get", lambda url: page)
+    assert av.artist_pages("Frederick Remington") == ["frederick-remington", "frederic-remington"]
