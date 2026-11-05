@@ -596,3 +596,60 @@ def test_page_reliability_and_non_titles():
     assert classify("https://jmcnwhistler.wordpress.com/2020/06/x") == "blog"
     assert non_title("200 Klee REd ideas") and non_title("Venice") and non_title("Shin Paintings for Sale - Fine Art America")
     assert non_title("Giftbeeren") == "" and non_title("Shot in the Dark") == ""
+
+
+def test_titles_dates_and_media_agree_across_wording():
+    from neural_canvas.catalogue import same_date, same_medium, same_title
+    assert same_title("Étretat: The Beach and the Falaise d'Amont", "Etretat: the beach and the falaise d'Amont")
+    assert same_title("Te raau rahi (The Big Tree)", "The Big Tree (Te raau rahi)")
+    assert not same_title("Wind from the Sea", "Airborne")
+    assert same_date("1886–1894", "1890") and same_date("1860s", "1864") and not same_date("1919", "1930")
+    assert same_medium("Oil paint on canvas", "Oil on jute canvas") and not same_medium("Oil on canvas", "Watercolour on paper")
+
+
+def test_one_vote_per_institution():
+    from neural_canvas.catalogue import institution
+    assert institution("https://images.nga.gov/x") == institution("https://www.nga.gov/y") == "nga.gov"
+    assert institution("artic") == institution("https://www.artic.edu/artworks/1") == "artic.edu"
+    assert institution("https://www.vam.ac.uk/item/O1") == "vam.ac.uk"
+
+
+def _rec(source, title, **kw):
+    from neural_canvas.catalogue import Record
+    return Record(source, f"https://{source}/x", title, **kw)
+
+
+def test_a_fact_is_ruled_only_when_two_curated_sources_state_it():
+    from neural_canvas.catalogue import Catalogue
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    ident = {"artist": "Frederic Remington", "inscribed_title": ""}
+    wd = _rec("wikidata", "A Dash for the Timber", artist="Frederic Remington", date="1889", medium="Oil paint on canvas",
+              collection="Amon Carter Museum of American Art", artist_born="1861", artist_died="1909", artist_nationality="United States")
+    page = _rec("cartermuseum.org", "A Dash for the Timber", text="a dash for the timber frederic remington 1861 1909 1889 oil on canvas")
+    ru = cat.rule([wd, page], ident)
+    assert ru["facts"]["title"] == "A Dash for the Timber" and ru["facts"]["artist"] == "Frederic Remington"
+    assert ru["facts"]["date"] == "1889" and not ru["failures"]
+    assert "artist_nationality" not in ru["facts"]           # only Wikidata says it: not printed
+    ru1 = cat.rule([wd], ident)
+    assert ru1["failures"] and "title not ruled" in ru1["failures"][0]
+
+
+def test_an_inscribed_title_that_differs_is_shown_beside_the_ruled_one():
+    from neural_canvas.catalogue import Catalogue
+    from neural_canvas.placard import _layout
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    a = _rec("wikidata", "Poisonous Berries", titles=["Giftbeeren"], artist="Paul Klee", date="1920")
+    b = _rec("zpk.org", "Giftbeeren", text="paul klee giftbeeren 1920")
+    ru = cat.rule([a, b], {"artist": "Paul Klee", "inscribed_title": "Giftbeeren"})
+    assert ru["facts"]["title"] == "Poisonous Berries" and ru["facts"]["inscribed_title"] == "Giftbeeren"
+    lines, _ = _layout({"artist": "Paul Klee", **ru["facts"]}, 0.3, 221)
+    assert "Poisonous Berries 'Giftbeeren', 1920" in [t for t, _, _ in lines]
+
+
+def test_leads_keep_search_text_and_drop_furniture():
+    from neural_canvas.catalogue import leads
+    L = leads({"title": "Venice", "inscribed_title": "Giftbeeren", "evidence": {"web_references": [
+        "file: 1a666d5a 7d4b 3dfc4 e1cf 5 e6633 | page: 200 Klee REd ideas | paul klee | site: pinterest.com",
+        "file: Airborne Andrew Wyeth  | page: Wind from the Sea (1948) by Andrew Wyeth – Artchive | site: artchive.com"]}})
+    assert L[0] == "Giftbeeren" and "Airborne Andrew Wyeth" in L and "Klee REd" in L
+    assert not any(any(c.isdigit() for c in w) and any(c.isalpha() for c in w) for t in L for w in t.split())

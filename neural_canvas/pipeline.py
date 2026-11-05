@@ -29,10 +29,10 @@ from .deliver import AuthRequired, GooglePhotos
 from .identify import Identifier
 from .imify import Imify
 from .interpret import Interpretation, Subject, interpret
+from .catalogue import Catalogue, leads as catalogue_leads
 from .colour import rebalance
 from .identify import WEB_UA
 from .matching import Embedder, fetch_image
-from .movement import classify as classify_movement
 from .placard import card_margin, card_size, compose, viewer_grid
 from .references import Wikimedia
 from .upscale import Upscaler
@@ -42,7 +42,7 @@ from .websearch import WebImageSearch
 
 log = logging.getLogger(__name__)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".avif", ".tif", ".tiff"}
-STAGES = ["identify", "interpret", "compose", "upscale", "label", "deliver"]
+STAGES = ["identify", "catalogue", "interpret", "colour", "compose", "upscale", "label", "deliver"]
 
 
 def content_id(path: Path) -> str:
@@ -179,9 +179,23 @@ class Docent:
                 save()
                 if ident.status != "confirmed":
                     return block(stage, [ident.evidence.get("reason", "unconfirmed")])
-            facts = {k: st["identify"].get(k, "") for k in (
+            # identification's facts are LEADS only; the card prints what curated sources rule (Sir, 2026-11-05)
+            stage = "catalogue"
+            if on_stage:
+                on_stage(stage)
+            if not done(stage):
+                t0 = time.time()
+                cat = Catalogue(self.identifier, self.cfg.thresholds)
+                found = cat.gather(img, st["identify"], catalogue_leads(st["identify"]))
+                ruling = cat.rule(found, st["identify"])
+                st[stage] = {"passed": not ruling["failures"], "seconds": round(time.time() - t0, 1), **ruling}
+                save()
+                if ruling["failures"]:
+                    return block(stage, ruling["failures"])
+            ruled = st["catalogue"]["facts"]
+            facts = {k: ruled.get(k, "") for k in (
                 "artist", "title", "date", "medium", "collection", "artist_nationality",
-                "artist_born", "artist_died")}
+                "artist_born", "artist_died", "inscribed_title")}
             # a different photograph of a painting already in the album: done, not delivered twice
             twin = self.registry.delivered_twin(facts["artist"], facts["title"], exclude=run_id)
             if twin and not self._looks_like(img, twin[0]):
@@ -245,10 +259,7 @@ class Docent:
             stage = "label"
             if on_stage:
                 on_stage(stage)
-            if "movement" not in st:     # once per run: a re-run prints the same line
-                st["movement"] = classify_movement(self.wiki, self.vlm, img, facts)
-                save()
-            facts["movement"] = st["movement"]["movement"]
+            facts["movement"] = ruled.get("movement", "")   # printed only when curated sources rule it
             win = plan.window
 
             def in_window(b):
@@ -278,7 +289,8 @@ class Docent:
                 on_stage(stage)
             if deliver and (redeliver or not done(stage)):
                 old = st.get(stage, {}).get("media_item_id", "") if redeliver else ""
-                desc = f"{facts['title']}" + (f", {facts['date']}" if facts["date"] else "") + \
+                desc = f"{facts['title']}" + (f" '{facts['inscribed_title']}'" if facts.get("inscribed_title") else "") + \
+                       (f", {facts['date']}" if facts["date"] else "") + \
                        (" (detail)" if facts.get("detail") else "") + \
                        f" — {facts['artist']}. {it.label_text}"
                 try:
@@ -318,7 +330,7 @@ class Docent:
 def _version_urls(st: dict) -> list[str]:
     """Every verified copy of the work: the identification's confirmed matches and the catalogue's images."""
     urls = [m.get("thumb_url") for r in st.get("identify", {}).get("rounds", []) for m in r.get("confirmed_by", [])]
-    urls += [c.get("image_url") for c in st.get("catalogue", {}).get("records", []) if c.get("image_url")]
+    urls += [c.get("image_url") for c in st.get("catalogue", {}).get("sources", []) if c.get("image_url")]
     return list(dict.fromkeys(u for u in urls if u))
 
 

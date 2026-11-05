@@ -98,3 +98,21 @@ def non_title(text: str) -> str:
     if low in GENERIC:
         return "a generic word, not a title"
     return ""
+
+
+_INSTITUTION = re.compile(r"museum|museet|musee|museo|muzeum|museu|galerie|gallery|galleria|kunst|pinakothek|"
+                          r"collection|catalogue|raisonne|database|archiv|foundation|stiftung|fondation|institut", re.I)
+_RECORD_PATH = re.compile(r"/(collections?|artworks?|objects?|object-page|kunstwerken|werke|oeuvres?|"
+                          r"painting|art-object|fotoweb|catalog|catalogue|detail|item)s?\b", re.I)
+
+
+def institutional(url: str) -> bool:
+    """A page that speaks for an institution: a curated domain, or an unlisted one (reached from a
+    catalogue's own link, never from a search) whose host or path is a museum or collection record."""
+    kind = classify(url)
+    if kind == "curated":
+        return True
+    if kind != "unknown":
+        return False
+    u = urlparse(url)
+    return bool(_INSTITUTION.search(u.netloc) or _RECORD_PATH.search(u.path))
