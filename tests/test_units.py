@@ -830,3 +830,10 @@ def test_artvee_finds_every_page_an_artist_is_filed_under(tmp_path, monkeypatch)
             '<a href="https://artvee.com/artist/remington-schuyler/">y</a>')
     monkeypatch.setattr(av, "_get", lambda url: page)
     assert av.artist_pages("Frederick Remington") == ["frederick-remington", "frederic-remington"]
+
+
+def test_catalogue_pages_read_labelled_fields_and_titles_without_the_byline():
+    from neural_canvas.catalogue import labelled
+    f = labelled("M.0807 The Riva - Sunset; red and gold Artist: James McNeill Whistler Date: 1880 "
+                 "Collection: Yale University Art Gallery Accession Number: 1966.9.27 Medium: chalk and pastel Support: paper")
+    assert f["Date"] == "1880" and f["Collection"] == "Yale University Art Gallery" and f["Medium"] == "chalk and pastel"

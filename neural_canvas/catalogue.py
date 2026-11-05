@@ -56,6 +56,17 @@ TRANSLATE_PROMPT = """Artwork titles, possibly in German, French, Dutch, Italian
 For each, give the language and the plain English title a museum would print (Giftbeeren -> Poisonous Berries).
 Translate only; never add words that are not in the title. Reply JSON:
 {{"titles": [{{"original": "...", "language": "...", "english": "..."}}]}}"""
+# Catalogues raisonnés and the institutions that hold or published an artist's work, searched with site:
+# (Sir, 2026-11-05). Each page found is read and must show the same picture. Adding an artist is a line here.
+CATALOGUE_SITES = {
+    "whistler": ["whistlerpaintings.gla.ac.uk"],              # University of Glasgow catalogue raisonné
+    "remington": ["remington.centerofthewest.org"],           # Buffalo Bill Center of the West catalogue raisonné
+    "rockwell": ["prints.nrm.org", "saturdayeveningpost.com"],  # Norman Rockwell Museum; the Post's own cover archive
+    "wyeth": ["crystalbridges.org", "wyethfoundation.org", "brandywine.org", "farnsworthmuseum.org"],
+    "klee": ["zpk.org"],
+}
+LABELS = ("Artist", "Date", "Collection", "Accession Number", "Medium", "Support", "Size", "Signature", "Inscription",
+          "Dimensions", "Credit Line", "Catalogue Number", "Provenance")
 # Getty AAT ids the Rijksmuseum's Linked Art uses in place of labels
 AAT_ENGLISH, AAT_PREFERRED, AAT_MATERIALS = "300388277", "300404670", "300435429"
 RKD_ARTISTS = "https://api.rkd.triply.cc/datasets/rkd/RKD-SDO-Knowledge-Graph/services/Virtuoso/sparql"
@@ -190,6 +201,7 @@ class Record:
     text: str = ""               # an institution page's own text (folded): it supports what it states
     authority: bool = False      # an artist authority record: rules the artist's life, never the work
     support: bool = False        # an auction house or the press: corroborates, never counts
+    images: list = field(default_factory=list)       # the page's other pictures, tried when image_url is not the work
 
     def states(self, value: str) -> bool:
         """An institution page supports a fact its text states (all of the value's significant words)."""
@@ -722,12 +734,22 @@ class Catalogue:
         if EVENT.search(title) or EVENT.search(urlparse(url).path):
             return None                                   # an events or shop page shows the picture, it is no record of it
         title = re.split(r"\s+[|–—]\s+|\s+-\s+", title)[0].strip()
-        if not image_url:            # the page's own preview image: how a text search hit is image-verified
-            og = re.search(r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)', raw) or \
-                 re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', raw)
-            image_url = html.unescape(og.group(1)) if og else ""
-        rec = Record(institution(url), url, "" if non_title(title) else title, [], verified_by=verified_by,
-                     image_url=image_url, text=text)
+        og = re.search(r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)', raw) or \
+             re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', raw)
+        imgs = ([html.unescape(og.group(1))] if og else []) + [
+            html.unescape(i) for i in re.findall(r'<img[^>]+?(?:data-src|src)=["\']([^"\']+)', raw)
+            if not re.search(r"logo|icon|\.svg|banner|sprite|pixel|gravatar|avatar|/graphics/", i, re.I)]
+        imgs = list(dict.fromkeys(urljoin(url, i) for i in imgs if not i.startswith("data:")))[:8]
+        image_url = image_url or (imgs[0] if imgs else "")
+        plain = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", body)))
+        f = labelled(plain)
+        m = re.search(r"\b[A-Z]{1,4}\.\s?\d{3,5}[a-z]?\s+(.{3,160}?)\s+Artist:", plain)   # "M.0807 The Riva ... Artist:"
+        if m:
+            title = m.group(1).strip()
+        title = re.sub(r"\s+by\s+[A-Z][\w.'’ -]{2,60}$", "", title).strip()                # "Airborne by Andrew Wyeth"
+        rec = Record(institution(url), url, "" if non_title(title) else title, [], f.get("Artist", ""), "",
+                     f.get("Date", ""), f.get("Medium", ""), f.get("Collection", ""), "", image_url, verified_by,
+                     text=text, images=imgs)
         return rec
 
     def _curated_web(self, img, img_vec, queries: list[str], have: set[str]) -> list[Record]:
@@ -824,10 +846,9 @@ class Catalogue:
                 if host in seen or not (support or rulable(url, getattr(self, "_artist", ""), getattr(self, "_living", False))):
                     continue
                 rec = self._curated_page(url, "image")
-                if not rec or not rec.image_url:
+                if not rec or not (rec.image_url or rec.images):
                     continue
-                ok, rec.clip, rec.inliers = self._verify(img, img_vec, urljoin(url, rec.image_url))
-                if ok:
+                if self._verify_page(img, img_vec, rec):
                     rec.support = support
                     out.append(rec)
                     seen.add(host)
@@ -849,6 +870,54 @@ class Catalogue:
         self._artist = artist
         return self._safe("serpapi", lambda: self._web_text(img, img_vec, queries, have, web.serpapi_pages,
                                                             "Google via SerpAPI (fallback for an unresolved work)"))
+
+    def _verify_page(self, img, img_vec, rec: Record) -> bool:
+        """A page shows the work when any of its pictures matches on both instruments (its preview image is
+        often a site banner)."""
+        for u in list(dict.fromkeys([rec.image_url, *rec.images]))[:6]:
+            if not u:
+                continue
+            ok, sim, inl = self._verify(img, img_vec, u)
+            if ok:
+                rec.image_url, rec.clip, rec.inliers = u, sim, inl
+                return True
+        return False
+
+    def _registry(self, img, img_vec, artist: str, titles: list[str], have: set[str]) -> list[Record]:
+        """The artist's catalogue raisonné and holding institutions (CATALOGUE_SITES), by site: search."""
+        web = getattr(self.idf, "web", None)
+        sites = CATALOGUE_SITES.get(_surname(artist), [])
+        if web is None or not hasattr(web, "pages") or not sites:
+            return []
+        out = []
+        for site in sites:
+            if institution(f"https://{site}") in have:
+                continue
+            self.consulted.append(site)
+            done = False
+            # a title one catalogue gives is searched at the next (the Post files Rockwell's cover as "Wet Paint")
+            named = [re.sub(r"\s*\([^)]*\)|,?\s*\d{4}.*$", "", r.title).strip() for r in out if r.title]
+            for q in list(dict.fromkeys([f"site:{site} {t}" for t in named + titles[:2] if t] + [f"site:{site} {artist}"])):
+                try:
+                    hits = web.pages(q, 8)
+                except Exception as e:
+                    log.info("catalogue site search %r failed: %s", q, e)
+                    continue
+                urls = []
+                for u, _ in hits:
+                    if site.split("/")[0] not in urlparse(u).netloc:
+                        continue
+                    mid = re.search(r"[?&]mid=(m\d+)", u) if "whistlerpaintings" in u else None
+                    urls.append(f"https://www.whistlerpaintings.gla.ac.uk/catalogue/display/?mid={mid.group(1)}" if mid else u)
+                for u in list(dict.fromkeys(urls))[:4]:
+                    rec = self._curated_page(u, "image")
+                    if rec and self._verify_page(img, img_vec, rec):
+                        out.append(rec)
+                        done = True
+                        break
+                if done:
+                    break
+        return out
 
     def _safe(self, name: str, fn) -> list:
         """A source that fails is recorded and skipped; it never takes the run down with it."""
@@ -928,6 +997,8 @@ class Catalogue:
                     break
         self.consulted += ["RKD", "Wikipedia", "Wikimedia Commons", "museum, foundation and artist pages found by web search"]
         self._living, self._artist = living, artist
+        recs += self._safe("catalogue_sites", lambda: self._registry(img, img_vec, artist, titles,
+                                                                  {institution(r.source) for r in recs}))
         recs += self._safe("artvee", lambda: self._artvee(img, img_vec, titles, artist, surname))
         recs += self._safe("curated_web", lambda: self._curated_web(img, img_vec, queries, {r.source for r in recs}))
         recs += self._safe("web_text", lambda: self._web_text(img, img_vec, queries, {institution(r.source) for r in recs}))
@@ -973,7 +1044,7 @@ class Catalogue:
                 return 2
             return 1 if r.source in ("wikidata", "rkd.nl") else 0
         pref = sorted(recs, key=lambda r: (rank(r), r.verified_by != "image"))
-        out = {"facts": {}, "support": {}, "unruled": {}, "sources": [{k: v for k, v in asdict(r).items() if k != "text"} for r in recs],
+        out = {"facts": {}, "support": {}, "unruled": {}, "sources": [{k: v for k, v in asdict(r).items() if k not in ("text", "images")} for r in recs],
                "consulted": self.consulted, "unavailable": UNAVAILABLE, "failures": [],
                "corroborating": [{"source": r.source, "url": r.url, "title": r.title} for r in corroborating]}
 
@@ -1051,6 +1122,13 @@ class Catalogue:
             out["failures"].append(f"{len(recs)} curated source(s) matched the picture ({', '.join(r.source for r in recs) or 'none'}); "
                                    "each fact needs 2 that state it. Unavailable: " + "; ".join(f"{k} ({v})" for k, v in UNAVAILABLE.items()))
         return out
+
+
+def labelled(text: str) -> dict:
+    """"Label: value" fields as catalogue pages print them (Date: 1880 Collection: Yale ... Medium: ...)."""
+    alt = "|".join(re.escape(l) for l in LABELS)
+    return {m.group(1): m.group(2).strip(" ;,.")[:200]
+            for m in re.finditer(rf"\b({alt}):\s*(.+?)(?=\s+(?:{alt}):|$)", text[:20000])}
 
 
 def inscription_is_title(text: str, artist: str) -> bool:

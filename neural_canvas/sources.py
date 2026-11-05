@@ -40,6 +40,7 @@ _CURATED = (
     "lenbachhaus.de", "hilmaafklint.se", "modernamuseet.se", "churchhistorymuseum.org", "lds.org",
     "wyethfoundation.org", "brandywine.org", "farnsworthmuseum.org", "remington-museum.org", "centerofthewest.org",
     "amoncarter.org", "gilcrease.org", "nationalcowboymuseum.org",
+    "whistlerpaintings.gla.ac.uk", "saturdayeveningpost.com",   # catalogue raisonné; the Post's own cover archive
 )
 _REFERENCE = ("wikipedia.org", "wikimedia.org", "wikiart.org", "britannica.com", "artchive.com", "artcyclopedia.com",
               "wga.hu", "the-athenaeum.org", "jstor.org", "oxfordartonline.com")
