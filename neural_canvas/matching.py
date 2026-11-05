@@ -74,24 +74,33 @@ def geometric_inliers(a: Image.Image, b: Image.Image) -> int:
 _CACHE: dict[str, Image.Image] = {}
 _last_by_host: dict[str, float] = {}
 WIKIMEDIA_INTERVAL_S = 0.12   # serial and paced: Wikimedia answers bursts with HTTP 429
+# seconds between fetches per host family. The Art Institute allows 60 a minute; a burst past that is met
+# with a Cloudflare challenge (HTTP 403, cf-mitigated) on every image for some minutes (2026-11-05).
+HOST_INTERVAL_S = {"wikimedia.org": WIKIMEDIA_INTERVAL_S, "wikipedia.org": WIKIMEDIA_INTERVAL_S, "artic.edu": 1.0}
+
+
+def _interval(host: str) -> float:
+    return next((v for k, v in HOST_INTERVAL_S.items() if host == k or host.endswith("." + k)), 0.0)
 
 
 def fetch_image(url: str, user_agent: str) -> Image.Image | None:
     """Fetch a reference image into memory (never written to disk). Successes are cached; failures are
-    not, so a transient error is retried next time. Wikimedia hosts are paced and 429s honour Retry-After."""
+    not, so a transient error is retried next time. Rate-limited hosts are paced (HOST_INTERVAL_S); a 429,
+    a 5xx or a rate challenge backs off (Retry-After when given) and tries again."""
     if url in _CACHE:
         return _CACHE[url]
     host = urlparse(url).netloc
-    wm = host.endswith("wikimedia.org") or host.endswith("wikipedia.org")
+    gap = _interval(host)
     for attempt in range(4):
-        if wm:
-            wait = WIKIMEDIA_INTERVAL_S - (time.time() - _last_by_host.get(host, 0.0))
+        if gap:
+            wait = gap - (time.time() - _last_by_host.get(host, 0.0))
             if wait > 0:
                 time.sleep(wait)
             _last_by_host[host] = time.time()
         try:
             r = requests.get(url, headers={"User-Agent": user_agent}, timeout=12)
-            if r.status_code == 429 or r.status_code >= 500:
+            challenged = r.status_code == 403 and r.headers.get("cf-mitigated") == "challenge"
+            if r.status_code == 429 or r.status_code >= 500 or challenged:
                 time.sleep(min(30.0, float(r.headers.get("Retry-After") or 2 ** (attempt + 1))))
                 continue
             r.raise_for_status()

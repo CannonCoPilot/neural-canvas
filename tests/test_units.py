@@ -654,3 +654,36 @@ def test_leads_keep_search_text_and_drop_furniture():
         "file: Airborne Andrew Wyeth  | page: Wind from the Sea (1948) by Andrew Wyeth – Artchive | site: artchive.com"]}})
     assert L[0] == "Giftbeeren" and "Airborne Andrew Wyeth" in L and "Klee REd" in L
     assert not any(any(c.isdigit() for c in w) and any(c.isalpha() for c in w) for t in L for w in t.split())
+
+
+def test_a_near_same_title_in_another_medium_is_another_work():
+    from neural_canvas.catalogue import Catalogue, institution
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    ident = {"artist": "James McNeill Whistler", "inscribed_title": ""}
+    yale = _rec("yale", "The Riva—Sunset: Red and Gold", artist="James McNeill Whistler", medium="Pastel and black chalk")
+    salute = _rec("hunterian.gla.ac.uk", "Sunset, Red and Gold: Salute", artist="James McNeill Whistler", medium="Oil on panel")
+    assert "title" not in cat.rule([yale, salute], ident)["facts"]          # the titles alone would agree
+    wd = _rec("wikidata", "The Riva - Sunset: Red and Gold", artist="James McNeill Whistler", medium="pastel")
+    ru = cat.rule([yale, salute, wd], ident)
+    assert ru["support"]["title"] == ["wikidata", "yale"]
+    assert institution("https://lux.collections.yale.edu/data/object/1") == institution("https://artgallery.yale.edu/x") == "yale"
+    assert institution("si") == institution("https://americanart.si.edu/artwork/x") == "si"
+
+
+def test_a_yale_linked_art_record_reads_into_a_record():
+    from neural_canvas.catalogue import Catalogue
+    L = lambda s: [{"_label": s}]
+    x = {"id": "https://lux.collections.yale.edu/data/object/cef3", "_label": "The Riva—Sunset: Red and Gold",
+         "identified_by": [{"type": "Name", "classified_as": L("Primary Title"), "content": "The Riva—Sunset: Red and Gold"},
+                           {"type": "Identifier", "classified_as": L("Accession Number"), "content": "1966.9.27"}],
+         "produced_by": {"part": [{"classified_as": L("Artist"), "carried_out_by": [
+                             {"_label": "Artist: James McNeill Whistler (American, 1834–1903)"}]}],
+                         "timespan": {"identified_by": [{"classified_as": L("Display Date"), "content": "1879–80"}]}},
+         "referred_to_by": [{"classified_as": L("Medium"), "content": "Pastel and black chalk"},
+                            {"classified_as": L("Signed"), "content": "with butterfly"}],
+         "current_owner": [{"_label": "Yale University Art Gallery"}],
+         "representation": [{"digitally_shown_by": [{"access_point": [{"id": "https://media.collections.yale.edu/thumbnail/yuag/obj/8121"}]}]}]}
+    r = Catalogue._lux_rec(x)
+    assert (r.title, r.artist, r.artist_bio, r.date) == ("The Riva—Sunset: Red and Gold", "James McNeill Whistler", "American, 1834–1903", "1879–80")
+    assert r.medium == "Pastel and black chalk" and r.collection == "Yale University Art Gallery" and r.image_url.endswith("/8121")
+    assert r.states("with butterfly") and r.titles == []

@@ -16,17 +16,18 @@ catalogues, and a fact is RULED only when two or more independent curated source
 * a title written legibly on the work that differs from the ruled title is shown after it in single
   quotes: Poisonous Berries 'Giftbeeren'.
 
-Unavailable on 2026-11-05 (remediable, not silently skipped): Getty ULAN (server-side TLS failure),
-Rijksmuseum (API retired, 410), Harvard Art Museums / Europeana / RKD / Smithsonian (free key or
-registration needed), Norman Rockwell Museum (no programmatic access).
+Unavailable on 2026-11-05 (remediable, not silently skipped): see ``UNAVAILABLE``. Each entry names
+the wall, so the run's failure record says what would open it.
 """
 from __future__ import annotations
 
 import html
+import json
 import logging
 import re
 import unicodedata
 from dataclasses import asdict, dataclass, field
+from itertools import chain
 from urllib.parse import quote, urlparse
 
 import numpy as np
@@ -43,9 +44,14 @@ LANGS = "en|de|fr|nl|it|es|ja|da|sv|no|nb|fi|cs|ru|pl|pt"
 UNAVAILABLE = {
     "Getty ULAN": "server-side TLS failure on vocab.getty.edu (2026-11-05)",
     "Rijksmuseum": "collection API retired (HTTP 410)",
-    "Smithsonian Open Access": "free api.data.gov key needed (https://api.data.gov/signup/)",
-    "Norman Rockwell Museum": "no programmatic access (blocks automated requests)",
+    "National Gallery of Art": "nga.gov answers plain HTTP with a Cloudflare challenge (403, 2026-11-05); its open "
+                               "data is a 5.3 GB CSV repository, not wired in",
+    "Norman Rockwell Museum": "collection.nrm.org answers every automated request with a bot challenge (2026-11-05)",
 }
+# Smithsonian art units. The API ignores its fq filter; a fielded unit_code term inside q filters (2026-11-05).
+SI_UNITS = "SAAM OR NPG OR HMSG OR FSG OR CHNDM OR NMAfA"
+ARTIC_FIELDS = "id,title,alt_titles,artist_title,artist_display,date_display,medium_display,style_title,image_id"
+LUX = "https://lux.collections.yale.edu"     # Yale: Linked Art records, Yale-provided metadata CC0
 RKD_ARTISTS = "https://api.rkd.triply.cc/datasets/rkd/RKD-SDO-Knowledge-Graph/services/Virtuoso/sparql"
 RKD_WORKS = "https://api.rkd.triply.cc/datasets/rkd/RKD-Knowledge-Graph/services/SPARQL/sparql"
 STOP = {"the", "and", "with", "von", "van", "der", "die", "das", "les", "des", "del", "della", "of", "a", "an",
@@ -113,14 +119,20 @@ def _materials(s: str) -> set[str]:
     return {m.replace("watercolour", "watercolor") for m in MATERIALS if re.search(rf"\b{m}", t)}
 
 
+PAINTS = {"oil", "acrylic", "tempera", "gouache", "watercolor", "pastel", "charcoal", "ink", "graphite", "pencil",
+          "woodblock", "woodcut", "lithograph", "etching", "engraving"}
+
+
+def medium_clash(a: str, b: str) -> bool:
+    """Both name the paint and no paint is shared: oil versus pastel."""
+    pa, pb = _materials(a) & PAINTS, _materials(b) & PAINTS
+    return bool(pa and pb and not pa & pb)
+
+
 def same_medium(a: str, b: str) -> bool:
-    ma, mb = _materials(a), _materials(b)
-    paints = {"oil", "acrylic", "tempera", "gouache", "watercolor", "pastel", "charcoal", "ink", "graphite", "pencil",
-              "woodblock", "woodcut", "lithograph", "etching", "engraving"}
-    pa, pb = ma & paints, mb & paints
-    if pa and pb and not pa & pb:
+    if medium_clash(a, b):
         return False                                  # oil versus watercolour: different
-    return bool(ma & mb)
+    return bool(_materials(a) & _materials(b))
 
 
 def same_collection(a: str, b: str) -> bool:
@@ -191,6 +203,7 @@ class Catalogue:
         self.wiki, self.emb = identifier.wiki, identifier.emb
         self.s = requests.Session()
         self.s.headers["User-Agent"] = UA
+        self.s.headers["AIC-User-Agent"] = UA       # the Art Institute asks callers to name themselves
         self.consulted: list[str] = []
 
     # ── is this record's picture the input? ───────────────────────────────
@@ -359,6 +372,84 @@ class Catalogue:
                                    x["primaryimageurl"], "image", sim, inl)]
         return []
 
+    def _smithsonian(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
+        """Smithsonian Open Access: the art museums (American Art, Portrait Gallery, Hirshhorn, Freer|Sackler,
+        Cooper Hewitt, African Art). Images come from its own image server at 800 px."""
+        key = self.keys().get("smithsonian")
+        if not key:
+            return []
+        self.consulted.append("Smithsonian Open Access")
+        for q in queries[:4]:
+            q = re.sub(r"[^\w\s'’]", " ", q)          # its query parser reads : ( ) " - as syntax
+            d = self._keyed("https://api.si.edu/openaccess/api/v1.0/search", key, api_key=key,
+                            q=f"unit_code:({SI_UNITS}) AND {q}", rows=10)
+            for x in (d.get("response") or {}).get("rows") or []:
+                c = x.get("content") or {}
+                ft, dn = c.get("freetext") or {}, c.get("descriptiveNonRepeating") or {}
+                def first(k, label=None):
+                    return next((e.get("content", "") for e in ft.get(k) or [] if label in (None, e.get("label"))), "")
+                maker = first("name", "Artist") or first("name")
+                media = [m["idsId"] for m in (dn.get("online_media") or {}).get("media") or []
+                         if m.get("type") == "Images" and m.get("idsId")]
+                if surname not in fold(maker) or not media:
+                    continue
+                url = f"https://ids.si.edu/ids/deliveryService?id={media[0]}&max=800"
+                ok, sim, inl = self._verify(img, img_vec, url)
+                if ok:
+                    artist, _, bio = maker.partition(", ")         # "Winslow Homer, born Boston, MA 1836-died ..."
+                    title = x.get("title") or (dn.get("title") or {}).get("content", "")
+                    notes = " ".join(e.get("content", "") for e in ft.get("notes") or [])
+                    return [Record("si", dn.get("record_link") or dn.get("guid", ""), title, [], artist, bio,
+                                   first("date"), first("physicalDescription", "Medium"),
+                                   dn.get("data_source") or "Smithsonian Institution", "", url, "image", sim, inl,
+                                   text=fold(f"{title} {maker} {notes}"))]
+        return []
+
+    @staticmethod
+    def _lux_rec(x: dict) -> Record | None:
+        """A Yale Linked Art object record: title, maker, display date, medium, owner, image."""
+        if not x.get("id"):
+            return None
+        def cls(e):
+            return {c.get("_label", "") for c in e.get("classified_as") or []}
+        title = next((i.get("content", "") for i in x.get("identified_by") or []
+                      if i.get("type") == "Name" and "Primary Title" in cls(i)), x.get("_label", ""))
+        others = [i.get("content", "") for i in x.get("identified_by") or []
+                  if i.get("type") == "Name" and "Primary Title" not in cls(i) and i.get("content") != title]
+        prod = x.get("produced_by") or {}
+        makers = [a.get("_label", "") for part in [prod, *(prod.get("part") or [])] for a in part.get("carried_out_by") or []]
+        maker = re.sub(r"^[A-Z][a-z ]+:\s*", "", makers[0]) if makers else ""   # "Artist: Name (American, 1834–1903)"
+        artist, _, bio = maker.partition(" (")
+        date = next((i.get("content", "") for i in (prod.get("timespan") or {}).get("identified_by") or []), "")
+        refs = x.get("referred_to_by") or []
+        medium = next((r.get("content", "") for r in refs if "Medium" in cls(r)), "")
+        owner = next((o.get("_label", "") for o in x.get("current_owner") or []), "")
+        image = next((a.get("id", "") for rep in x.get("representation") or [] for d in rep.get("digitally_shown_by") or []
+                      for a in d.get("access_point") or []), "")
+        text = fold(" ".join([title, maker, *(str(r.get("content", "")) for r in refs)]))
+        return Record("yale", x["id"], title, others, artist, bio.rstrip(")"), date, medium, owner, "", image, "image",
+                      text=text)
+
+    def _yale(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
+        """Yale (LUX): the Art Gallery, the Center for British Art and the libraries. Yale-provided metadata is
+        CC0 (LUX Open Access page, read 2026-11-05); one lookup per work, never a harvest."""
+        self.consulted.append("Yale University (LUX)")
+        seen: set[str] = set()
+        for q in queries[:3]:
+            d = self._get(f"{LUX}/api/search/item", q=json.dumps({"text": q}))
+            for stub in (d.get("orderedItems") or [])[:6]:
+                u = stub.get("id", "")
+                if not u.startswith(LUX) or u in seen:
+                    continue
+                seen.add(u)
+                rec = self._lux_rec(self._get(u))
+                if not rec or surname not in fold(rec.artist) or not rec.image_url:
+                    continue
+                ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url)
+                if ok:
+                    return [rec]
+        return []
+
     def _artist_living(self, artist: str) -> tuple[bool, str]:
         """(living, artist QID). An artist no catalogue knows, or one with no recorded death, may be living."""
         aq = self.wiki.find_artist(artist) if artist else None
@@ -452,8 +543,7 @@ class Catalogue:
 
     # ── museums ────────────────────────────────────────────────────────────
     def _artic(self, rid: int | str, verified_by: str = "image") -> Record | None:
-        d = self._get(f"https://api.artic.edu/api/v1/artworks/{rid}",
-                      fields="id,title,alt_titles,artist_title,artist_display,date_display,medium_display,style_title,image_id")
+        d = self._get(f"https://api.artic.edu/api/v1/artworks/{rid}", fields=ARTIC_FIELDS)
         x = d.get("data")
         if not x:
             return None
@@ -468,11 +558,25 @@ class Catalogue:
                       x.get("artist_title") or "", bio, x.get("date_display") or "", x.get("medium_display") or "",
                       "Art Institute of Chicago", x.get("style_title") or "", img, verified_by)
 
-    def _artic_search(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
+    def _artic_post(self, artist: str, title: str) -> dict:
+        """The Art Institute's fielded search: artist AND title must both match (plain q ranks the
+        artist's other works first)."""
+        try:
+            r = self.s.post("https://api.artic.edu/api/v1/artworks/search", timeout=20, json={
+                "size": 5, "fields": ARTIC_FIELDS.split(","),
+                "query": {"bool": {"must": [{"match": {"artist_title": artist}}, {"match": {"title": title}}]}}})
+            return r.json() if r.status_code == 200 else {}
+        except Exception as e:
+            log.info("artic fielded search failed: %s", e)
+            return {}
+
+    def _artic_search(self, img, img_vec, queries: list[str], surname: str,
+                      artist: str = "", titles: tuple[str, ...] | list[str] = ()) -> list[Record]:
         out, seen = [], set()
-        for q in queries:
-            d = self._get("https://api.artic.edu/api/v1/artworks/search", q=q, limit=10,
-                          fields="id,title,alt_titles,artist_title,artist_display,date_display,medium_display,style_title,image_id")
+        precise = [self._artic_post(artist, t) for t in titles[:4]] if artist else []
+        plain = (self._get("https://api.artic.edu/api/v1/artworks/search", q=q, limit=10, fields=ARTIC_FIELDS)
+                 for q in queries)
+        for d in chain(precise, plain):          # plain queries run only if the fielded ones find nothing
             for x in d.get("data") or []:
                 if x["id"] in seen or surname not in fold(x.get("artist_title") or x.get("artist_display") or ""):
                     continue
@@ -632,12 +736,16 @@ class Catalogue:
                     n += 1
         have = {r.source for r in recs}
         if "artic" not in have:
-            recs += self._safe("artic_search", lambda: self._artic_search(img, img_vec, queries, surname))
+            recs += self._safe("artic_search", lambda: self._artic_search(img, img_vec, queries, surname, artist, titles))
         if "met" not in have:
             recs += self._safe("met_search", lambda: self._met_search(img, img_vec, queries, surname))
         recs += self._safe("cleveland_search", lambda: self._cleveland_search(img, img_vec, queries, surname))
         recs += self._safe("europeana", lambda: self._europeana(img, img_vec, queries, surname))
         recs += self._safe("harvard", lambda: self._harvard(img, img_vec, queries, surname))
+        if "si" not in {institution(r.source) for r in recs}:
+            recs += self._safe("smithsonian", lambda: self._smithsonian(img, img_vec, queries, surname))
+        if "yale" not in {institution(r.source) for r in recs}:
+            recs += self._safe("yale", lambda: self._yale(img, img_vec, queries, surname))
         if "wikipedia.org" not in {r.source for r in recs}:
             for q in queries[:2]:
                 d = self._get("https://en.wikipedia.org/w/api.php", action="query", list="search", srsearch=q, srlimit=3, format="json")
@@ -701,7 +809,9 @@ class Catalogue:
         tvals = [(r, r.title) for r in pref if r.title]
         title = ""
         for r, t in tvals:
-            sup = sorted({r2.source for r2 in recs if any(same_title(t, t2) for t2 in r2.all_titles()) or r2.states(t)})
+            # a near-same title in another medium is another work (Whistler's Riva pastel, the Salute oil)
+            sup = sorted({r2.source for r2 in recs if not medium_clash(r.medium, r2.medium)
+                          and (any(same_title(t, t2) for t2 in r2.all_titles()) or r2.states(t))})
             if len(sup) >= 2:
                 wd = next((x for x in recs if x.source == "wikidata"), None)
                 title = wd.title if (wd and "wikidata" in sup and wd.title) else t   # English, when Wikidata agrees
