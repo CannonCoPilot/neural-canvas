@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .crop import CropPlan, saliency_map
+from .crop import CropPlan
 
 FONT_DIR = "/System/Library/Fonts/Supplemental/"
 SERIF = FONT_DIR + "Georgia.ttf"
@@ -157,60 +157,59 @@ def compose(art: Image.Image, plan: CropPlan, canvas_size: tuple[int, int], iden
     aw, ah = art.size
     margin = max(40, round(64 * scale))
 
-    def mat_layout(aw, ah):
-        """Art pushed left, card on the mat to its right."""
-        ox = margin if (W - aw) - margin >= cw + 2 * margin else (W - aw) // 2
-        oy = (H - ah) // 2
-        return ox, oy, [("mat-bottom-right", (W - margin - cw, H - margin - ch, W - margin, H - margin))]
-
-    def overlay_layout(aw, ah, ox, oy):
-        if plan.mode == "letterbox" and (H - ah) // 2 >= ch + margin:
-            return [("band-bottom-right", (W - margin - cw, H - margin // 2 - ch, W - margin, H - margin // 2))]
-        return [("bottom-right", (ox + aw - margin - cw, oy + ah - margin - ch, ox + aw - margin, oy + ah - margin))]
-
-    sal = saliency_map(art)
-    n = sal.shape[0]
+    # the card has ONE place: the frame's bottom-right corner. Only the artwork ever moves.
+    box = (W - margin - cw, H - margin - ch, W - margin, H - margin)
     geo = {}
 
-    def art_frac(box):
-        x0, y0, x1, y1 = box
+    def art_frac(b):
+        x0, y0, x1, y1 = b
         ox, oy, aw, ah = geo["ox"], geo["oy"], geo["aw"], geo["ah"]
         return ((x0 - ox) / aw, (y0 - oy) / ah, (x1 - ox) / aw, (y1 - oy) / ah)
 
-    def overlap(box):
-        fx0, fy0, fx1, fy1 = art_frac(box)
+    def overlap(b):
+        fx0, fy0, fx1, fy1 = art_frac(b)
         worst = 0.0
-        for b in essential_boxes:
-            ix = max(0.0, min(fx1, b[2]) - max(fx0, b[0]))
-            iy = max(0.0, min(fy1, b[3]) - max(fy0, b[1]))
-            area = (b[2] - b[0]) * (b[3] - b[1])
+        for e in essential_boxes:
+            ix = max(0.0, min(fx1, e[2]) - max(fx0, e[0]))
+            iy = max(0.0, min(fy1, e[3]) - max(fy0, e[1]))
+            area = (e[2] - e[0]) * (e[3] - e[1])
             worst = max(worst, ix * iy / area if area else 0.0)
         return worst
 
-    def sal_cost(box):
-        fx0, fy0, fx1, fy1 = (min(1.0, max(0.0, v)) for v in art_frac(box))
-        return float(sal[int(fy0 * n):max(int(fy1 * n), int(fy0 * n) + 1),
-                         int(fx0 * n):max(int(fx1 * n), int(fx0 * n) + 1)].sum())
+    right_room, bottom_room = box[0] - margin, box[1] - margin   # art edges that keep the card on the mat
+
+    def on_mat(ox, oy, aw, ah):
+        return ox + aw <= right_room or oy + ah <= bottom_room
 
     aw, ah = art.size
-    if plan.mode == "pillarbox" and W - aw >= cw + 3 * margin:
-        ox, oy, candidates = mat_layout(aw, ah)
+    ox, oy = plan.art_offset
+    geo.update(ox=ox, oy=oy, aw=aw, ah=ah)
+    if on_mat(ox, oy, aw, ah):
+        pos = "mat-bottom-right"                         # the border already holds the card
+    elif overlap(box) == 0:
+        pos = "bottom-right"                             # over the artwork, clear of every essential subject
     else:
-        ox, oy = plan.art_offset
-        candidates = overlay_layout(aw, ah, ox, oy)
-        geo.update(ox=ox, oy=oy, aw=aw, ah=ah)
-        if min(overlap(c[1]) for c in candidates) > 0:
-            # the bottom-right corner covers a protagonist: hang the work a little smaller, label on the mat
-            k = min((W - cw - 3 * margin) / aw, (H - 2 * margin) / ah)
+        # the corner covers a protagonist: move the artwork as little as possible to free it
+        pos = "mat-bottom-right"
+        moves = []
+        if aw <= right_room:
+            moves.append((ox - min(ox, right_room - aw), min(ox, right_room - aw), oy))
+        if ah <= bottom_room:
+            moves.append((oy - min(oy, bottom_room - ah), ox, min(oy, bottom_room - ah)))
+        if moves:
+            _, ox, oy = min(moves)                       # the smaller shift
+        else:                                            # the smaller shrink: clear it sideways or from below
+            k_side, k_below = right_room / aw, bottom_room / ah
+            k = max(k_side, k_below)
             aw, ah = round(aw * k), round(ah * k)
             art = art.resize((aw, ah), Image.LANCZOS)
-            ox, oy, candidates = mat_layout(aw, ah)
-    geo.update(ox=ox, oy=oy, aw=aw, ah=ah)
+            if k == k_side:
+                ox, oy = (right_room - aw) // 2, (H - ah) // 2
+            else:
+                ox, oy = (W - aw) // 2, (bottom_room - ah) // 2
+        geo.update(ox=ox, oy=oy, aw=aw, ah=ah)
     frame.paste(art, (ox, oy))
-
-    scored = sorted(candidates, key=lambda c: (overlap(c[1]) > 0, overlap(c[1]), sal_cost(c[1])))
-    pos, box = scored[0]
-    ov = overlap(box)
+    ov = overlap(box) if not on_mat(ox, oy, aw, ah) else 0.0
 
     card = card_stock(texture, cw, ch).copy() if texture else Image.new("RGB", (cw, ch), PAPER)
     # contrast is judged on the stock's darkest 5% (its shadowed grain), not its average

@@ -318,3 +318,15 @@ def test_a_long_title_shrinks_then_wraps_and_an_impossible_one_fails():
 def test_a_missing_card_texture_is_an_error_not_a_flat_card(tmp_path):
     with pytest.raises(FileNotFoundError):
         _card({"artist": "A", "title": "B"}, texture=str(tmp_path / "nope.jpg"))
+
+
+def test_a_portrait_stays_centred_when_its_border_already_holds_the_card():
+    import numpy as np
+    from neural_canvas.crop import CropPlan
+    from neural_canvas.placard import compose
+    art = Image.new("RGB", (1600, 2160), (200, 30, 30))
+    plan = CropPlan("pillarbox", (0, 0, 1, 1), (0, 0, 1600, 2160), (1600, 2160), (1120, 0), passed=True)
+    frame, pl = compose(art, plan, (3840, 2160), {"artist": "A", "title": "B"}, [(0.0, 0.0, 1.0, 1.0)], 7.0)
+    assert pl.position == "mat-bottom-right" and pl.passed
+    px = np.asarray(frame)
+    assert tuple(px[1000, 1120]) == (200, 30, 30) and tuple(px[1000, 1119]) != (200, 30, 30)   # not moved
