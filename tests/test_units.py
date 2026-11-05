@@ -15,8 +15,8 @@ def _img(w, h):
     return Image.fromarray(rng.integers(0, 255, (h, w, 3), dtype=np.uint8))
 
 
-def _interp(subjects, genre="genre-scene"):
-    return Interpretation(genre, "", "", (0.5, 0.5), None, subjects, "")
+def _interp(subjects, genre="genre-scene", faces=(), focal=(0.5, 0.5)):
+    return Interpretation(genre, "", "", focal, None, subjects, "", list(faces))
 
 
 def test_full_bleed_keeps_essential_and_is_16x9():
@@ -28,27 +28,51 @@ def test_full_bleed_keeps_essential_and_is_16x9():
     assert plan.window[1] <= 0.05 + 1e-6            # slid up to keep the face
 
 
-def test_tall_work_with_tall_subject_is_matted_not_cut():
+def _is_16x9_full_bleed(plan):
+    x0, y0, x1, y1 = plan.window_px
+    return plan.mode == "full-bleed" and plan.art_size == (3840, 2160) and abs((x1 - x0) / (y1 - y0) - 16 / 9) < 0.01
+
+
+def test_a_tall_work_is_cropped_to_fill_the_screen_never_matted_and_keeps_the_face():
     img = _img(1000, 1500)
-    s = Subject("figure", (0.3, 0.1, 0.7, 0.95), 5, True)
-    plan = Composer(3840, 2160, 0.97).plan(img, _interp([s]))
-    assert plan.passed and plan.mode == "pillarbox"
-    assert _retained(s.box, plan.window) >= 0.97
-    assert plan.art_size[1] == 2160 and plan.art_size[0] < 3840
+    body = Subject("figure", (0.3, 0.1, 0.7, 0.95), 5, True)
+    face = Subject("figure", (0.42, 0.12, 0.58, 0.24), 5, True)
+    plan = Composer(3840, 2160, 0.97).plan(img, _interp([body], faces=[face]))
+    assert plan.passed and _is_16x9_full_bleed(plan)
+    assert plan.window[1] <= 0.12 - 0.01 and plan.window[3] >= 0.24 + 0.01        # the face is inside
+    assert plan.warnings and "truncated" in plan.warnings[0]                         # and the cut is reported
+    assert plan.faces_kept == "1/1"
 
 
-def test_matted_window_found_when_span_fills_it_exactly():
-    # regression: the only feasible offset was a single point the step grid skipped
-    img = _img(1035, 1535)
-    plan = Composer(3840, 2160, 0.97).plan(img, _interp([Subject("girl", (0.3, 0.35, 0.7, 0.85), 5, True)]))
-    assert plan.passed, plan.failures
+def test_essential_faces_that_cannot_share_one_window_block_the_run():
+    img = _img(1000, 2000)                  # the 16:9 window is 28% of the height
+    faces = [Subject("a", (0.4, 0.05, 0.5, 0.12), 5, True), Subject("b", (0.4, 0.85, 0.5, 0.92), 5, True)]
+    plan = Composer(3840, 2160, 0.97).plan(img, _interp([Subject("a", (0.3, 0.0, 0.7, 1.0), 5, True)], faces=faces))
+    assert not plan.passed and "essential face" in plan.failures[0] and _is_16x9_full_bleed(plan)
 
 
-def test_wide_panorama_letterboxed_when_essentials_span_width():
+def test_a_wide_panorama_is_cropped_and_keeps_the_more_important_subject():
     img = _img(4000, 1000)
-    subs = [Subject("a", (0.02, 0.3, 0.1, 0.7), 5, True), Subject("b", (0.9, 0.3, 0.98, 0.7), 5, True)]
+    subs = [Subject("minor", (0.02, 0.3, 0.1, 0.7), 2, False), Subject("main", (0.8, 0.3, 0.95, 0.7), 5, True)]
     plan = Composer(3840, 2160, 0.97).plan(img, _interp(subs))
-    assert plan.passed and plan.mode == "letterbox"
+    assert plan.passed and _is_16x9_full_bleed(plan)
+    assert _retained(subs[1].box, plan.window) == 1.0 and _retained(subs[0].box, plan.window) == 0.0
+
+
+def test_a_landscape_gives_up_height_from_the_bottom_first():
+    img = _img(1600, 1600)
+    plan = Composer(3840, 2160, 0.97).plan(img, _interp([Subject("hills", (0.0, 0.3, 1.0, 0.7), 3, False)],
+                                                       genre="landscape", focal=(0.5, 0.5)))
+    assert plan.passed and plan.window[1] < 1 - plan.window[3]                      # more cut below than above
+
+
+def test_the_crop_keeps_faces_out_of_the_label_corner():
+    img = _img(1600, 1200)                  # 4:3: the window slides vertically over 25% of the height
+    face = Subject("man", (0.88, 0.70, 0.95, 0.78), 5, True)
+    plan = Composer(3840, 2160, 0.97).plan(img, _interp([Subject("man", (0.8, 0.6, 1.0, 1.0), 5, True)], faces=[face]))
+    win = plan.window
+    fy0 = (face.box[1] - win[1]) / (win[3] - win[1])
+    assert plan.passed and fy0 < 0.894 - 0.05                                       # well above the card
 
 
 def test_box_normalisation_and_rejects():
@@ -99,16 +123,15 @@ def test_web_evidence_line_names_the_image_file():
     assert "file: Towering Storm" in line and "page: San Diego Sunset" in line and "jimmusil.com" in line
 
 
-def test_label_moves_to_mat_when_the_corner_covers_a_protagonist():
+def test_the_label_never_covers_a_face():
     from neural_canvas.crop import CropPlan
     from neural_canvas.placard import compose
-    art = _img(3840, 2160)
     plan = CropPlan("full-bleed", (0, 0, 1, 1), (0, 0, 3840, 2160), (3840, 2160), (0, 0), passed=True)
     ident = {"artist": "A. Painter", "title": "Crowd", "date": "1900"}
-    frame, pl = compose(art, plan, (3840, 2160), ident, [(0.0, 0.0, 1.0, 1.0)], 7.0)
-    assert frame.size == (3840, 2160)
-    assert pl.position == "mat-bottom-right" and pl.essential_overlap == 0 and pl.passed, pl.failures
-    assert pl.box[2] == 3840 - 40 and pl.box[3] == 2160 - 40        # the frame's bottom-right corner
+    _, ok = compose(_img(3840, 2160), plan, (3840, 2160), ident, [(0.0, 0.0, 1.0, 1.0)], 7.0, faces=[(0.1, 0.1, 0.2, 0.2)])
+    assert ok.passed and ok.position == "bottom-right" and ok.essential_overlap > 0       # a body under it is recorded
+    _, bad = compose(_img(3840, 2160), plan, (3840, 2160), ident, [], 7.0, faces=[(0.9, 0.9, 0.95, 0.95)])
+    assert not bad.passed and any("face" in f for f in bad.failures)
 
 
 def test_placard_is_facts_only_fixed_half_size_and_bottom_right():
@@ -318,15 +341,3 @@ def test_a_long_title_shrinks_then_wraps_and_an_impossible_one_fails():
 def test_a_missing_card_texture_is_an_error_not_a_flat_card(tmp_path):
     with pytest.raises(FileNotFoundError):
         _card({"artist": "A", "title": "B"}, texture=str(tmp_path / "nope.jpg"))
-
-
-def test_a_portrait_stays_centred_when_its_border_already_holds_the_card():
-    import numpy as np
-    from neural_canvas.crop import CropPlan
-    from neural_canvas.placard import compose
-    art = Image.new("RGB", (1600, 2160), (200, 30, 30))
-    plan = CropPlan("pillarbox", (0, 0, 1, 1), (0, 0, 1600, 2160), (1600, 2160), (1120, 0), passed=True)
-    frame, pl = compose(art, plan, (3840, 2160), {"artist": "A", "title": "B"}, [(0.0, 0.0, 1.0, 1.0)], 7.0)
-    assert pl.position == "mat-bottom-right" and pl.passed
-    px = np.asarray(frame)
-    assert tuple(px[1000, 1120]) == (200, 30, 30) and tuple(px[1000, 1119]) != (200, 30, 30)   # not moved

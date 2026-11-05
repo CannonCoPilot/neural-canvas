@@ -30,7 +30,7 @@ from .imify import Imify
 from .interpret import Interpretation, Subject, interpret
 from .matching import Embedder
 from .movement import classify as classify_movement
-from .placard import compose
+from .placard import card_margin, card_size, compose
 from .references import Wikimedia
 from .upscale import Upscaler
 from .vision_web import VisionWebDetection
@@ -96,8 +96,11 @@ class Docent:
                                      Imify(im) if im.get("enabled") else None,
                                      VisionWebDetection(vw, cfg.path("state_dir") / "vision_web")
                                      if vw.get("enabled") else None)
-        self.composer = Composer(cfg["display"]["width"], cfg["display"]["height"],
-                                 cfg.thresholds["essential_retained_min"])
+        W, H = cfg["display"]["width"], cfg["display"]["height"]
+        cw, ch = card_size(cfg["display"]["placard_scale"])
+        m = card_margin(cfg["display"]["placard_scale"])
+        self.composer = Composer(W, H, cfg.thresholds["essential_retained_min"],
+                                 card=((W - m - cw) / W, (H - m - ch) / H, (W - m) / W, (H - m) / H))
         self._upscaler = None
         self.photos = GooglePhotos(cfg["google_photos"], cfg.path("state_dir"))
         self.registry = ArtworkRegistry(cfg.path("state_dir"))
@@ -179,7 +182,8 @@ class Docent:
             stage = "interpret"
             if on_stage:
                 on_stage(stage)
-            if not done(stage):
+            # an interpretation made before faces were located is redone: the crop needs them
+            if not done(stage) or "faces" not in st.get(stage, {}):
                 t0 = time.time()
                 it = interpret(self.vlm, img, facts)
                 fails = [] if any(s.essential for s in it.subjects) else ["no essential subject marked"]
@@ -218,15 +222,17 @@ class Docent:
                 save()
             facts["movement"] = st["movement"]["movement"]
             win = plan.window
-            ess = []
-            for s in it.subjects:
-                if s.essential:
-                    bx = ((s.box[0] - win[0]) / (win[2] - win[0]), (s.box[1] - win[1]) / (win[3] - win[1]),
-                          (s.box[2] - win[0]) / (win[2] - win[0]), (s.box[3] - win[1]) / (win[3] - win[1]))
-                    ess.append(tuple(min(1.0, max(0.0, v)) for v in bx))
+
+            def in_window(b):
+                bx = ((b[0] - win[0]) / (win[2] - win[0]), (b[1] - win[1]) / (win[3] - win[1]),
+                      (b[2] - win[0]) / (win[2] - win[0]), (b[3] - win[1]) / (win[3] - win[1]))
+                return tuple(min(1.0, max(0.0, v)) for v in bx)
+            ess = [in_window(s.box) for s in it.subjects if s.essential]
+            faces = [in_window(f.box) for f in it.faces]
             disp = (self.cfg["display"]["width"], self.cfg["display"]["height"])
             frame, pl = compose(art, plan, disp, facts, ess, self.cfg.thresholds["placard_min_contrast"],
-                                self.cfg["display"]["placard_scale"], self.cfg["display"]["card_texture"])
+                                self.cfg["display"]["placard_scale"], self.cfg["display"]["card_texture"],
+                                faces=faces)
             name = f"{_slug(facts['artist'])}--{_slug(facts['title'])}--{run_id[:8]}.jpg"
             out = self.cfg.path("output_dir") / name
             frame.save(out, "JPEG", quality=92, optimize=True)
@@ -282,5 +288,6 @@ class Docent:
 
 def _interp_from(d: dict) -> Interpretation:
     subs = [Subject(s["label"], tuple(s["box"]), s["importance"], s["essential"]) for s in d["subjects"]]
+    faces = [Subject(f["label"], tuple(f["box"]), f["importance"], f["essential"]) for f in d.get("faces", [])]
     return Interpretation(d["genre"], d["scene"], d["artistic_intent"], tuple(d["focal_point"]),
-                          d.get("horizon_y"), subs, d.get("label_text", ""))
+                          d.get("horizon_y"), subs, d.get("label_text", ""), faces)

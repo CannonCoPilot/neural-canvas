@@ -1,15 +1,22 @@
-"""Stage 3 — subject-preserving composition onto the 16:9 display.
+"""Stage 3 — fill the 16:9 display, losing as little of the artwork's framing as the screen allows.
 
-One algorithm for every genre (the old code had nine copies, none of which ran). The genre only
-changes small composition weights. Gate: every *essential* subject keeps ≥ ``essential_retained_min``
-of its area. Search order:
+Every work is shown full-screen: the largest 16:9 window of the artwork (the whole of its short
+axis), slid along its long axis, then upscaled to the display. Never stretched, never matted. What
+remains to decide is only WHERE the window sits, and that follows the artwork, in this order:
 
-1. **full-bleed** — the largest 16:9 window of the artwork, slid along the free axis; best-scoring
-   window that passes the gate wins.
-2. **matted** — when no 16:9 window can hold every essential subject (tall or very wide works), trim
-   the free axis only as far as the essential subjects allow and show the rest of the screen as a
-   museum-wall mat (pillarbox or letterbox). The artwork is never squeezed and never cut through a
-   protagonist to fill the screen.
+1. **faces** — every face of a figure the interpreter marked essential stays wholly inside. This is
+   the gate: a work whose essential faces cannot all share one 16:9 window blocks, and its run says
+   so. Beyond that, as many other faces as possible.
+2. **subjects** — importance-weighted retention, with a penalty for slicing a subject through
+   (keeping 15-85% of it) rather than keeping or dropping it whole.
+3. **composition** — the primary subject keeps its centrality or offset; the focal point sits near
+   a third or the centre; visual saliency; the genre's rule (landscapes give up height from the
+   bottom first).
+4. **the label corner** — faces and essential subjects are steered out of the bottom-right corner
+   where the placard is printed.
+
+Any essential subject the window trims below ``essential_retained_min`` is listed in ``warnings``
+with how much of it survives: truncation is reported, never hidden.
 """
 from __future__ import annotations
 
@@ -28,7 +35,8 @@ GENRE_WEIGHTS = {   # (subject importance, saliency, thirds composition)
     "still-life": (0.60, 0.30, 0.10), "animal": (0.70, 0.20, 0.10), "interior": (0.6, 0.3, 0.1),
     "abstract": (0.30, 0.60, 0.10),
 }
-MARGIN = 0.03   # breathing room kept around essential subjects in matted mode
+FACE_MARGIN = 0.01        # a kept face keeps this much air (fraction of the image) inside the window
+W_FACES, W_SLICE, W_OFFSET, W_TOP, W_CARD = 0.6, 0.25, 0.15, 0.05, 0.3
 
 
 def saliency_map(img: Image.Image, side: int = 128) -> np.ndarray:
@@ -49,9 +57,14 @@ def _retained(box, win) -> float:
     return (ix * iy) / area if area > 0 else 0.0
 
 
+def _inside(box, win, margin: float = FACE_MARGIN) -> bool:
+    return (box[0] >= win[0] + margin or win[0] <= 0) and (box[1] >= win[1] + margin or win[1] <= 0) \
+        and (box[2] <= win[2] - margin or win[2] >= 1) and (box[3] <= win[3] - margin or win[3] >= 1)
+
+
 @dataclass
 class CropPlan:
-    mode: str                                  # full-bleed | pillarbox | letterbox
+    mode: str                                  # always "full-bleed" (kept for the record format)
     window: tuple[float, float, float, float]  # fractions of source
     window_px: tuple[int, int, int, int]
     art_size: tuple[int, int]                  # displayed artwork size on the canvas
@@ -60,20 +73,40 @@ class CropPlan:
     score: float = 0.0
     passed: bool = False
     failures: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+    faces_kept: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
 class Composer:
-    def __init__(self, width: int, height: int, essential_min: float):
-        self.W, self.H, self.ess_min = width, height, essential_min
+    def __init__(self, width: int, height: int, essential_min: float,
+                 card: tuple[float, float, float, float] = (0.867, 0.894, 0.99, 0.981)):
+        """``card`` is the placard's box as fractions of the display (bottom-right)."""
+        self.W, self.H, self.ess_min, self.card = width, height, essential_min, card
         self.A = width / height
 
-    def _score(self, win, interp: Interpretation, sal: np.ndarray, weights) -> float:
+    def _windows(self, src_aspect: float, axis: str):
+        """The largest 16:9 windows (fractions). axis 'x' = slide horizontally (wide source), 'y' = vertically."""
+        length = (self.A / src_aspect) if axis == "x" else (src_aspect / self.A)
+        length = min(1.0, length)
+        steps = max(1, int((1.0 - length) / 0.004))
+        for i in range(steps + 1):
+            o = (1.0 - length) * i / steps
+            yield (o, 0.0, o + length, 1.0) if axis == "x" else (0.0, o, 1.0, o + length)
+
+    def _card_in_source(self, win):
+        x0, y0, x1, y1 = self.card
+        return (win[0] + x0 * (win[2] - win[0]), win[1] + y0 * (win[3] - win[1]),
+                win[0] + x1 * (win[2] - win[0]), win[1] + y1 * (win[3] - win[1]))
+
+    def _score(self, win, interp: Interpretation, sal: np.ndarray, weights, axis: str) -> float:
         subs = interp.subjects
         tot = sum(s.importance for s in subs) or 1
-        s_imp = sum(s.importance * _retained(s.box, win) for s in subs) / tot
+        rets = [_retained(s.box, win) for s in subs]
+        s_imp = sum(s.importance * r for s, r in zip(subs, rets)) / tot
+        s_slice = sum(s.importance for s, r in zip(subs, rets) if 0.15 < r < 0.85) / tot
         n = sal.shape[0]
         x0, y0, x1, y1 = (int(round(v * n)) for v in win)
         s_sal = float(sal[y0:max(y1, y0 + 1), x0:max(x1, x0 + 1)].sum())
@@ -83,23 +116,25 @@ class Composer:
         if 0 <= wx <= 1 and 0 <= wy <= 1:
             d = min(abs(wx - t) for t in (1 / 3, 1 / 2, 2 / 3)) + min(abs(wy - t) for t in (1 / 3, 1 / 2, 2 / 3))
             thirds = max(0.0, 1 - 3 * d)
-        a, b, c = weights
-        return a * s_imp + b * s_sal + c * thirds
-
-    def _windows(self, src_aspect: float, span: tuple[float, float] | None, axis: str):
-        """Yield windows (fractions). axis 'x' = slide horizontally (wide source), 'y' = vertically."""
-        full = (self.A / src_aspect) if axis == "x" else (src_aspect / self.A)   # 16:9 length on free axis
-        length = full if span is None else min(1.0, max(full, span[1] - span[0] + 2 * MARGIN))
-        lo, hi = 0.0, 1.0 - length                     # feasible offsets along the free axis
-        if span is not None:                           # window must contain the essential span + margin
-            lo = max(lo, min(1.0, span[1] + MARGIN) - length)
-            hi = min(hi, max(0.0, span[0] - MARGIN))
-        if lo > hi + 1e-9:
-            return
-        steps = max(1, int((hi - lo) / 0.005))
-        for i in range(steps + 1):
-            o = lo + (hi - lo) * i / steps
-            yield ((o, 0.0, o + length, 1.0) if axis == "x" else (0.0, o, 1.0, o + length)), length
+        faces = interp.faces
+        s_face = sum(_inside(f.box, win) for f in faces) / len(faces) if faces else 1.0
+        # the primary subject keeps the centrality or offset it has in the whole work
+        s_off = 1.0
+        prim = max((s for s in subs if s.essential), key=lambda s: s.importance, default=None)
+        if prim is not None:
+            k = 0 if axis == "x" else 1
+            c = (prim.box[k] + prim.box[k + 2]) / 2
+            in_win = (c - win[k]) / (win[k + 2] - win[k])
+            s_off = max(0.0, 1 - 2 * abs(in_win - c))
+        # landscapes give up height from the bottom first
+        s_top = (1 - win[1] / max(1e-6, 1 - (win[3] - win[1]))) if axis == "y" and \
+            interp.genre in ("landscape", "seascape", "cityscape") and win[3] - win[1] < 1 else 0.0
+        card = self._card_in_source(win)
+        s_card = max([1.0 for f in faces if _retained(f.box, card) > 0]          # a face under the label
+                     + [_retained(s.box, card) for s in subs if s.essential], default=0.0)
+        a, b, c3 = weights
+        return (a * s_imp + b * s_sal + c3 * thirds + W_FACES * s_face - W_SLICE * s_slice
+                + W_OFFSET * s_off + W_TOP * s_top - W_CARD * s_card)
 
     def plan(self, img: Image.Image, interp: Interpretation) -> CropPlan:
         w, h = img.size
@@ -107,47 +142,22 @@ class Composer:
         axis = "x" if a >= self.A else "y"
         sal = saliency_map(img)
         weights = GENRE_WEIGHTS.get(interp.genre, (0.6, 0.3, 0.1))
-        ess = [s for s in interp.subjects if s.essential]
-
-        def ok(win):
-            return all(_retained(s.box, win) >= self.ess_min for s in ess)
-
-        best = None
-        for win, _ in self._windows(a, None, axis):
-            if ok(win):
-                sc = self._score(win, interp, sal, weights)
-                if best is None or sc > best[1]:
-                    best = (win, sc)
-        mode = "full-bleed"
-        if best is None and ess:
-            lo = min(s.box[0 if axis == "x" else 1] for s in ess)
-            hi = max(s.box[2 if axis == "x" else 3] for s in ess)
-            for win, _ in self._windows(a, (lo, hi), axis):
-                if ok(win):
-                    sc = self._score(win, interp, sal, weights)
-                    if best is None or sc > best[1]:
-                        best = (win, sc)
-            mode = "pillarbox" if axis == "y" else "letterbox"
+        ess_faces = [f for f in interp.faces if f.essential]
+        wins = list(self._windows(a, axis))
+        keep = [win for win in wins if all(_inside(f.box, win) for f in ess_faces)]
         failures = []
-        if best is None:
-            # unreachable when essentials are within the image; kept as an explicit failure
-            failures.append("no window retains every essential subject")
-            best = ((0.0, 0.0, 1.0, 1.0), 0.0)
-            mode = "pillarbox" if axis == "y" else "letterbox"
-        win, sc = best
+        if not keep:
+            best_n = max(sum(_inside(f.box, win) for f in ess_faces) for win in wins)
+            failures.append(f"no 16:9 window keeps every essential face ({best_n} of {len(ess_faces)} at best): "
+                            "the faces span more of the long axis than the screen allows")
+            keep = wins
+        scored = [(self._score(win, interp, sal, weights, axis), win) for win in keep]
+        sc, win = max(scored)
         px = (round(win[0] * w), round(win[1] * h), round(win[2] * w), round(win[3] * h))
-        cw, ch = px[2] - px[0], px[3] - px[1]
-        if mode == "full-bleed":
-            art = (self.W, self.H)
-        elif mode == "pillarbox":
-            art = (round(self.H * cw / ch), self.H)
-        else:
-            art = (self.W, round(self.W * ch / cw))
-        art = (min(art[0], self.W), min(art[1], self.H))
-        off = ((self.W - art[0]) // 2, (self.H - art[1]) // 2)
         ret = {f"{i}:{s.label}": round(_retained(s.box, win), 3) for i, s in enumerate(interp.subjects)}
-        for i, s in enumerate(interp.subjects):
-            if s.essential and _retained(s.box, win) < self.ess_min:
-                failures.append(f"essential subject {s.label!r} retained {_retained(s.box, win):.2f}")
-        return CropPlan(mode, tuple(round(v, 4) for v in win), px, art, off, ret, round(sc, 4),
-                        passed=not failures, failures=failures)
+        warnings = [f"essential subject {s.label!r} truncated: {_retained(s.box, win):.0%} kept"
+                    for s in interp.subjects if s.essential and _retained(s.box, win) < self.ess_min]
+        kept = sum(_inside(f.box, win) for f in interp.faces)
+        return CropPlan("full-bleed", tuple(round(v, 4) for v in win), px, (self.W, self.H), (0, 0), ret,
+                        round(sc, 4), passed=not failures, failures=failures, warnings=warnings,
+                        faces_kept=f"{kept}/{len(interp.faces)}")

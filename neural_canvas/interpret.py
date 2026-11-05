@@ -1,4 +1,4 @@
-"""Stage 2 — interpret the scene: genre, subjects (boxed), intent, and the label's prose."""
+"""Stage 2 — interpret the scene: genre, subjects and faces (boxed), intent, and the label's prose."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -19,15 +19,19 @@ Verified identification (from the collection record — treat as fact): {facts}
    1-5, and "essential": true only for elements whose loss would change what the work is about
    (the protagonists, the focal event, faces of main figures). Background, sky, ground and
    framing elements are never essential. At most 6 essential subjects.
-3. Give the focal point [x, y] (0-1000) and, if the work has one, the horizon height y (0-1000).
-4. Describe the scene and the artist's evident intent.
-5. Write a museum wall-label paragraph of 40-65 words about this work, as the curator who knows it:
+3. Locate every visible FACE, human or animal, with a TIGHT box around the head (same 0-1000
+   coordinates), the label of the subject it belongs to, and "essential": true when that subject is
+   essential. Include small and distant faces; give [] if there are none.
+4. Give the focal point [x, y] (0-1000) and, if the work has one, the horizon height y (0-1000).
+5. Describe the scene and the artist's evident intent.
+6. Write a museum wall-label paragraph of 40-65 words about this work, as the curator who knows it:
    name its subjects the way the verified title names them (never "a figure" when the title says
    who it is), then what we see, how it is painted, and why it matters. Add no biographical or
    historical claim beyond the verified identification; everything else must be visible in the image.
 Reply ONLY with JSON:
 {{"genre": "...", "scene": "...", "artistic_intent": "...", "focal_point": [x, y], "horizon_y": null,
   "subjects": [{{"label": "...", "box_2d": [x0, y0, x1, y1], "importance": 3, "essential": false}}],
+  "faces": [{{"of": "subject label", "box_2d": [x0, y0, x1, y1], "essential": true}}],
   "label_text": "..."}}"""
 
 
@@ -48,6 +52,7 @@ class Interpretation:
     horizon_y: float | None
     subjects: list[Subject] = field(default_factory=list)
     label_text: str = ""
+    faces: list[Subject] = field(default_factory=list)     # label = the subject the face belongs to
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -76,6 +81,13 @@ def interpret(vlm: VLM, img: Image.Image, facts: dict) -> Interpretation:
                                     bool(s.get("essential"))))
     if not subjects:
         raise ValueError("interpretation located no subjects")
+    if not isinstance(d.get("faces"), list):
+        raise ValueError("interpretation gave no faces list (an empty list is a valid answer)")
+    faces = []
+    for f in d["faces"]:
+        b = _box(f.get("box_2d")) if isinstance(f, dict) else None
+        if b:
+            faces.append(Subject(str(f.get("of", "")), b, 5, bool(f.get("essential"))))
     fp = d.get("focal_point") or [500, 500]
     hz = d.get("horizon_y")
     genre = str(d.get("genre", "")).lower().strip()
@@ -84,4 +96,4 @@ def interpret(vlm: VLM, img: Image.Image, facts: dict) -> Interpretation:
         scene=str(d.get("scene", "")), artistic_intent=str(d.get("artistic_intent", "")),
         focal_point=(float(fp[0]) / 1000, float(fp[1]) / 1000),
         horizon_y=(float(hz) / 1000 if isinstance(hz, (int, float)) else None),
-        subjects=subjects, label_text=str(d.get("label_text", "")).strip())
+        subjects=subjects, label_text=str(d.get("label_text", "")).strip(), faces=faces)
