@@ -71,7 +71,7 @@ def _box(b) -> tuple[float, float, float, float] | None:
 def interpret(vlm: VLM, img: Image.Image, facts: dict) -> Interpretation:
     fact_line = "; ".join(f"{k}: {v}" for k, v in facts.items() if v)
     d = vlm.ask_json(PROMPT.format(facts=fact_line, genres=", ".join(GENRES)), [img],
-                     required=("genre", "subjects", "label_text", "focal_point"), max_side=1280,
+                     required=("genre", "subjects", "faces", "label_text", "focal_point"), max_side=1280,
                      num_predict=3072)
     subjects = []
     for s in d.get("subjects") or []:

@@ -4,9 +4,9 @@ Every work is shown full-screen: the largest 16:9 window of the artwork (the who
 axis), slid along its long axis, then upscaled to the display. Never stretched, never matted. What
 remains to decide is only WHERE the window sits, and that follows the artwork, in this order:
 
-1. **faces** — every face of a figure the interpreter marked essential stays wholly inside. This is
-   the gate: a work whose essential faces cannot all share one 16:9 window blocks, and its run says
-   so. Beyond that, as many other faces as possible.
+1. **faces** — every face of a principal figure (an essential subject of top importance) stays
+   wholly inside. This is the gate: a work whose principal faces cannot all share one 16:9 window
+   blocks, and its run says so. Beyond that, as many other faces as possible.
 2. **subjects** — importance-weighted retention, with a penalty for slicing a subject through
    (keeping 15-85% of it) rather than keeping or dropping it whole.
 3. **composition** — the primary subject keeps its centrality or offset; the focal point sits near
@@ -60,6 +60,16 @@ def _retained(box, win) -> float:
 def _inside(box, win, margin: float = FACE_MARGIN) -> bool:
     return (box[0] >= win[0] + margin or win[0] <= 0) and (box[1] >= win[1] + margin or win[1] <= 0) \
         and (box[2] <= win[2] - margin or win[2] >= 1) and (box[3] <= win[3] - margin or win[3] >= 1)
+
+
+def principal_faces(interp: Interpretation) -> list:
+    """The faces the crop may never cut: those of the principal figures, i.e. the essential subjects of
+    top importance. A crowd or choir marked essential has faces everywhere; they are scored, not gated.
+    A face whose subject cannot be matched by label stays gated (the strict side)."""
+    ess = [s for s in interp.subjects if s.essential]
+    top = max((s.importance for s in ess), default=0)
+    imp = {s.label.strip().lower(): s.importance for s in ess}
+    return [f for f in interp.faces if f.essential and imp.get(f.label.strip().lower(), top) >= top]
 
 
 @dataclass
@@ -142,7 +152,7 @@ class Composer:
         axis = "x" if a >= self.A else "y"
         sal = saliency_map(img)
         weights = GENRE_WEIGHTS.get(interp.genre, (0.6, 0.3, 0.1))
-        ess_faces = [f for f in interp.faces if f.essential]
+        ess_faces = principal_faces(interp)
         wins = list(self._windows(a, axis))
         keep = [win for win in wins if all(_inside(f.box, win) for f in ess_faces)]
         failures = []

@@ -51,6 +51,14 @@ def test_essential_faces_that_cannot_share_one_window_block_the_run():
     assert not plan.passed and "essential face" in plan.failures[0] and _is_16x9_full_bleed(plan)
 
 
+def test_a_crowd_marked_essential_does_not_gate_the_crop_on_every_face():
+    img = _img(2326, 1586)
+    subs = [Subject("Jesus", (0.07, 0.54, 0.83, 0.99), 5, True), Subject("angels", (0.0, 0.0, 1.0, 0.85), 4, True)]
+    faces = [Subject("Jesus", (0.3, 0.62, 0.38, 0.72), 5, True), Subject("angels", (0.5, 0.02, 0.56, 0.08), 5, True)]
+    plan = Composer(3840, 2160, 0.97).plan(img, _interp(subs, faces=faces))
+    assert plan.passed and plan.window[1] <= 0.62 - 0.01 and plan.window[3] >= 0.72 + 0.01   # Jesus's face kept
+
+
 def test_a_wide_panorama_is_cropped_and_keeps_the_more_important_subject():
     img = _img(4000, 1000)
     subs = [Subject("minor", (0.02, 0.3, 0.1, 0.7), 2, False), Subject("main", (0.8, 0.3, 0.95, 0.7), 5, True)]
