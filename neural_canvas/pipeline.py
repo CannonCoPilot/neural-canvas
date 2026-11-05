@@ -226,7 +226,7 @@ class Docent:
                     ess.append(tuple(min(1.0, max(0.0, v)) for v in bx))
             disp = (self.cfg["display"]["width"], self.cfg["display"]["height"])
             frame, pl = compose(art, plan, disp, facts, ess, self.cfg.thresholds["placard_min_contrast"],
-                                self.cfg["display"]["placard_scale"])
+                                self.cfg["display"]["placard_scale"], self.cfg["display"]["card_texture"])
             name = f"{_slug(facts['artist'])}--{_slug(facts['title'])}--{run_id[:8]}.jpg"
             out = self.cfg.path("output_dir") / name
             frame.save(out, "JPEG", quality=92, optimize=True)
@@ -262,7 +262,8 @@ class Docent:
                     save()
                 self.registry.record(run_id, status="delivered", frame=str(out))
             elif not deliver:
-                st[stage] = {"passed": False, "skipped": "delivery disabled for this run"}
+                if not st.get(stage, {}).get("passed"):   # a render-only rerun never forgets a real delivery
+                    st[stage] = {"passed": False, "skipped": "delivery disabled for this run"}
                 rec["status"] = "rendered"
                 save()
                 return RunResult(run_id, "rendered", "deliver", ["delivery disabled for this run"],

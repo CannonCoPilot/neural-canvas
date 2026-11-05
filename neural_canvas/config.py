@@ -33,7 +33,10 @@ DEFAULTS: dict[str, Any] = {
                                 / "realesrgan" / "RealESRGAN_x4plus.pth"),
     },
     # placard_scale: the wall label's size; 1.0 is the original 940 px card
-    "display": {"width": 3840, "height": 2160, "placard_scale": 0.5},
+    "display": {"width": 3840, "height": 2160, "placard_scale": 0.5,
+                # photographed watercolour card stock (Art_AI input/card_stock.jpg); local asset, not in git
+                "card_texture": str(Path.home() / "Claude" / "Staging" / "verified" / "neural-canvas"
+                                    / "assets" / "card_stock.jpg")},
     "thresholds": {
         # identification: a candidate is CONFIRMED only when a reference image of it from an
         # open collection matches the input on both instruments (embedding + geometry).

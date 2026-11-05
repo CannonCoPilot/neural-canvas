@@ -111,7 +111,7 @@ def test_label_moves_to_mat_when_the_corner_covers_a_protagonist():
     assert pl.box[2] == 3840 - 40 and pl.box[3] == 2160 - 40        # the frame's bottom-right corner
 
 
-def test_placard_is_facts_only_half_size_fitted_and_bottom_right():
+def test_placard_is_facts_only_fixed_half_size_and_bottom_right():
     from neural_canvas.crop import CropPlan
     from neural_canvas.placard import compose
     art = _img(3840, 2160)
@@ -123,9 +123,9 @@ def test_placard_is_facts_only_half_size_fitted_and_bottom_right():
     assert pl.position == "bottom-right" and pl.passed, pl.failures
     text = [s for s in pl.lines if s]
     assert text[-2:] == ["Impressionism", "Los Angeles County Museum of Art"]   # movement right above it
-    assert len(text) == 7                                                      # no paragraph
+    assert len(text) == 6 and "The Field of Derout-Lollichon, 1886" in text   # no paragraph; title one line
     x0, y0, x1, y1 = pl.box
-    assert (x1, y1) == (3840 - 40, 2160 - 40) and x1 - x0 < 470 + 2 * 22     # fitted, half of 940
+    assert (x1, y1) == (3840 - 40, 2160 - 40) and (x1 - x0, y1 - y0) == (470, 190)   # fixed, half of 940
 
 
 def test_wikidata_movement_labels_print_as_names():
@@ -267,3 +267,54 @@ def test_runner_pauses_without_claiming_when_delivery_cannot_sign_in(tmp_path, m
     assert alerts == [("critical", {"waiting": 2})]
     s.run_ready()
     assert len(alerts) == 1                     # one alert an hour, not one per poll
+
+
+def test_wikidata_dates_print_at_their_own_precision():
+    from neural_canvas.references import Wikimedia
+
+    def ent(time, precision, **quals):
+        q = {k: [{"datavalue": {"value": v}}] for k, v in quals.items()}
+        return {"claims": {"P571": [{"mainsnak": {"datavalue": {"value": {"time": time, "precision": precision}}},
+                                     "qualifiers": q}]}}
+    y = Wikimedia.claim_year
+    assert y(ent("+1886-00-00T00:00:00Z", 9), "P571") == "1886"
+    assert y(ent("+1862-01-01T00:00:00Z", 8), "P571") == "1860s"                    # Moran, not "1862"
+    assert y(ent("+1800-00-00T00:00:00Z", 8), "P571") == "1800s"                    # Bloch, not "1800"
+    assert y(ent("+1890-00-00T00:00:00Z", 7), "P571") == "19th century"
+    assert y(ent("+1890-00-00T00:00:00Z", 7, P1319={"time": "+1886-00-00T00:00:00Z"},
+                 P1326={"time": "+1894-00-00T00:00:00Z"}), "P571") == "1886–1894"     # Tissot, not "1890"
+    assert y(ent("+1862-00-00T00:00:00Z", 9, P1480={"id": "Q5727902"}), "P571") == "c. 1862"
+
+
+def _card(ident, **kw):
+    from neural_canvas.crop import CropPlan
+    from neural_canvas.placard import compose
+    plan = CropPlan("full-bleed", (0, 0, 1, 1), (0, 0, 3840, 2160), (3840, 2160), (0, 0), passed=True)
+    return compose(_img(3840, 2160), plan, (3840, 2160), ident, [(0.0, 0.0, 0.3, 0.3)], 7.0, scale=0.5, **kw)[1]
+
+
+def test_every_card_is_the_same_size_and_keeps_title_and_date_on_one_line():
+    short = _card({"artist": "Jim Musil", "title": "Towering Storm", "date": "2025"})
+    full = _card({"artist": "James Tissot", "artist_nationality": "France", "artist_born": "1836",
+                  "artist_died": "1902", "title": "The Miracle of the Loaves and Fishes", "date": "1886–1894",
+                  "medium": "Opaque watercolor over graphite", "movement": "Academic Art",
+                  "collection": "Brooklyn Museum"})
+    for pl in (short, full):
+        x0, y0, x1, y1 = pl.box
+        assert (x1 - x0, y1 - y0) == (470, 190) and pl.passed, pl.failures
+    assert "The Miracle of the Loaves and Fishes, 1886–1894" in full.lines     # one line
+
+
+def test_a_long_title_shrinks_then_wraps_and_an_impossible_one_fails():
+    mid = _card({"artist": "Alphonse Mucha", "title": "Slav Epic: The Apotheosis of the Slavs", "date": "1926"})
+    assert mid.passed and "Slav Epic: The Apotheosis of the Slavs, 1926" in mid.lines   # set smaller, one line
+    long = _card({"artist": "Alfons Mucha", "title": "Slavs in their Original Homeland: Between the Turanian Whip "
+                  "and the Sword of the Goths", "date": "1912"})
+    assert long.passed and sum(1 for s in long.lines if "Slavs" in s or "Goths" in s) == 2 and long.box[3] - long.box[1] == 190
+    huge = _card({"artist": "A", "title": "word " * 60, "date": "1900"})
+    assert not huge.passed and any("too long" in f for f in huge.failures)
+
+
+def test_a_missing_card_texture_is_an_error_not_a_flat_card(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        _card({"artist": "A", "title": "B"}, texture=str(tmp_path / "nope.jpg"))

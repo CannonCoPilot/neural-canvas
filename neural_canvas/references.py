@@ -124,12 +124,22 @@ class Wikimedia:
 
     @staticmethod
     def claim_year(ent: dict, prop: str) -> str:
+        """A date as a label prints it, honouring Wikidata's precision: a decade-precision value is
+        '1860s', never '1860'; a century '19th century'; an earliest/latest range (P1319/P1326) wins
+        over a vaguer main value ('1886–1894'); 'circa' (P1480 = Q5727902) prefixes 'c.'."""
         for c in (ent.get("claims") or {}).get(prop, []):
             v = c.get("mainsnak", {}).get("datavalue", {}).get("value")
-            if isinstance(v, dict) and v.get("time"):
-                m = re.match(r"[+-]?(\d{1,4})", v["time"])
-                if m:
-                    return str(int(m.group(1)))
+            if not (isinstance(v, dict) and v.get("time")):
+                continue
+            q = c.get("qualifiers") or {}
+            lo, hi = (_qual_year(q, "P1319"), _qual_year(q, "P1326"))
+            circa = any((x.get("datavalue", {}).get("value") or {}).get("id") == "Q5727902" for x in q.get("P1480", []))
+            if lo and hi:
+                out = lo if lo == hi else f"{lo}–{hi}"
+            else:
+                out = _render_time(v["time"], v.get("precision", 9))
+            if out:
+                return f"c. {out}" if circa else out
         return ""
 
     def find_artist(self, name: str) -> str | None:
@@ -201,3 +211,31 @@ def _medium(mats: list[str]) -> str:
     if paints and supports:
         return f"{paints[0].capitalize()} on {supports[0]}"
     return ", ".join(mats).capitalize()
+
+
+def _year(t: str) -> int | None:
+    m = re.match(r"([+-]?)(\d{1,4})", t or "")
+    return (-1 if m.group(1) == "-" else 1) * int(m.group(2)) if m else None
+
+
+def _render_time(t: str, precision: int) -> str:
+    y = _year(t)
+    if y is None or y <= 0:
+        return ""
+    if precision >= 9:
+        return str(y)
+    if precision == 8:
+        return f"{y // 10 * 10}s"
+    if precision == 7:
+        n = (y - 1) // 100 + 1
+        return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')} century"
+    return ""      # millennium or vaguer: not worth printing
+
+
+def _qual_year(q: dict, prop: str) -> str:
+    for x in q.get(prop, []):
+        v = (x.get("datavalue") or {}).get("value") or {}
+        y = _year(v.get("time", ""))
+        if y and y > 0:
+            return str(y)
+    return ""
