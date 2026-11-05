@@ -14,7 +14,8 @@ node_modules/
 tmp/
 
 
-# neural-canvas runtime config (contains real keys — never commit)
+# RETIRED (2533d8a): the old art_agent_team code kept its keys here; the path no longer exists.
+# Kept as a guard. Live config: ./config.yaml (no keys); API keys: Project_Aion/.claude/secrets.
 art_agent_team/config/config.yaml
 
 # neural-canvas v2 runtime (work dirs, outputs, state, inbox) and the Staging-backed venv symlink
