@@ -15,6 +15,7 @@ closed to new customers and ends for all on 2027-01-01, so it is not used.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -163,6 +164,54 @@ class WebImageSearch:
             if img.startswith("http"):
                 out.append(WebReference(x.get("title", ""), hash(img) & 0x7FFFFFFFFFFF, x.get("thumbnail") or img,
                                         x.get("link", ""), img, {"source": "serpapi"}))
+        return out
+
+    @staticmethod
+    def temp_public_url(img) -> str:
+        """A copy of the input at a public address for about an hour, for Google Lens, which takes images by URL
+        only. Hosts tried in Sir's order (2026-11-05): litterbox.catbox.moe (deletes after 1 h), then
+        tmpfiles.org (deletes after 60 min)."""
+        import io
+        im = img.convert("RGB").copy()
+        im.thumbnail((1600, 1600))
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=90)
+        data = buf.getvalue()
+        errors = []
+        try:
+            r = requests.post("https://litterbox.catbox.moe/resources/internals/api.php",
+                              data={"reqtype": "fileupload", "time": "1h"},
+                              files={"fileToUpload": ("work.jpg", data, "image/jpeg")}, timeout=120)
+            r.raise_for_status()
+            url = r.text.strip()
+            if url.startswith("https://"):
+                return url
+            errors.append(f"litterbox: {url[:120]}")
+        except requests.RequestException as e:
+            errors.append(f"litterbox: {e}"[:160])
+        try:
+            r = requests.post("https://tmpfiles.org/api/v1/upload",
+                              files={"file": ("work.jpg", data, "image/jpeg")}, timeout=120)
+            r.raise_for_status()
+            page = (r.json().get("data") or {}).get("url", "").replace("http://", "https://", 1)
+            # the API returns the viewer page; the image is served at a signed /dl/ link (about 5 min) found on it
+            m = re.search(r'href="(https://tmpfiles\.org/dl/[^"]+)"', requests.get(page, timeout=30).text) if page else None
+            if m:
+                return m.group(1)
+            errors.append(f"tmpfiles: no direct link on {page[:120]}")
+        except (requests.RequestException, ValueError) as e:
+            errors.append(f"tmpfiles: {e}"[:160])
+        raise RuntimeError("no temporary host took the upload: " + "; ".join(errors))
+
+    def serpapi_lens(self, image_url: str, limit: int = 40) -> list[WebReference]:
+        """Google Lens visual matches through SerpAPI (one search from the free plan)."""
+        d = self._serpapi({"engine": "google_lens", "url": image_url})
+        out = []
+        for x in d.get("visual_matches", [])[:limit]:
+            img = x.get("image") or x.get("thumbnail") or ""
+            if img.startswith("http"):
+                out.append(WebReference(x.get("title", ""), hash(img) & 0x7FFFFFFFFFFF, x.get("thumbnail") or img,
+                                        x.get("link", ""), img, {"source": "google_lens", "site": x.get("source", "")}))
         return out
 
     def _searx_pages(self, query: str, limit: int) -> list[tuple[str, str]]:

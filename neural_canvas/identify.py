@@ -440,6 +440,19 @@ class Identifier:
                     if ident.status == "confirmed":
                         return ident
                     rounds.pop()
+        # last of all: Google Lens on a one-hour public copy of the picture (Sir, 2026-11-05)
+        if self.web is not None and hasattr(self.web, "serpapi_lens"):
+            log.info("  tier google_lens (fallback)")
+            try:
+                batch = self._score(img, img_vec, self.web.serpapi_lens(self.web.temp_public_url(img)), "google lens", seen)
+                hits = [m for m in batch if m.confirmed]
+                if hits:
+                    ident = self._finish("google_lens", hits, batch, rounds, rnd, refuted[:5], sig, summary)
+                    if ident.status == "confirmed":
+                        return ident
+                    rounds.pop()
+            except Exception as e:
+                log.warning("google lens fallback: %s", e)
         return Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
                               evidence={"reason": "no reference image matched on both instruments"})
 
