@@ -225,6 +225,23 @@ class WebImageSearch:
         r.raise_for_status()
         return [(x["link"], x.get("title", "")) for x in r.json().get("organic", []) if x.get("link", "").startswith("http")]
 
+    def index_images(self, query: str, limit: int = 20) -> list[WebReference]:
+        """Google's image index through Serper. Each picture is Google's own copy (thumbnailUrl), so a site that
+        walls automated visitors is never contacted; the original's address is kept in meta."""
+        if not self._key("serper"):
+            return []
+        r = requests.post("https://google.serper.dev/images", json={"q": query},     # this endpoint refuses "num" (HTTP 400)
+                          headers={"X-API-KEY": self._key("serper")}, timeout=30)
+        r.raise_for_status()
+        out = []
+        for x in r.json().get("images", [])[:limit]:
+            th = x.get("thumbnailUrl", "")
+            if th.startswith("http"):
+                out.append(WebReference(x.get("title", ""), hash(x.get("imageUrl") or th) & 0x7FFFFFFFFFFF, th,
+                                        x.get("link", ""), th, {"source": "google_index", "site": x.get("domain", ""),
+                                                                "original": x.get("imageUrl", "")}))
+        return out
+
     def _brave_pages(self, query: str, limit: int) -> list[tuple[str, str]]:
         r = requests.get("https://api.search.brave.com/res/v1/web/search", params={"q": query, "count": min(limit, 20)},
                          headers={"X-Subscription-Token": self._key("brave"), "Accept": "application/json"}, timeout=30)

@@ -25,7 +25,7 @@ from PIL import Image
 
 from .matching import Embedder, fetch_image, geometric_inliers, save_npz
 from .references import Reference, Wikimedia, file_thumb
-from .artsites import Arthur, Artvee
+from .artsites import Arthur, Artvee, WalledCatalogue
 from .imify import Imify
 from .style import StyleShortlist
 from .vision_web import VisionWebDetection
@@ -136,6 +136,7 @@ class Identifier:
         self._free_sweeps = 0
         self.artvee = Artvee(cfg.path("state_dir"), embedder)
         self.arthur = Arthur(web) if web else None
+        self.walled = WalledCatalogue(web) if web and hasattr(web, "index_images") else None
 
     # ── catalogue sweep: an artist's whole Wikidata oeuvre, embedded once and cached ──
     def _oeuvre_vectors(self, artist_qid: str) -> tuple[list[dict], np.ndarray]:
@@ -300,6 +301,8 @@ class Identifier:
             words = [c["title"] for c in titled if c["artist"] == a] + ([insc] if insc else [])
             if self.arthur:
                 out.append(("arthur", f"arthur: {a}", lambda a=a, w=words: self.arthur.search(a, w)))
+            if self.walled and WalledCatalogue.sites(a):    # a walled catalogue raisonné, through Google's index
+                out.append(("walled", f"walled catalogue: {a}", lambda a=a, w=words: self.walled.search(a, w)))
             out.append(("artvee", f"artvee catalogue: {a}", lambda a=a: self.artvee.nearest(a, self._img_vec, 6)))
         for a in by_style[2:max(4, self._free_sweeps)]:  # four per round (cached catalogues are free)
             out.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, self._img_vec)))
@@ -342,6 +345,7 @@ class Identifier:
         self._used_keywords: set[str] = set()
         self._vision_hints: dict = {}
         self._hint_round = False
+        self._lens_done = False
         vision_due = bool(self.vision and self.vision.enabled)
         max_rounds = self.t["id_max_rounds"]
         self._signature = self.read_signature(img)
@@ -394,7 +398,9 @@ class Identifier:
                     # one web-detection call answers in seconds; sweeps and web searches take many minutes
                     vision_due = False
                     ident = self._vision_tier(img, img_vec, "before a catalogue sweep", seen, matches, rounds, rnd,
-                                              cands, sig, summary)
+                                              cands, sig, summary) \
+                        or self._lens_tier(img, img_vec, "before a catalogue sweep", seen, matches, rounds, rnd, cands,
+                                           sig, summary)
                     if ident:
                         return ident
                 log.info("  tier %s: %s", tier, q[:80])
@@ -440,21 +446,34 @@ class Identifier:
                     if ident.status == "confirmed":
                         return ident
                     rounds.pop()
-        # last of all: Google Lens on a one-hour public copy of the picture (Sir, 2026-11-05)
-        if self.web is not None and hasattr(self.web, "serpapi_lens"):
-            log.info("  tier google_lens (fallback)")
-            try:
-                batch = self._score(img, img_vec, self.web.serpapi_lens(self.web.temp_public_url(img)), "google lens", seen)
-                hits = [m for m in batch if m.confirmed]
-                if hits:
-                    ident = self._finish("google_lens", hits, batch, rounds, rnd, refuted[:5], sig, summary)
-                    if ident.status == "confirmed":
-                        return ident
-                    rounds.pop()
-            except Exception as e:
-                log.warning("google lens fallback: %s", e)
+        # Google Lens, when no earlier round reached it
+        ident = self._lens_tier(img, img_vec, "fallback", seen, [], rounds, rnd, refuted[:5], sig, summary)
+        if ident:
+            return ident
         return Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
                               evidence={"reason": "no reference image matched on both instruments"})
+
+    def _lens_tier(self, img, img_vec, why, seen, matches, rounds, rnd, cands, sig, summary) -> Identification | None:
+        """Google Lens on a public copy of the picture that deletes itself within the hour (Sir, 2026-11-05).
+        One SerpAPI search per work: it runs before the first slow catalogue sweep (it found a living painter
+        in seconds where sweeps spent half an hour), or last if no round got that far."""
+        if self._lens_done or self.web is None or not hasattr(self.web, "serpapi_lens"):
+            return None
+        self._lens_done = True
+        log.info("  tier google_lens (%s)", why)
+        try:
+            batch = self._score(img, img_vec, self.web.serpapi_lens(self.web.temp_public_url(img)), "google lens", seen)
+        except Exception as e:
+            log.warning("google lens failed: %s", e)
+            return None
+        matches += batch
+        hits = [m for m in batch if m.confirmed]
+        if hits:
+            ident = self._finish("google_lens", hits, matches, rounds, rnd, cands, sig, summary)
+            if ident.status == "confirmed":
+                return ident
+            rounds.pop()
+        return None
 
     def _vision_tier(self, img, img_vec, why, seen, matches, rounds, rnd, cands, sig, summary) -> Identification | None:
         """Web detection: one billed call per image, ever (the response is cached on disk). Its pages are

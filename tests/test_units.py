@@ -989,3 +989,76 @@ def test_a_museum_record_brings_in_its_own_wikidata_item(monkeypatch):
     assert calls == ["Q64618525"]
     got = next(r for r in recs if r.source == "wikidata")
     assert got.verified_by == "link from nga" and got.overrule
+
+
+def test_a_task_closed_on_the_board_stops_its_run_before_the_next_stage(tmp_path, monkeypatch):
+    from neural_canvas.pipeline import RunResult, RunStopped
+    s = _svc(tmp_path)
+    notes, labels = [], []
+    status = {"v": "in_progress"}
+    monkeypatch.setattr(s.pulse, "get", lambda tid: {"id": tid, "status": status["v"]})
+    monkeypatch.setattr(s.pulse, "note", lambda tid, text, metadata=None, status=None: notes.append(text))
+    monkeypatch.setattr(s.pulse, "labels", lambda tid, add=(), remove=(): labels.append((list(add), list(remove))))
+    monkeypatch.setattr(s.pulse, "close", lambda *a: (_ for _ in ()).throw(AssertionError("closed twice")))
+
+    class FakeDocent:
+        def run(self, rid, src, resume, on_stage):
+            on_stage("identify")
+            status["v"] = "closed"                     # Sir closes it on the board mid-run
+            try:
+                on_stage("catalogue")
+            except RunStopped as e:
+                return RunResult(rid, "stopped", "catalogue", [str(e)])
+            raise AssertionError("run went on past a closed task")
+    s._local.docent = FakeDocent()
+    s.run_task({"id": "t1", "metadata": {"run_id": "r1", "source_path": str(tmp_path / "x.jpg")}, "labels": []})
+    assert "STOPPED before catalogue" in notes[-1]
+    assert not any("blocked:yes" in add for add, _ in labels)
+
+
+def test_walled_catalogue_titles_come_from_googles_index_and_vote_on_the_title_only(monkeypatch):
+    from neural_canvas.artsites import WalledCatalogue, index_title
+    from neural_canvas.catalogue import Catalogue
+    from neural_canvas.websearch import WebReference
+    assert index_title("Crows in Winter – Works – eMuseum") == "Crows in Winter"
+    assert WalledCatalogue.sites("Newell Convers Wyeth") == ["collections.brandywine.org"]
+    asked = []
+
+    class Web:
+        def index_images(self, q, limit=20):
+            asked.append(q)
+            return [WebReference("Crows in Winter – Works – eMuseum", 1, "https://encrypted-tbn0.gstatic.com/x",
+                                 "https://collections.brandywine.org/objects/11335", "https://encrypted-tbn0.gstatic.com/x",
+                                 {"site": "collections.brandywine.org"}),
+                    WebReference("Crows - elsewhere", 2, "https://t/y", "https://example.com/y", "https://t/y",
+                                 {"site": "example.com"})]
+    refs = WalledCatalogue(Web()).search("Newell Convers Wyeth", ["Crows in Winter"])
+    assert [r.meta["catalogue"] for r in refs] == ["collections.brandywine.org"]     # only the catalogue's own pictures
+    assert all("Newell" not in q and "Wyeth" in q for q in asked)                    # the surname: Google needs every word
+    cat = Catalogue.__new__(Catalogue)
+    cat.consulted = []
+    cat.idf = type("I", (), {"web": Web()})()
+    monkeypatch.setattr(cat, "_verify", lambda img, vec, url: (url.startswith("https://encrypted-tbn0"), 0.96, 1488))
+    recs = cat._walled(None, None, "Newell Convers Wyeth", ["Crows in Winter"])
+    assert len(recs) == 1 and recs[0].title == "Crows in Winter"
+    assert not (recs[0].artist or recs[0].date or recs[0].medium)          # Sir: a title vote, nothing more
+    assert "Google" in recs[0].verified_by
+
+
+def test_google_lens_runs_at_most_once_per_work(monkeypatch):
+    from neural_canvas.identify import Identifier
+    idf = Identifier.__new__(Identifier)
+    calls = []
+
+    class Web:
+        def temp_public_url(self, img):
+            return "https://tmp/x.jpg"
+
+        def serpapi_lens(self, url):
+            calls.append(url)
+            return []
+    idf.web, idf._lens_done = Web(), False
+    monkeypatch.setattr(idf, "_score", lambda *a: [])
+    assert idf._lens_tier(None, None, "before a catalogue sweep", set(), [], [], 0, [], "", "") is None
+    assert idf._lens_tier(None, None, "fallback", set(), [], [], 0, [], "", "") is None
+    assert calls == ["https://tmp/x.jpg"]

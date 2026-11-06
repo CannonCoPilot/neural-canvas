@@ -35,6 +35,7 @@ import numpy as np
 import requests
 from PIL import Image
 
+from .artsites import WalledCatalogue
 from .matching import fetch_image, footprint, geometric_inliers, save_npz
 from .references import file_thumb
 from .sources import classify, institutional, non_title, rulable, supporting
@@ -926,6 +927,26 @@ class Catalogue:
                     break
         return out
 
+    def _walled(self, img, img_vec, artist: str, titles: list[str]) -> list[Record]:
+        """A walled catalogue raisonné through Google's index (Sir, 2026-11-05): the picture is verified on Google's
+        copy, and the record votes on the title the index shows, nothing else. The site itself is never contacted."""
+        web = getattr(self.idf, "web", None)
+        sites = WalledCatalogue.sites(artist)
+        if web is None or not hasattr(web, "index_images") or not sites:
+            return []
+        self.consulted += [f"{s} (through Google's index)" for s in sites]
+        out, done = [], set()
+        for r in WalledCatalogue(web).search(artist, titles[:2]):
+            site = r.meta.get("catalogue", "")
+            if site in done or not r.meta.get("title_from_index"):
+                continue
+            ok, sim, inl = self._verify(img, img_vec, r.image_url)
+            if ok:
+                done.add(site)
+                out.append(Record(site, r.page_url, r.meta["title_from_index"], image_url=r.image_url,
+                                  verified_by="image (Google's indexed copy)", clip=sim, inliers=inl))
+        return out
+
     def _nga(self, img, img_vec, titles: list[str], artist: str) -> list[Record]:
         """National Gallery of Art, from its open data (nga.gov itself is walled): the artist's NGA works whose
         titles match a lead first, then all of them ranked by embedding; images from its IIIF server."""
@@ -1092,6 +1113,7 @@ class Catalogue:
                               if r.source not in have])
         recs += over(self._safe("catalogue_sites", lambda: self._registry(img, img_vec, artist, titles,
                                                                   {institution(r.source) for r in recs})))
+        recs += over(self._safe("walled_catalogues", lambda: self._walled(img, img_vec, artist, titles)))
         recs += self._safe("artvee", lambda: self._artvee(img, img_vec, titles, artist, surname))
         recs += self._safe("curated_web", lambda: self._curated_web(img, img_vec, queries, {r.source for r in recs}))
         recs += self._safe("web_text", lambda: self._web_text(img, img_vec, queries, {institution(r.source) for r in recs}))

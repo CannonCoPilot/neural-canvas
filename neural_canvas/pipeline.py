@@ -91,6 +91,10 @@ class RunResult:
 _DELIVERY = threading.Lock()
 
 
+class RunStopped(Exception):
+    """Raised by an on_stage callback to end a run between stages (its task was closed on the board)."""
+
+
 class Docent:
     """Holds the loaded models; one instance serves many runs."""
 
@@ -346,6 +350,10 @@ class Docent:
             rec.pop("reasons", None)
             save()
             return RunResult(run_id, "complete", record_path=str(rec_path), frame_path=str(out))
+        except RunStopped as e:
+            rec["status"], rec["stopped"] = "stopped", f"before {stage}: {e}"
+            save()
+            return RunResult(run_id, "stopped", stage, [str(e)], str(rec_path))
         except Exception as e:
             rec["status"], rec["error"] = "error", traceback.format_exc()[-3000:]
             save()

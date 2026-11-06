@@ -157,6 +157,50 @@ class Artvee:
         return [ranked[int(i)] for i in np.argsort(-sims)[:k]]
 
 
+# Catalogues raisonnés that answer automated visitors with a bot challenge (pages and images alike). They are
+# read through Google's index: Google's copy of the picture and the title it shows, never the site itself.
+# Such a record is identity-verified on Google's copy and votes on the title only (Sir, 2026-11-05).
+WALLED_CATALOGUES = {
+    "wyeth": ["collections.brandywine.org"],     # N. C. Wyeth catalogue raisonné (Brandywine Museum of Art)
+}
+
+
+def index_title(caption: str) -> str:
+    """The work's title from an indexed page title: "Crows in Winter – Works – eMuseum" -> "Crows in Winter"."""
+    return re.split(r"\s+[–—|]\s+|\s+-\s+", caption or "", maxsplit=1)[0].strip()
+
+
+class WalledCatalogue:
+    """An artist's walled catalogue raisonné through Google's image index (see WALLED_CATALOGUES)."""
+
+    def __init__(self, web):
+        self.web = web
+
+    @staticmethod
+    def sites(artist: str) -> list[str]:
+        sur = (artist or "").split()[-1:] or [""]
+        return WALLED_CATALOGUES.get(sur[0].lower(), [])
+
+    def search(self, artist: str, words: tuple[str, ...] | list[str] = (), limit: int = 20) -> list[WebReference]:
+        out, seen = [], set()
+        # the surname only: Google needs every word, and a catalogue prints its own form of the name
+        # ("N. C. Wyeth", never "Newell Convers Wyeth")
+        sur = (artist or "").split()[-1:] or [""]
+        for site in self.sites(artist):
+            for q in list(dict.fromkeys([f"site:{site} {w} {sur[0]}" for w in words if w][:3] + [f"site:{site} {sur[0]}"])):
+                try:
+                    hits = self.web.index_images(q, limit)
+                except Exception as e:
+                    log.info("walled catalogue search %r failed: %s", q, e)
+                    continue
+                for r in hits:
+                    if site in (r.meta.get("site") or "") and r.image_url not in seen:
+                        seen.add(r.image_url)
+                        r.meta.update(source="walled_catalogue", catalogue=site, title_from_index=index_title(r.file_title))
+                        out.append(r)
+        return out
+
+
 class Arthur:
     """Arthur.io through image search kept to the site: its pictures and the captions engines indexed."""
     IMG = re.compile(r"^https://arthur\.io/img/art/[^?#]+/(thumb|small|medium|large)/([^/?#]+)\.(jpg|jpeg|png|webp)", re.I)

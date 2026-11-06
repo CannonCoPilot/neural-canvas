@@ -31,7 +31,7 @@ import requests
 from .config import Config
 from .dedup import ArtworkRegistry, phash
 from .deliver import GooglePhotos
-from .pipeline import IMAGE_EXTS, Docent, ingest, load_image
+from .pipeline import IMAGE_EXTS, Docent, RunStopped, ingest, load_image
 
 log = logging.getLogger(__name__)
 ACTOR = "neural-canvas"
@@ -298,6 +298,13 @@ class Service:
         cur = {"stage": None}
 
         def on_stage(stage):
+            # a task closed on the board is a decision: the run ends before its next stage (Sir, 2026-11-05)
+            try:
+                closed = (self.pulse.get(tid) or {}).get("status") == "closed"
+            except requests.RequestException:
+                closed = False                  # Pulse unreachable: carry on; the next stage asks again
+            if closed:
+                raise RunStopped("task closed on the board")
             if cur["stage"]:
                 self.pulse.labels(tid, remove=[f"docent:{cur['stage']}"])
             cur["stage"] = stage
@@ -311,6 +318,10 @@ class Service:
         summary = {"run_id": rid, "status": res.status, "record": res.record_path, "frame": res.frame_path,
                    "artist": ident.get("artist", ""), "title": ident.get("title", ""), "date": ident.get("date", ""),
                    "minutes": round((time.time() - t0) / 60, 1)}
+        if res.status == "stopped":         # the board closed it: record why, change nothing else
+            log.info("run %s stopped before %s: task %s was closed on the board", rid[:8], res.stage, tid)
+            self.pulse.note(tid, f"STOPPED before {res.stage}: the task was closed on the board; nothing delivered")
+            return
         if cur["stage"]:
             self.pulse.labels(tid, remove=[f"docent:{cur['stage']}"])
         if res.status == "complete":
