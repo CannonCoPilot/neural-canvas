@@ -1091,3 +1091,15 @@ def test_commons_thumbnails_use_the_widths_wikimedia_serves():
     from neural_canvas.references import file_thumb, thumb_step
     assert thumb_step(800) == 960 and thumb_step(250) == 250 and thumb_step(5000) == 3840
     assert "/960px-" in file_thumb("A b.jpg", 800)
+
+
+def test_a_historical_region_is_its_own_nationality_and_flemish_equals_netherlandish():
+    # van Eyck, 2026-11-05: Wikidata "Southern Netherlands" had become "Dutch", and Artvee's "Flemish" was not read
+    from neural_canvas.catalogue import Catalogue, Record, _country_demonym
+    assert _country_demonym("Southern Netherlands") == "Flemish"
+    assert _country_demonym("Kingdom of the Netherlands") == "Dutch" and _country_demonym("Russian Empire") == "Russian"
+    cat = Catalogue.__new__(Catalogue)
+    cat.idf = type("I", (), {"vlm": type("V", (), {"ask_json": lambda self, p, required=(), num_predict=0: {"label": "Flemish"}})()})()
+    wd = Record("wikidata", "u", "t", artist_nationality="Southern Netherlands", artist_nationalities=["Southern Netherlands"])
+    for bio in ("Flemish, c. 1390 – 1441", "Netherlandish, active 1422; died 1441"):
+        assert cat._nationality("Jan van Eyck", wd, [Record("x", "u", "t", artist_bio=bio)])[:2] == ("Flemish", ["wikidata", "x"])

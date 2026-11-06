@@ -78,11 +78,49 @@ DEMONYM = {"american": "united states", "french": "france", "german": "germany",
            "norwegian": "norway", "danish": "denmark", "belgian": "belgium", "russian": "russia",
            "swiss": "switzerland", "austrian": "austria", "spanish": "spain", "italian": "italy", "czech": "czech",
            "swedish": "sweden", "finnish": "finland", "irish": "ireland", "canadian": "canada", "polish": "poland",
-           "hungarian": "hungary", "mexican": "mexico", "australian": "australia", "chinese": "china"}
+           "hungarian": "hungary", "mexican": "mexico", "australian": "australia", "chinese": "china",
+           "portuguese": "portugal", "greek": "greece", "ukrainian": "ukraine", "brazilian": "brazil",
+           "argentine": "argentina", "korean": "korea", "indian": "india", "israeli": "israel", "turkish": "turkey",
+           "romanian": "romania", "croatian": "croatia", "estonian": "estonia", "latvian": "latvia",
+           "lithuanian": "lithuania", "slovak": "slovakia", "slovenian": "slovenia", "icelandic": "iceland",
+           "cuban": "cuba", "chilean": "chile", "colombian": "colombia", "peruvian": "peru", "egyptian": "egypt",
+           "flemish": "flanders", "netherlandish": "southern netherlands"}
+# Historical states and regions, read before modern countries and matched whole (longest first): a 15th-century
+# painter of Bruges is Flemish, never "Dutch" (Wikidata gives van Eyck "Southern Netherlands": Sir, 2026-11-05)
+HISTORICAL_DEMONYM = {"southern netherlands": "Flemish", "county of flanders": "Flemish", "flanders": "Flemish",
+                      "spanish netherlands": "Flemish", "austrian netherlands": "Flemish",
+                      "burgundian netherlands": "Netherlandish", "habsburg netherlands": "Netherlandish",
+                      "dutch republic": "Dutch", "republic of the seven united netherlands": "Dutch",
+                      "russian empire": "Russian", "tsardom of russia": "Russian", "soviet union": "Russian",
+                      "kingdom of prussia": "German", "kingdom of bavaria": "German", "kingdom of saxony": "German",
+                      "german empire": "German", "austrian empire": "Austrian", "austria-hungary": "Austrian",
+                      "kingdom of france": "French", "kingdom of great britain": "British",
+                      "kingdom of england": "English", "kingdom of scotland": "Scottish",
+                      "republic of venice": "Venetian", "kingdom of the netherlands": "Dutch"}
+# terms that name one nationality: a source saying either supports the other
+DEMONYM_ALIASES = [{"flemish", "netherlandish"}]
 # the adjective a card prints for a country (Wikidata gives countries; labels print demonyms: Sir, 2026-11-05)
 COUNTRY_DEMONYM: dict = {}
 for _dem, _country in DEMONYM.items():
     COUNTRY_DEMONYM.setdefault(_country, _dem.capitalize())     # "united kingdom" -> British (listed first)
+
+
+def _country_demonym(label: str) -> str:
+    """The demonym for a Wikidata country or historical state: historical names first, then a modern country
+    matched as whole words ("Southern Netherlands" is Flemish, never Dutch)."""
+    f = fold(label)
+    for name in sorted(HISTORICAL_DEMONYM, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(name)}\b", f):
+            return HISTORICAL_DEMONYM[name]
+    for country, dem in COUNTRY_DEMONYM.items():
+        if country not in ("flanders", "southern netherlands") and re.search(rf"\b{re.escape(country)}\b", f):
+            return dem
+    return ""
+
+
+def _alias(demonym: str) -> set[str]:
+    d = demonym.lower()
+    return next((g for g in DEMONYM_ALIASES if d in g), {d})
 NATIONALITY_PROMPT = """Artist: {artist}
 What these sources say of the artist's nationality:
 {statements}
@@ -93,7 +131,11 @@ What nationality would a museum wall label print for this artist?
 - When the artist held two nationalities, or was born in one country and became a citizen of another, and people
   commonly describe them by both, join the two with a hyphen, the first or birth nationality first:
   "Swiss-French" (Felix Vallotton), "Dutch-American" (Willem de Kooning), "Russian-French" (Marc Chagall).
-- Use only nationalities the sources state. Never add one.
+- Prefer the term museums use for the artist's own time and place, in its plain form: a 15th-century painter
+  of Bruges is "Flemish" ("Netherlandish" means the same and is the clumsier word). Never project a modern
+  state back onto an artist who lived before it existed: van Eyck is not "Dutch" or "Belgian".
+- Use only nationalities the sources state (a historical region counts: "Southern Netherlands" is Flemish).
+  Never add one.
 Reply JSON: {{"label": "...", "reason": "one sentence"}}"""
 MATERIALS = ("oil", "acrylic", "tempera", "gouache", "watercolor", "watercolour", "pastel", "charcoal", "ink",
              "graphite", "pencil", "woodblock", "woodcut", "lithograph", "etching", "engraving", "canvas", "panel",
@@ -814,7 +856,7 @@ class Catalogue:
         of the wording is stated by a source and two sources state some part of it."""
         stated: dict[str, set[str]] = {}
         countries = wd.artist_nationalities or ([wd.artist_nationality] if wd.artist_nationality else [])
-        dems = {COUNTRY_DEMONYM[c] for n in countries for c in COUNTRY_DEMONYM if c in fold(n)}
+        dems = {_country_demonym(n) for n in countries} - {""}
         if dems:
             stated["wikidata"] = dems
         for r in bios:
@@ -837,8 +879,8 @@ class Catalogue:
             common = set.intersection(*stated.values())
             label = next(iter(common)) if len(common) == 1 else ""
         parts = [p.strip() for p in re.split(r"[-–/]", label) if p.strip()]
-        said = {d.lower() for s in stated.values() for d in s}
-        sup = sorted(src for src, s in stated.items() if {d.lower() for d in s} & {p.lower() for p in parts})
+        said = {a for s in stated.values() for d in s for a in _alias(d)}
+        sup = sorted(src for src, s in stated.items() if {a for d in s for a in _alias(d)} & {p.lower() for p in parts})
         if parts and all(p.lower() in said for p in parts) and len(sup) >= 2:
             return "-".join(p.capitalize() for p in parts), sup, stated
         return "", sup, stated
