@@ -31,6 +31,7 @@ import requests
 from .config import Config
 from .dedup import ArtworkRegistry, phash
 from .deliver import GooglePhotos
+from .indexer import ArtistIndexer
 from .pipeline import IMAGE_EXTS, Docent, RunStopped, ingest, load_image
 
 log = logging.getLogger(__name__)
@@ -138,6 +139,9 @@ class Service:
         self._pool = ThreadPoolExecutor(self.workers, thread_name_prefix="worker")
         self._running: dict[str, Future] = {}      # task id -> its run
         self._local = threading.local()
+        # first sight: an identified work's artist is indexed in the background, never during a run
+        self.indexer = ArtistIndexer(self.state, lambda: Docent(self.cfg))
+        self._stop = threading.Event()
 
     @property
     def docent(self) -> Docent:
@@ -325,6 +329,8 @@ class Service:
         if cur["stage"]:
             self.pulse.labels(tid, remove=[f"docent:{cur['stage']}"])
         if res.status == "complete":
+            ruled = rec.get("stages", {}).get("catalogue", {}).get("facts", {}).get("artist") or summary["artist"]
+            self.indexer.enqueue(ruled)        # "have I indexed this artist yet?" (no-op when already done)
             self.pulse.labels(tid, add=["active:done", "completed:done"], remove=["active:running"])
             self.pulse.note(tid, f"COMPLETE: {summary['artist']} — {summary['title']} ({summary['date']}) "
                                  f"→ {res.frame_path}", metadata={**meta, "result": summary})
@@ -356,6 +362,8 @@ class Service:
             self.requeue_stranded()
         except requests.RequestException as e:
             log.error("Pulse unreachable, stranded tasks not checked: %s", e)
+        if not once:
+            threading.Thread(target=self.indexer.run, args=(self._stop,), name="indexer", daemon=True).start()
         while True:
             try:
                 self.scan()

@@ -14,6 +14,7 @@ attribution.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -139,14 +140,17 @@ class Identifier:
         self.walled = WalledCatalogue(web) if web and hasattr(web, "index_images") else None
 
     # ── catalogue sweep: an artist's whole Wikidata oeuvre, embedded once and cached ──
-    def _oeuvre_vectors(self, artist_qid: str) -> tuple[list[dict], np.ndarray]:
+    def _oeuvre_vectors(self, artist_qid: str, cold: bool = False) -> tuple[list[dict], np.ndarray]:
+        """The artist's catalogued works and their embeddings. A run uses only what is cached (cold=False):
+        embedding a whole catalogue takes minutes at Wikimedia's pace, so only the background indexer
+        (indexer.py, after a work is identified) sweeps cold (Sir, 2026-11-05)."""
         works = self.wiki.oeuvre(artist_qid)
         cache = self.cache_dir / f"{artist_qid}.npz"
         have: dict[str, np.ndarray] = {}
         if cache.exists():
             z = np.load(cache, allow_pickle=False)
             have = dict(zip(z["qids"].tolist(), z["vecs"]))
-        todo = [w for w in works if w["qid"] not in have]
+        todo = [w for w in works if w["qid"] not in have] if cold else []
         if todo:
             log.info("embedding %d catalogued works for %s", len(todo), artist_qid)
             ims = [fetch_image(file_thumb(w["file"], 250), self.ua) for w in todo]   # one host: serial, paced
@@ -156,6 +160,10 @@ class Identifier:
                 for (w, _), v in zip(chunk, self.emb.embed([im for _, im in chunk])):
                     have[w["qid"]] = v
             save_npz(cache, qids=np.array(list(have)), vecs=np.stack(list(have.values())))
+            # the listing beside the vectors: the global index needs each work's title and image
+            tmp = cache.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"qid": artist_qid, "works": works}))
+            tmp.replace(cache.with_suffix(".json"))
         works = [w for w in works if w["qid"] in have]
         return works, (np.stack([have[w["qid"]] for w in works]) if works else np.zeros((0, 512)))
 
@@ -169,11 +177,11 @@ class Identifier:
             self._artist_qids[artist] = qid
         return bool(qid) and (self.cache_dir / f"{qid}.npz").exists()
 
-    def _oeuvre_refs(self, artist: str, img_vec: np.ndarray, k: int = 4) -> list[Reference]:
+    def _oeuvre_refs(self, artist: str, img_vec: np.ndarray, k: int = 4, cold: bool = False) -> list[Reference]:
         qid = self.wiki.find_artist(artist)
         if not qid:
             raise LookupError(f"no Wikidata artist record for {artist!r}")
-        works, vecs = self._oeuvre_vectors(qid)
+        works, vecs = self._oeuvre_vectors(qid, cold=cold)
         if not works:
             return []
         top = np.argsort(-(vecs @ img_vec))[:k]
@@ -271,7 +279,10 @@ class Identifier:
             early = list(dict.fromkeys([styled[0]] + [a for a in prio if a != styled[0]][:1]))
             by_style = list(dict.fromkeys(early + cached + prio))
             self._free_sweeps = len(set(early) | set(cached))
-        for a in by_style[:2]:   # the two closest styles: one catalogue sweep each, early
+        # only catalogues already embedded are searched in a run; a new artist's catalogue is embedded in the
+        # background after its work is identified (indexer.py), so no run waits on a cold sweep
+        by_style = [a for a in by_style if self._oeuvre_cached(a)]
+        for a in by_style[:2]:   # the two closest cached catalogues, early
             out.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, self._img_vec)))
         for kw in self._keywords:      # artist-agnostic on the catalogued collection: short keyword AND query
             q = f"{kw} painting"

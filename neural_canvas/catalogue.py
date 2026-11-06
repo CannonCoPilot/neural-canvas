@@ -603,20 +603,21 @@ class Catalogue:
         return not self.wiki.claim_year(ent, "P570"), aq
 
     # ── Wikidata ───────────────────────────────────────────────────────────
-    def _wikidata_items(self, img, img_vec, artist: str, ident: dict) -> list[str]:
-        """Catalogue items of THIS picture: the identification's own item, else the artist's catalogued
-        works ranked by embedding and verified by geometry."""
+    def _wikidata_items(self, img, img_vec, artist: str, ident: dict, titles: list[str] = ()) -> list[str]:
+        """Catalogue items of THIS picture: the identification's own item; else the artist's works whose
+        Wikidata title matches a lead (one listing query, seconds), then the cached catalogue's nearest by
+        embedding. Each is verified on its picture. A run never sweeps a catalogue cold (Sir, 2026-11-05)."""
         if ident.get("wikidata"):
             return [ident["wikidata"]]
         qid = self.wiki.find_artist(artist) if artist else None
         if not qid:
             return []
+        listing = self.wiki.oeuvre(qid)
+        named = [w for w in listing if any(same_title(t, w["label"]) for t in titles if t)][:4]
         works, vecs = self.idf._oeuvre_vectors(qid)
-        if not works:
-            return []
+        near = [works[int(i)] for i in np.argsort(-(vecs @ img_vec))[:4]] if works else []
         out = []
-        for i in np.argsort(-(vecs @ img_vec))[:4]:
-            w = works[int(i)]
+        for w in list({w["qid"]: w for w in named + near}.values()):
             ok, sim, inl = self._verify(img, img_vec, file_thumb(w["file"], 500))
             if ok:
                 out.append(w["qid"])
@@ -1072,8 +1073,9 @@ class Catalogue:
                                wikidata=r.get("wikidataid") or "")]
         return []
 
-    def _nga_vectors(self, artist: str, rows: list[dict]):
-        """Embeddings of an artist's NGA thumbnails, cached by object id."""
+    def _nga_vectors(self, artist: str, rows: list[dict], cold: bool = False):
+        """Embeddings of an artist's NGA thumbnails, cached by object id; a run uses the cache only,
+        the background indexer (cold=True) fills it."""
         state = Path(self.cfg.path("state_dir")) / "nga" if self.cfg else None
         if state is None:
             return None
@@ -1084,7 +1086,9 @@ class Catalogue:
             z = np.load(cache, allow_pickle=False)
             have = dict(zip(z["ids"].tolist(), z["vecs"]))
         from .nga import NGA
-        todo = [r for r in rows if r["objectid"] not in have]
+        todo = [r for r in rows if r["objectid"] not in have] if cold else []
+        if not have and not todo:
+            return None
         if todo:
             log.info("nga: embedding %d thumbnails for %s", len(todo), artist)
             ok = [(r, im) for r in todo for im in [fetch_image(NGA.image(r, 250), UA)] if im is not None]
@@ -1170,7 +1174,7 @@ class Catalogue:
                     n += 1
             return recs
 
-        for qid in self._wikidata_items(img, img_vec, artist, ident):
+        for qid in self._wikidata_items(img, img_vec, artist, ident, titles):
             recs += from_wikidata(qid)
         over(recs)                      # the Wikidata item and every record it links to
         have = {r.source for r in recs}

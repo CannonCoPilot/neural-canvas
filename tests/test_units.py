@@ -1103,3 +1103,25 @@ def test_a_historical_region_is_its_own_nationality_and_flemish_equals_netherlan
     wd = Record("wikidata", "u", "t", artist_nationality="Southern Netherlands", artist_nationalities=["Southern Netherlands"])
     for bio in ("Flemish, c. 1390 – 1441", "Netherlandish, active 1422; died 1441"):
         assert cat._nationality("Jan van Eyck", wd, [Record("x", "u", "t", artist_bio=bio)])[:2] == ("Flemish", ["wikidata", "x"])
+
+
+def test_first_sight_queues_an_artist_once_and_remembers_the_result(tmp_path):
+    from neural_canvas.indexer import ArtistIndexer
+    ix = ArtistIndexer(tmp_path, lambda: None)
+    assert ix.enqueue("Félix Vallotton") and not ix.enqueue("félix vallotton")      # queued once
+    assert ix._pop() == "Félix Vallotton"
+    ix._finish("Félix Vallotton", {"wikidata": 450})
+    assert ix.indexed("Félix Vallotton") and ix._pop() is None
+    assert not ix.enqueue("Félix Vallotton")                                         # indexed: never again
+
+
+def test_a_run_never_embeds_a_cold_catalogue(tmp_path, monkeypatch):
+    from neural_canvas.identify import Identifier
+    from neural_canvas import identify as ident
+    idf = Identifier.__new__(Identifier)
+    idf.cache_dir, idf.ua = tmp_path, "ua"
+    idf.wiki = type("W", (), {"oeuvre": lambda self, q: [{"qid": "Q1", "label": "A", "file": "a.jpg"}]})()
+    fetched = []
+    monkeypatch.setattr(ident, "fetch_image", lambda *a: fetched.append(a))
+    works, vecs = idf._oeuvre_vectors("Q9")
+    assert works == [] and fetched == []                    # nothing cached, nothing fetched: no wait

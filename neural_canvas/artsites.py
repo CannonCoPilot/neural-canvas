@@ -130,8 +130,9 @@ class Artvee:
             tmp.replace(path)
         return works
 
-    def nearest(self, artist: str, img_vec: np.ndarray, k: int = 6) -> list[WebReference]:
-        """The artist's Artvee works closest to the input by embedding (thumbnails embedded once)."""
+    def nearest(self, artist: str, img_vec: np.ndarray, k: int = 6, cold: bool = False) -> list[WebReference]:
+        """The artist's Artvee works closest to the input by embedding. A run ranks only the thumbnails
+        already embedded; the background indexer (cold=True) embeds the rest."""
         works = self.artist_works(artist)
         if not works or self.emb is None:
             return works[:k]
@@ -140,7 +141,9 @@ class Artvee:
         if cache.exists():
             z = np.load(cache, allow_pickle=False)
             have = dict(zip(z["urls"].tolist(), z["vecs"]))
-        todo = [w for w in works if w.thumb_url not in have]
+        todo = [w for w in works if w.thumb_url not in have] if cold else []
+        if not cold and not have:
+            return []
         if todo:
             log.info("artvee: embedding %d thumbnails for %s", len(todo), artist)
             ok = [(w, im) for w in todo for im in [fetch_image(w.thumb_url, ARTVEE_UA)] if im is not None]
