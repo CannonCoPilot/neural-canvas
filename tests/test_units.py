@@ -1062,3 +1062,32 @@ def test_google_lens_runs_at_most_once_per_work(monkeypatch):
     assert idf._lens_tier(None, None, "before a catalogue sweep", set(), [], [], 0, [], "", "") is None
     assert idf._lens_tier(None, None, "fallback", set(), [], [], 0, [], "", "") is None
     assert calls == ["https://tmp/x.jpg"]
+
+
+def test_nationality_prints_demonyms_and_a_compound_only_when_the_sources_state_each_part():
+    from neural_canvas.catalogue import Catalogue, Record
+    cat = Catalogue.__new__(Catalogue)
+    answers = {}
+
+    class VLM:
+        def ask_json(self, prompt, required=(), num_predict=0):
+            return {"label": answers["label"]}
+    cat.idf = type("I", (), {"vlm": VLM()})()
+    wd = Record("wikidata", "u", "t", artist_nationality="Switzerland", artist_nationalities=["Switzerland", "France"])
+    bios = [Record("artvee.com", "u", "t", artist_bio="French, 1865-1925"), Record("rkd.nl", "u", "t", artist_bio="French")]
+    answers["label"] = "Swiss-French"
+    assert cat._nationality("Félix Vallotton", wd, bios)[:2] == ("Swiss-French", ["artvee.com", "rkd.nl", "wikidata"])
+    answers["label"] = "Swiss-Italian"                    # a part no source states is never printed
+    assert cat._nationality("Félix Vallotton", wd, bios)[0] == ""
+    answers["label"] = "United States"                    # a country name is not a demonym: not ruled
+    us = Record("wikidata", "u", "t", artist_nationality="United States", artist_nationalities=["United States"])
+    assert cat._nationality("x", us, [Record("artic", "u", "t", artist_bio="American, 1849-1921")])[0] == ""
+    answers["label"] = "American"
+    assert cat._nationality("x", us, [Record("artic", "u", "t", artist_bio="American, 1849-1921")])[0] == "American"
+    assert cat._nationality("x", us, [])[0] == ""          # one source is not two
+
+
+def test_commons_thumbnails_use_the_widths_wikimedia_serves():
+    from neural_canvas.references import file_thumb, thumb_step
+    assert thumb_step(800) == 960 and thumb_step(250) == 250 and thumb_step(5000) == 3840
+    assert "/960px-" in file_thumb("A b.jpg", 800)

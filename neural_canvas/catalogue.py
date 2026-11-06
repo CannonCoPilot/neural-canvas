@@ -79,6 +79,22 @@ DEMONYM = {"american": "united states", "french": "france", "german": "germany",
            "swiss": "switzerland", "austrian": "austria", "spanish": "spain", "italian": "italy", "czech": "czech",
            "swedish": "sweden", "finnish": "finland", "irish": "ireland", "canadian": "canada", "polish": "poland",
            "hungarian": "hungary", "mexican": "mexico", "australian": "australia", "chinese": "china"}
+# the adjective a card prints for a country (Wikidata gives countries; labels print demonyms: Sir, 2026-11-05)
+COUNTRY_DEMONYM: dict = {}
+for _dem, _country in DEMONYM.items():
+    COUNTRY_DEMONYM.setdefault(_country, _dem.capitalize())     # "united kingdom" -> British (listed first)
+NATIONALITY_PROMPT = """Artist: {artist}
+What these sources say of the artist's nationality:
+{statements}
+
+What nationality would a museum wall label print for this artist?
+- Answer with English adjectives (demonyms), never a country name: "American", not "United States".
+- When the sources agree on one nationality, give that one.
+- When the artist held two nationalities, or was born in one country and became a citizen of another, and people
+  commonly describe them by both, join the two with a hyphen, the first or birth nationality first:
+  "Swiss-French" (Felix Vallotton), "Dutch-American" (Willem de Kooning), "Russian-French" (Marc Chagall).
+- Use only nationalities the sources state. Never add one.
+Reply JSON: {{"label": "...", "reason": "one sentence"}}"""
 MATERIALS = ("oil", "acrylic", "tempera", "gouache", "watercolor", "watercolour", "pastel", "charcoal", "ink",
              "graphite", "pencil", "woodblock", "woodcut", "lithograph", "etching", "engraving", "canvas", "panel",
              "paper", "board", "cardboard", "wood", "linen", "cloth", "silk", "copper", "fresco", "print")
@@ -198,6 +214,7 @@ class Record:
     artist_born: str = ""
     artist_died: str = ""
     artist_nationality: str = ""
+    artist_nationalities: list = field(default_factory=list)   # every citizenship the source records
     text: str = ""               # an institution page's own text (folded): it supports what it states
     authority: bool = False      # an artist authority record: rules the artist's life, never the work
     support: bool = False        # an auction house or the press: corroborates, never counts
@@ -345,7 +362,7 @@ class Catalogue:
 
     def _commons(self, file: str, verified_by: str) -> Record | None:
         d = self._get("https://commons.wikimedia.org/w/api.php", action="query", titles="File:" + file, prop="imageinfo",
-                      iiprop="extmetadata|url", iiurlwidth=800, format="json")
+                      iiprop="extmetadata|url", iiurlwidth=960, format="json")
         page = next(iter(((d.get("query") or {}).get("pages") or {}).values()), {})
         info = (page.get("imageinfo") or [{}])[0]
         meta = info.get("extmetadata") or {}
@@ -581,7 +598,8 @@ class Catalogue:
                      list(dict.fromkeys(others)), f.get("artist", ""), "", f.get("date", ""), f.get("medium", ""),
                      f.get("collection", ""), mov, image_url, "image",
                      artist_born=f.get("artist_born", ""), artist_died=f.get("artist_died", ""),
-                     artist_nationality=f.get("artist_nationality", ""))
+                     artist_nationality=f.get("artist_nationality", ""),
+                     artist_nationalities=f.get("artist_nationalities") or [])
         ids = {p: [c["mainsnak"]["datavalue"]["value"] for c in (ent.get("claims") or {}).get(p, [])
                    if c.get("mainsnak", {}).get("datavalue")] for p in ("P3634", "P4610", "P973", "P350")}
         ids["enwiki"] = ((ent.get("sitelinks") or {}).get("enwiki") or {}).get("title", "")
@@ -789,6 +807,41 @@ class Catalogue:
             if sum(not x.support for x in out) >= 3:
                 break
         return out
+
+    def _nationality(self, artist: str, wd: Record, bios: list[Record]) -> tuple[str, list[str], dict]:
+        """The nationality a card prints, as demonyms (Sir, 2026-11-05): "American", or "Swiss-French" for an
+        artist known by two. The model words it from what the sources state; it is ruled only when every part
+        of the wording is stated by a source and two sources state some part of it."""
+        stated: dict[str, set[str]] = {}
+        countries = wd.artist_nationalities or ([wd.artist_nationality] if wd.artist_nationality else [])
+        dems = {COUNTRY_DEMONYM[c] for n in countries for c in COUNTRY_DEMONYM if c in fold(n)}
+        if dems:
+            stated["wikidata"] = dems
+        for r in bios:
+            dems = {d.capitalize() for d in DEMONYM if re.search(rf"\b{d}\b", fold(r.artist_bio))}
+            if dems:
+                stated.setdefault(r.source, set()).update(dems)
+        if not stated:
+            return "", [], stated
+        label = ""
+        vlm = getattr(getattr(self, "idf", None), "vlm", None)
+        if vlm is not None:
+            lines = [f"- Wikidata citizenship: {', '.join(countries)}"] if countries else []
+            lines += [f"- {r.source}: {r.artist_bio}" for r in bios]
+            try:
+                label = str(vlm.ask_json(NATIONALITY_PROMPT.format(artist=artist, statements="\n".join(lines)),
+                                         required=("label",), num_predict=256).get("label", "")).strip()
+            except Exception as e:
+                log.info("nationality wording failed, using the shared demonym: %s", e)
+        if not label:                     # no model: the one demonym every stating source shares, if there is one
+            common = set.intersection(*stated.values())
+            label = next(iter(common)) if len(common) == 1 else ""
+        parts = [p.strip() for p in re.split(r"[-–/]", label) if p.strip()]
+        said = {d.lower() for s in stated.values() for d in s}
+        sup = sorted(src for src, s in stated.items() if {d.lower() for d in s} & {p.lower() for p in parts})
+        if parts and all(p.lower() in said for p in parts) and len(sup) >= 2:
+            return "-".join(p.capitalize() for p in parts), sup, stated
+        return "", sup, stated
 
     def _translations(self, titles: list[str]) -> list[str]:
         """English forms of foreign titles (Giftbeeren -> Poisonous Berries). Searched beside the original,
@@ -1239,13 +1292,13 @@ class Catalogue:
             if agree:
                 out["facts"]["artist_born"], out["facts"]["artist_died"] = wd.artist_born, wd.artist_died
                 out["support"]["artist_life"] = ["wikidata", *agree]
-                nat = fold(wd.artist_nationality)
-                said = [r.source for r in bios if any(dem in fold(r.artist_bio) and DEMONYM[dem] in nat for dem in DEMONYM)]
-                if nat and said:
-                    out["facts"]["artist_nationality"] = wd.artist_nationality
-                    out["support"]["artist_nationality"] = ["wikidata", *said]
+                label, sup, stated = self._nationality(ident.get("artist", "") or wd.artist, wd, bios)
+                if label:
+                    out["facts"]["artist_nationality"] = label
+                    out["support"]["artist_nationality"] = sup
                 else:
-                    out["unruled"]["artist_nationality"] = [f"wikidata: {wd.artist_nationality}"] + [f"{r.source}: {r.artist_bio}" for r in bios]
+                    out["unruled"]["artist_nationality"] = [f"{k}: {', '.join(sorted(v))}" for k, v in stated.items()] or \
+                        ["no source states a nationality"]
             else:
                 out["unruled"]["artist_life"] = [f"wikidata: {wd.artist_born}-{wd.artist_died}"] + [f"{r.source}: {r.artist_bio}" for r in bios]
         else:

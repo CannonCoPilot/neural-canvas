@@ -20,9 +20,20 @@ SPARQL = "https://query.wikidata.org/sparql"
 ART_OCCUPATION = re.compile(r"paint|artist|illustrat|printmak|engrav|sculpt|draughts|woodcut")
 
 
+# Wikimedia serves thumbnails at these widths only; any other width is refused with HTTP 400 ("Use thumbnail
+# sizes listed on ..."). Found 2026-11-05: every 800 px Commons request had been failing.
+THUMB_STEPS = (20, 40, 60, 120, 250, 330, 500, 960, 1280, 1920, 3840)
+
+
+def thumb_step(width: int) -> int:
+    """The smallest standard width at least ``width`` (the largest when none is)."""
+    return next((s for s in THUMB_STEPS if s >= width), THUMB_STEPS[-1])
+
+
 def file_thumb(filename: str, width: int) -> str:
     """Direct upload.wikimedia.org thumbnail URL (the CDN path, not the rate-limited Special:FilePath redirect)."""
     import hashlib
+    width = thumb_step(width)
     name = filename.replace(" ", "_")
     h = hashlib.md5(name.encode()).hexdigest()
     ext = name.rsplit(".", 1)[-1].lower()
@@ -185,7 +196,8 @@ class Wikimedia:
         rel = self.entities([creator_id] + materials[:3] + collections[:1])
         creator = rel.get(creator_id, {})
         nat_ids = self.claim_ids(creator, "P27")
-        nat = self.entities(nat_ids[:1]).get(nat_ids[0], {}) if nat_ids else {}
+        nats = self.entities(nat_ids[:4]) if nat_ids else {}
+        nat = nats.get(nat_ids[0], {}) if nat_ids else {}
         mats = [self.label(rel[m]) for m in materials[:3] if m in rel]
         return {
             "wikidata": qid,
@@ -196,6 +208,8 @@ class Wikimedia:
             "artist_born": self.claim_year(creator, "P569"),
             "artist_died": self.claim_year(creator, "P570"),
             "artist_nationality": self.label(nat),
+            # every citizenship, in Wikidata's order (Vallotton: Switzerland, France)
+            "artist_nationalities": [self.label(nats[n]) for n in nat_ids[:4] if n in nats and self.label(nats[n])],
             "medium": _medium(mats),
             "collection": self.label(rel.get(collections[0], {})) if collections else "",
         }
