@@ -877,3 +877,115 @@ def test_nga_open_data_indexes_and_finds_an_artists_works(tmp_path):
     assert counts == {"works": 1, "artists": 1, "work_artists": 1, "images": 1}
     [r] = NGA(tmp_path / "nga.sqlite").works_by("Andrew Wyeth")
     assert r["title"] == "Wind from the Sea" and NGA.image(r) == "https://api.nga.gov/iiif/abc/full/!500,500/0/default.jpg"
+
+
+def _svc(tmp_path, **pulse):
+    from neural_canvas import service as svc
+    from neural_canvas.config import DEFAULTS, Config, _merge
+    cfg = Config(_merge(DEFAULTS, {"paths": {k: str(tmp_path / k) for k in ("watch_dir", "work_dir", "output_dir",
+                                                                             "state_dir")}, "pulse": pulse}))
+    return svc.Service(cfg)
+
+
+def test_runner_runs_works_in_parallel_up_to_its_workers(tmp_path, monkeypatch):
+    import threading
+    s = _svc(tmp_path, workers=2)
+    gate, started, claims = threading.Event(), [], []
+    monkeypatch.setattr(s.pulse, "list", lambda label: [{"id": t, "labels": ["staging:wait"], "metadata": {"run_id": t}}
+                                                       for t in ("t1", "t2", "t3")])
+    # like Pulse: a claimed task is no longer staging:wait, so a second claim of it fails
+    monkeypatch.setattr(s.pulse, "claim", lambda tid, label: tid not in claims and (claims.append(tid) or True))
+    monkeypatch.setattr(s.pulse, "get", lambda tid: {"id": tid})
+    monkeypatch.setattr(s.photos, "check", lambda: "")
+    monkeypatch.setattr(s, "run_task", lambda task: started.append(task["id"]) or gate.wait(10))
+    assert s.run_ready() == 2 and claims == ["t1", "t2"]
+    assert s.run_ready() == 0 and claims == ["t1", "t2"]      # both workers busy: nothing more claimed
+    gate.set()
+    for f in list(s._running.values()):
+        f.result(10)
+    assert s.run_ready() == 1 and claims[-1] == "t3"
+
+
+def test_runner_error_blocks_its_task_instead_of_stranding_it(tmp_path, monkeypatch):
+    s = _svc(tmp_path)
+    added, notes = [], []
+    monkeypatch.setattr(s.pulse, "get", lambda tid: {"id": tid})
+    monkeypatch.setattr(s.pulse, "labels", lambda tid, add=(), remove=(): added.append((list(add), list(remove))))
+    monkeypatch.setattr(s.pulse, "note", lambda tid, text, metadata=None, status=None: notes.append((text, status)))
+    monkeypatch.setattr(s.pulse, "alert", lambda *a: None)
+
+    def boom(task):
+        raise ValueError("bad record")
+    monkeypatch.setattr(s, "run_task", boom)
+    s._run_guarded("t1")
+    assert added == [(["blocked:yes", "reason:docent-error", "active:no"], ["active:running"])]
+    assert "ValueError" in notes[0][0] and notes[0][1] == "open"
+
+
+def test_service_start_requeues_runs_stranded_by_a_stop(tmp_path, monkeypatch):
+    s = _svc(tmp_path)
+    changed = []
+    monkeypatch.setattr(s.pulse, "list", lambda label: [
+        {"id": "a", "status": "in_progress", "labels": ["active:running", "staging:done", "docent:identify"]},
+        {"id": "b", "status": "open", "labels": ["staging:wait"]},
+        {"id": "c", "status": "closed", "labels": ["active:running"]}])
+    monkeypatch.setattr(s.pulse, "labels", lambda tid, add=(), remove=(): changed.append((tid, set(add), set(remove))))
+    monkeypatch.setattr(s.pulse, "note", lambda *a, **k: None)
+    assert s.requeue_stranded() == ["a"]
+    tid, add, remove = changed[0]
+    _pulse_labels_valid(sorted(add))
+    assert "staging:wait" in add and {"active:running", "docent:identify"} <= remove
+
+
+def test_a_source_agreeing_in_other_words_is_not_listed_as_discarded():
+    # drop work 2 (Velasco), 2026-11-05: the ruling was voted on the Spanish wording and printed in Wikidata's
+    # English; Artvee's title was the printed one word for word, yet it was listed as discarded
+    from neural_canvas.catalogue import Catalogue
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    en, es = "The Valley of Mexico from the Santa Isabel Mountain Range", "Valle de México desde el cerro de Santa Isabel"
+    wd = _rec("wikidata", en, titles=[es], artist="José María Velasco", overrule=True)
+    commons = _rec("commons.wikimedia.org", es, artist="José María Velasco", overrule=True)
+    wikiart = _rec("wikiart.org", es + ", 1882", artist="José María Velasco")
+    artvee = _rec("artvee.com", en, artist="José María Velasco")
+    other = _rec("meisterdrucke.com", "Popocatepetl at dawn", artist="José María Velasco")
+    ru = cat.rule([wd, commons, wikiart, artvee, other], {"artist": "José María Velasco", "inscribed_title": ""})
+    assert ru["facts"]["title"] == en
+    assert ru["discarded"]["title"] == ["meisterdrucke.com: Popocatepetl at dawn"]
+
+
+def test_footprint_finds_the_part_of_a_picture_a_detail_shows():
+    # the input is often a detail: verification compares it with the part of the record's picture it shows
+    from PIL import ImageFilter
+    from neural_canvas.matching import footprint
+    rng = np.random.default_rng(7)
+    small = Image.fromarray(rng.integers(0, 255, (90, 120, 3), dtype=np.uint8)).resize((1200, 900), Image.NEAREST)
+    big = small.filter(ImageFilter.GaussianBlur(1.5))
+    detail = big.crop((300, 200, 900, 700))
+    part = footprint(big, detail)
+    assert part is not None
+    assert abs(part.width - 600) < 40 and abs(part.height - 500) < 40
+    noise = Image.fromarray(rng.integers(0, 255, (500, 600, 3), dtype=np.uint8))
+    assert footprint(big, noise) is None or footprint(big, noise).width < 1200
+
+
+def test_a_museum_record_brings_in_its_own_wikidata_item(monkeypatch):
+    from neural_canvas.catalogue import Catalogue, Record
+    cat = Catalogue.__new__(Catalogue)
+    cat.consulted, cat.t, cat.cfg = [], {}, None
+    calls = []
+    nga = Record("nga", "https://www.nga.gov/x", "Five Butterflies", artist="Odilon Redon", verified_by="image",
+                 wikidata="Q64618525")
+    wd = Record("wikidata", "https://www.wikidata.org/wiki/Q64618525", "Five Butterflies", artist="Odilon Redon")
+    monkeypatch.setattr(cat, "_wikidata_record", lambda qid: calls.append(qid) or (wd, {}))
+    for name in ("_wikidata_items", "_artic_search", "_met_search", "_cleveland_search", "_europeana", "_harvard",
+                 "_smithsonian", "_yale", "_rijksmuseum", "_registry", "_artvee", "_curated_web", "_web_text",
+                 "_translations"):
+        monkeypatch.setattr(cat, name, lambda *a, **k: [])
+    monkeypatch.setattr(cat, "_nga", lambda *a, **k: [nga])
+    monkeypatch.setattr(cat, "_artist_living", lambda a: (False, ""))
+    monkeypatch.setattr(cat, "_get", lambda *a, **k: {})
+    cat.emb = type("E", (), {"embed": staticmethod(lambda ims: np.zeros((1, 512)))})()
+    recs = cat.gather(Image.new("RGB", (8, 8)), {"artist": "Odilon Redon"}, ["Five Butterflies"])
+    assert calls == ["Q64618525"]
+    got = next(r for r in recs if r.source == "wikidata")
+    assert got.verified_by == "link from nga" and got.overrule

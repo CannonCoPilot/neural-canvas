@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 from PIL import Image
 
-from .matching import Embedder, fetch_image, geometric_inliers
+from .matching import Embedder, fetch_image, geometric_inliers, save_npz
 from .references import Reference, Wikimedia, file_thumb
 from .artsites import Arthur, Artvee
 from .imify import Imify
@@ -154,7 +154,7 @@ class Identifier:
                 chunk = ok[i:i + 64]
                 for (w, _), v in zip(chunk, self.emb.embed([im for _, im in chunk])):
                     have[w["qid"]] = v
-            np.savez(cache, qids=np.array(list(have)), vecs=np.stack(list(have.values())))
+            save_npz(cache, qids=np.array(list(have)), vecs=np.stack(list(have.values())))
         works = [w for w in works if w["qid"] in have]
         return works, (np.stack([have[w["qid"]] for w in works]) if works else np.zeros((0, 512)))
 

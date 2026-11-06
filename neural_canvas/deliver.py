@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -71,7 +72,13 @@ class GooglePhotos:
                 f"client in Google Cloud Console (APIs & Services → Credentials) with the Photos Library API "
                 f"enabled, save its JSON there, then run `neural-canvas auth-photos` once.")
 
+    _TOKEN = threading.Lock()          # parallel workers share one token file; refresh it one at a time
+
     def _session(self) -> requests.Session:
+        with self._TOKEN:
+            return self._session_locked()
+
+    def _session_locked(self) -> requests.Session:
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
         if not self.client_path.exists():

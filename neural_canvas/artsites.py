@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -28,7 +29,7 @@ import numpy as np
 import requests
 from bs4 import BeautifulSoup
 
-from .matching import fetch_image
+from .matching import fetch_image, save_npz
 from .websearch import WebReference
 
 log = logging.getLogger(__name__)
@@ -124,7 +125,9 @@ class Artvee:
         works = [w for w in works if not (w.page_url in seen or seen.add(w.page_url))]
         log.info("artvee: %d works listed for %s", len(works), artist)
         if works:                             # an empty listing may be a misspelling or an outage: not kept
-            path.write_text(json.dumps([w.__dict__ for w in works]))
+            tmp = path.with_suffix(f".{threading.get_ident()}.tmp")
+            tmp.write_text(json.dumps([w.__dict__ for w in works]))
+            tmp.replace(path)
         return works
 
     def nearest(self, artist: str, img_vec: np.ndarray, k: int = 6) -> list[WebReference]:
@@ -146,7 +149,7 @@ class Artvee:
                 for (w, _), v in zip(chunk, self.emb.embed([im for _, im in chunk])):
                     have[w.thumb_url] = v
             if have:
-                np.savez(cache, urls=np.array(list(have)), vecs=np.stack(list(have.values())))
+                save_npz(cache, urls=np.array(list(have)), vecs=np.stack(list(have.values())))
         ranked = [w for w in works if w.thumb_url in have]
         if not ranked:
             return []

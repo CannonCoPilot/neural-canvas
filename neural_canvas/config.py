@@ -92,6 +92,7 @@ DEFAULTS: dict[str, Any] = {
         "runner_label": "runner:neural-canvas",
         "project_label": "project:neural-canvas",
         "poll_s": 10,
+        "workers": 2,          # works run in parallel; each worker holds its own models
     },
     "google_photos": {
         "enabled": True,

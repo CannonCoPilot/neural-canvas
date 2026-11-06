@@ -42,6 +42,14 @@ class Embedder:
         return b @ a
 
 
+def save_npz(path, **arrays) -> None:
+    """Write an embedding cache whole or not at all: parallel runs read these caches while another
+    run may be extending the same artist's file."""
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp.npz"
+    np.savez(tmp, **arrays)
+    os.replace(tmp, path)
+
+
 def _gray(img: Image.Image, side: int = 900) -> np.ndarray:
     im = img.convert("L")
     im.thumbnail((side, side), Image.LANCZOS)
@@ -70,6 +78,21 @@ def homography(a: Image.Image, b: Image.Image) -> tuple[np.ndarray | None, int, 
 
 def geometric_inliers(a: Image.Image, b: Image.Image) -> int:
     return homography(a, b)[1]
+
+
+def footprint(a: Image.Image, b: Image.Image) -> Image.Image | None:
+    """The part of ``a`` that ``b`` shows: b's corners carried onto a by the homography, as a crop of a.
+    None without a homography, or when the region is degenerate (under a tenth of a's width or height)."""
+    H, _, scale = homography(a, b)
+    if H is None:
+        return None
+    h, w = _gray(b).shape
+    pts = cv2.perspectiveTransform(np.float32([[0, 0], [w, 0], [w, h], [0, h]]).reshape(-1, 1, 2), H).reshape(-1, 2) * scale
+    x0, y0 = max(0, int(pts[:, 0].min())), max(0, int(pts[:, 1].min()))
+    x1, y1 = min(a.width, int(pts[:, 0].max())), min(a.height, int(pts[:, 1].max()))
+    if x1 - x0 < a.width / 10 or y1 - y0 < a.height / 10:
+        return None
+    return a.crop((x0, y0, x1, y1))
 
 
 _CACHE: dict[str, Image.Image] = {}
@@ -131,8 +154,10 @@ def fetch_image(url: str, user_agent: str) -> Image.Image | None:
     """Fetch a reference image into memory (never written to disk). Successes are cached; failures are
     not, so a transient error is retried next time. Rate-limited hosts are paced (HOST_INTERVAL_S); a 429
     or a 5xx backs off (Retry-After when given) and tries again; a rate challenge skips the host a while."""
-    if url in _CACHE:
-        return _CACHE[url]
+    with _slot_lock:                      # the cache is shared by the service's worker threads
+        hit = _CACHE.get(url)
+    if hit is not None:
+        return hit
     host = urlparse(url).netloc
     gap = _interval(host)
     if _walled.get(host, 0.0) > time.time():

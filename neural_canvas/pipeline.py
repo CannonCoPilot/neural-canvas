@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import shutil
+import threading
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -84,6 +85,12 @@ class RunResult:
     frame_path: str = ""
 
 
+# The service runs works in parallel threads (one Docent each). Delivery is the one step that must be
+# serial: the duplicate check reads the album's state, and two photographs of one painting finishing
+# together would otherwise both pass it and both be delivered.
+_DELIVERY = threading.Lock()
+
+
 class Docent:
     """Holds the loaded models; one instance serves many runs."""
 
@@ -121,6 +128,22 @@ class Docent:
         sim = float(self.embedder.similarity(vecs[0], vecs[1:])[0])
         log.info("duplicate check vs %s: CLIP %.3f", other_rid[:8], sim)
         return sim >= self.cfg.thresholds["id_clip_min"]
+
+    def _delivered_twin(self, img: Image.Image, facts: dict, run_id: str, rec: dict) -> tuple[str, dict] | None:
+        """A delivered run of the same artwork (by name, then confirmed on the picture), or None."""
+        self.registry.reload()                     # another worker may have delivered since this run began
+        twin = self.registry.delivered_twin(facts["artist"], facts["title"], exclude=run_id)
+        if twin and not self._looks_like(img, twin[0]):
+            rec["duplicate_check"] = {"twin": twin[0], "verdict": "same name, different picture: delivered"}
+            twin = None
+        return twin
+
+    def _duplicate(self, twin, run_id: str, rec: dict, save, rec_path) -> RunResult:
+        reason = (f"same artwork as run {twin[0][:8]} ({twin[1].get('artist')} — {twin[1].get('title')}), "
+                  "already delivered to the album")
+        rec["status"], rec["duplicate_of"], rec["reasons"] = "duplicate", twin[0], [reason]
+        save()
+        return RunResult(run_id, "duplicate", "identify", [reason], str(rec_path), "")
 
     @property
     def upscaler(self) -> Upscaler:
@@ -202,16 +225,9 @@ class Docent:
                 "artist", "title", "date", "medium", "collection", "artist_nationality",
                 "artist_born", "artist_died", "inscribed_title")}
             # a different photograph of a painting already in the album: done, not delivered twice
-            twin = self.registry.delivered_twin(facts["artist"], facts["title"], exclude=run_id)
-            if twin and not self._looks_like(img, twin[0]):
-                rec["duplicate_check"] = {"twin": twin[0], "verdict": "same name, different picture: delivered"}
-                twin = None
+            twin = self._delivered_twin(img, facts, run_id, rec)
             if twin:
-                reason = (f"same artwork as run {twin[0][:8]} ({twin[1].get('artist')} — {twin[1].get('title')}), "
-                          "already delivered to the album")
-                rec["status"], rec["duplicate_of"], rec["reasons"] = "duplicate", twin[0], [reason]
-                save()
-                return RunResult(run_id, "duplicate", "identify", [reason], str(rec_path), "")
+                return self._duplicate(twin, run_id, rec, save, rec_path)
             self.registry.record(run_id, phash=phash(raw), artist=facts["artist"], title=facts["title"],
                                  status="identified")
 
@@ -298,21 +314,25 @@ class Docent:
                        (f", {facts['date']}" if facts["date"] else "") + \
                        (" (detail)" if facts.get("detail") else "") + \
                        f" — {facts['artist']}. {it.label_text}"
-                try:
-                    dr = self.photos.deliver(out, desc)
-                except AuthRequired as e:
-                    st[stage] = {"passed": False, "failures": [str(e)], "auth_required": True}
+                with _DELIVERY:
+                    twin = None if redeliver else self._delivered_twin(img, facts, run_id, rec)
+                    if twin:                      # a parallel run of the same painting got there first
+                        return self._duplicate(twin, run_id, rec, save, rec_path)
+                    try:
+                        dr = self.photos.deliver(out, desc)
+                    except AuthRequired as e:
+                        st[stage] = {"passed": False, "failures": [str(e)], "auth_required": True}
+                        save()
+                        return block(stage, [str(e)])
+                    st[stage] = {"passed": dr.passed, **dr.to_dict()}
                     save()
-                    return block(stage, [str(e)])
-                st[stage] = {"passed": dr.passed, **dr.to_dict()}
-                save()
-                if not dr.passed:
-                    return block(stage, dr.failures)
-                if old and old != dr.media_item_id:   # the new frame replaces the old one in the album
-                    self.photos.remove_from_album(old)
-                    st[stage]["replaced"] = old
-                    save()
-                self.registry.record(run_id, status="delivered", frame=str(out))
+                    if not dr.passed:
+                        return block(stage, dr.failures)
+                    if old and old != dr.media_item_id:   # the new frame replaces the old one in the album
+                        self.photos.remove_from_album(old)
+                        st[stage]["replaced"] = old
+                        save()
+                    self.registry.record(run_id, status="delivered", frame=str(out))
             elif not deliver:
                 if not st.get(stage, {}).get("passed"):   # a render-only rerun never forgets a real delivery
                     st[stage] = {"passed": False, "skipped": "delivery disabled for this run"}

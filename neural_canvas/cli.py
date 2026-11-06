@@ -54,7 +54,9 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+                        # the service runs works in parallel; each run's lines carry its worker thread's name
+                        format="%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s" if a.cmd == "serve"
+                        else "%(asctime)s %(levelname)s %(name)s: %(message)s")
     for noisy in ("httpx", "httpx2", "httpcore", "huggingface_hub", "urllib3", "sentence_transformers", "primp", "ddgs"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     cfg = load_config(a.config)

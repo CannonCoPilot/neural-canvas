@@ -9,6 +9,7 @@ Lanczos resize, measured at low resolution where the two should agree).
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import asdict, dataclass
 
 import cv2
@@ -37,6 +38,11 @@ class UpscaleResult:
         return asdict(self)
 
 
+# The service's workers each hold an Upscaler, but there is one GPU, and PyTorch does not promise that
+# Metal (MPS) work submitted from two threads at once is safe: super-resolution runs one at a time.
+_GPU = threading.Lock()
+
+
 class Upscaler:
     def __init__(self, weights: str):
         import spandrel
@@ -49,6 +55,10 @@ class Upscaler:
 
     @torch.no_grad()
     def _sr(self, img: Image.Image) -> Image.Image:
+        with _GPU:
+            return self._sr_locked(img)
+
+    def _sr_locked(self, img: Image.Image) -> Image.Image:
         x = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
         h, w, _ = x.shape
         s = self.scale

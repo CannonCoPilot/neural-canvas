@@ -21,7 +21,9 @@ import json
 import logging
 import os
 import shutil
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -44,9 +46,11 @@ class Pulse:
     def __init__(self, url: str):
         self.url = url.rstrip("/")
         self.s = requests.Session()
+        self._lock = threading.Lock()          # one session, shared by the worker threads
 
     def _r(self, method: str, path: str, **kw):
-        r = self.s.request(method, f"{self.url}{path}", timeout=30, **kw)
+        with self._lock:
+            r = self.s.request(method, f"{self.url}{path}", timeout=30, **kw)
         if r.status_code == 409:
             return None
         if r.status_code >= 400:     # Pulse explains a rejection in the body; keep it in the error
@@ -130,13 +134,18 @@ class Service:
         self.registry = ArtworkRegistry(cfg.path("state_dir"))
         self.photos = GooglePhotos(cfg["google_photos"], cfg.path("state_dir"))
         self._auth_alerted = 0.0
-        self._docent: Docent | None = None
+        self.workers = max(1, int(p.get("workers", 1)))
+        self._pool = ThreadPoolExecutor(self.workers, thread_name_prefix="worker")
+        self._running: dict[str, Future] = {}      # task id -> its run
+        self._local = threading.local()
 
     @property
     def docent(self) -> Docent:
-        if self._docent is None:
-            self._docent = Docent(self.cfg)
-        return self._docent
+        """This worker thread's own Docent: a run keeps its working state on the models' objects."""
+        d = getattr(self._local, "docent", None)
+        if d is None:
+            d = self._local.docent = Docent(self.cfg)
+        return d
 
     # ── watcher: folder → tasks ────────────────────────────────────────────
     def scan(self) -> list[str]:
@@ -217,12 +226,39 @@ class Service:
         return t["id"]
 
     # ── runner: tasks → runs ──────────────────────────────────────────────
+    def requeue_stranded(self) -> list[str]:
+        """Tasks left active:running by a service that stopped mid-run go back to the queue. Only one
+        service runs at a time (service.lock), so at startup no run of ours is really in progress."""
+        out = []
+        for t in self.pulse.list(self.runner_label):
+            labels = t.get("labels", [])
+            if t.get("status") != "closed" and "active:running" in labels:
+                self.pulse.labels(t["id"], add=["staging:wait", "evaluated:no", "queued:no", "active:no"],
+                                  remove=["active:running", "staging:done", "evaluated:done", "queued:done",
+                                          *[l for l in labels if l.startswith("docent:")]])
+                self.pulse.note(t["id"], "re-queued: the service stopped during this run", status="open")
+                out.append(t["id"])
+        if out:
+            log.warning("re-queued %d task(s) stranded by the last stop: %s", len(out), ", ".join(out))
+        return out
+
     def run_ready(self) -> int:
+        """Start ready tasks on free workers; returns how many were started. Runs go on in the
+        background while the watcher keeps queuing new files."""
+        for tid, fut in list(self._running.items()):
+            if fut.done():
+                del self._running[tid]
+        free = self.workers - len(self._running)
+        if free <= 0:
+            return 0
         n = 0
         ready = [t for t in self.pulse.list(self.runner_label)
                  if t.get("status") != "closed" and "staging:wait" in t.get("labels", [])
-                 and (t.get("metadata") or {}).get("run_id")]     # record-only tasks carry no run
+                 and (t.get("metadata") or {}).get("run_id")     # record-only tasks carry no run
+                 and t["id"] not in self._running]
         for i, t in enumerate(ready):
+            if n >= free:
+                break
             # checked before EVERY claim: a run takes minutes, the queue days, and a sign-in can lapse
             # midway. Every run would then end blocked at deliver, so leave the queue untouched and say so.
             why = self.photos.check() if self.cfg["google_photos"].get("enabled", True) else ""
@@ -234,13 +270,29 @@ class Service:
                 return n
             if not self.pulse.claim(t["id"], self.runner_label):
                 continue
-            self.run_task(self.pulse.get(t["id"]))
+            self._running[t["id"]] = self._pool.submit(self._run_guarded, t["id"])
             n += 1
         return n
+
+    def _run_guarded(self, tid: str):
+        """A worker's run. An error escaping the run blocks its task and says so, never strands it."""
+        try:
+            self.run_task(self.pulse.get(tid))
+        except Exception as e:
+            log.exception("run of task %s failed", tid)
+            try:
+                self.pulse.labels(tid, add=["blocked:yes", "reason:docent-error", "active:no"],
+                                  remove=["active:running"])
+                self.pulse.note(tid, f"BLOCKED: runner error {type(e).__name__}: {str(e)[:500]}", status="open")
+                self.pulse.alert("warning", f"neural-canvas task {tid} failed in the runner", {"task_id": tid,
+                                 "error": f"{type(e).__name__}: {str(e)[:300]}"})
+            except requests.RequestException:
+                log.error("task %s could not be marked blocked (Pulse unreachable)", tid)
 
     def run_task(self, task: dict):
         tid, meta = task["id"], task.get("metadata") or {}
         rid, src = meta["run_id"], Path(meta["source_path"])
+        threading.current_thread().name = f"run-{rid[:8]}"
         self.pulse.labels(tid, remove=[l for l in task.get("labels", []) if l.startswith(("docent:", "reason:"))])
         self.pulse.note(tid, "claimed by neural-canvas runner")
         cur = {"stage": None}
@@ -288,7 +340,11 @@ class Service:
             raise SystemExit("another neural-canvas service is running")
         lock.write(str(os.getpid()))
         lock.flush()
-        log.info("watching %s; Pulse %s", self.watch, self.cfg["pulse"]["url"])
+        log.info("watching %s; Pulse %s; %d worker(s)", self.watch, self.cfg["pulse"]["url"], self.workers)
+        try:
+            self.requeue_stranded()
+        except requests.RequestException as e:
+            log.error("Pulse unreachable, stranded tasks not checked: %s", e)
         while True:
             try:
                 self.scan()
@@ -299,5 +355,7 @@ class Service:
             except requests.RequestException as e:
                 log.error("Pulse unreachable: %s", e)
             if once:
+                for fut in list(self._running.values()):
+                    fut.result()
                 return
             time.sleep(self.cfg["pulse"]["poll_s"])

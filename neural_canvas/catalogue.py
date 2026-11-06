@@ -35,7 +35,7 @@ import numpy as np
 import requests
 from PIL import Image
 
-from .matching import fetch_image, geometric_inliers
+from .matching import fetch_image, footprint, geometric_inliers, save_npz
 from .references import file_thumb
 from .sources import classify, institutional, non_title, rulable, supporting
 
@@ -202,6 +202,7 @@ class Record:
     support: bool = False        # an auction house or the press: corroborates, never counts
     images: list = field(default_factory=list)       # the page's other pictures, tried when image_url is not the work
     overrule: bool = False       # Wikidata and what it links, a museum's own API, a catalogue raisonné (Sir, 2026-11-05)
+    wikidata: str = ""           # the source's own link to the work's Wikidata item (a join key)
 
     def states(self, value: str) -> bool:
         """An institution page supports a fact its text states (all of the value's significant words)."""
@@ -234,6 +235,12 @@ class Catalogue:
         if sim < self.t["id_clip_min"] - 0.08:
             return False, round(sim, 4), 0
         inl = geometric_inliers(img, im)
+        if sim < self.t["id_clip_min"] and inl >= self.t["id_inliers_min"]:
+            # the input may be a detail of the record's picture (a crop shows less than the whole sheet):
+            # the same bar, on the part of the record's picture the input shows (Redon, NGA 66514, 2026-11-05)
+            part = footprint(im, img)
+            if part is not None:
+                sim = max(sim, float(self.emb.similarity(img_vec, self.emb.embed([part]))[0]))
         return sim >= self.t["id_clip_min"] and inl >= self.t["id_inliers_min"], round(sim, 4), inl
 
     def _get(self, url: str, **params) -> dict:
@@ -945,7 +952,8 @@ class Catalogue:
                                r["displaydate"] or "", r["medium"] or "", "National Gallery of Art", "", NGA.image(r),
                                "image", sim, inl,
                                text=fold(" ".join(str(r[k] or "") for k in ("title", "attribution", "inscription", "medium",
-                                                                           "displaydate", "accessionnum"))))]
+                                                                           "displaydate", "accessionnum"))),
+                               wikidata=r.get("wikidataid") or "")]
         return []
 
     def _nga_vectors(self, artist: str, rows: list[dict]):
@@ -969,7 +977,7 @@ class Catalogue:
                 for (r, _), v in zip(chunk, self.emb.embed([im for _, im in chunk])):
                     have[r["objectid"]] = v
             if have:
-                np.savez(cache, ids=np.array(list(have)), vecs=np.stack(list(have.values())))
+                save_npz(cache, ids=np.array(list(have)), vecs=np.stack(list(have.values())))
         if any(r["objectid"] not in have for r in rows):
             return None if not have else np.stack([have.get(r["objectid"], np.zeros(len(next(iter(have.values())))))
                                                     for r in rows])
@@ -1003,8 +1011,15 @@ class Catalogue:
         self.consulted = ["Wikidata", "Art Institute of Chicago", "Metropolitan Museum", "Cleveland Museum of Art"]
         living, artist_qid = self._artist_living(artist)
         over = self._over
-        for qid in self._wikidata_items(img, img_vec, artist, ident):
+
+        def from_wikidata(qid: str, via: str = "") -> list[Record]:
+            """The work's Wikidata item and every record it links to. ``via`` names the source whose own
+            link led here when the item was not found by the picture."""
+            nonlocal artist_qid
+            recs: list[Record] = []
             rec, ids = self._wikidata_record(qid)
+            if via:
+                rec.verified_by = f"link from {via}"
             recs.append(rec)
             artist_qid = ids.get("artist_qid") or artist_qid
             for v in ids.get("P350", [])[:1]:
@@ -1037,6 +1052,10 @@ class Catalogue:
                         r.collection = rec.collection        # the holding institution's own site
                     recs.append(r)
                     n += 1
+            return recs
+
+        for qid in self._wikidata_items(img, img_vec, artist, ident):
+            recs += from_wikidata(qid)
         over(recs)                      # the Wikidata item and every record it links to
         have = {r.source for r in recs}
         if "artic" not in have:
@@ -1062,7 +1081,15 @@ class Catalogue:
                     break
         self.consulted += ["RKD", "Wikipedia", "Wikimedia Commons", "museum, foundation and artist pages found by web search"]
         self._living, self._artist = living, artist
-        recs += over(self._safe("nga", lambda: self._nga(img, img_vec, titles, artist)))
+        nga = over(self._safe("nga", lambda: self._nga(img, img_vec, titles, artist)))
+        recs += nga
+        # a museum record found by the picture names the work's Wikidata item; the oeuvre sweep may have missed
+        # it (drawings, works far down the embedding ranking: Redon's Five Butterflies, 2026-11-05)
+        if "wikidata" not in {r.source for r in recs}:
+            for qid in dict.fromkeys(r.wikidata for r in nga if r.wikidata):
+                have = {r.source for r in recs}
+                recs += over([r for r in self._safe("wikidata_join", lambda: from_wikidata(qid, "nga"))
+                              if r.source not in have])
         recs += over(self._safe("catalogue_sites", lambda: self._registry(img, img_vec, artist, titles,
                                                                   {institution(r.source) for r in recs})))
         recs += self._safe("artvee", lambda: self._artvee(img, img_vec, titles, artist, surname))
@@ -1118,7 +1145,7 @@ class Catalogue:
                "discarded": {}}
         over = {r.source for r in recs if r.overrule}
 
-        def choose(name, values, support_of):
+        def choose(name, values, support_of, agrees=None):
             """Sir, 2026-11-05: the overrule tier (Wikidata and its links, museum APIs, catalogues raisonnés)
             votes among itself. When it states a fact, only its values can be ruled; lower-tier sources may
             add support by agreeing, and their disagreeing values are discarded. Most overrule support wins."""
@@ -1131,15 +1158,17 @@ class Catalogue:
                     best = (key, v, sup)
             if not best:
                 return None
-            if top:
-                gone = [f"{r.source}: {v}" for r, v in values if not r.overrule and r.source not in best[2]]
+            if top:      # discarded = disagrees with the ruling (a source agreeing in other words is not)
+                gone = [f"{r.source}: {v}" for r, v in values if not r.overrule and r.source not in best[2]
+                        and not (agrees and agrees(v, best[1], best[2]))]
                 if gone:
                     out["discarded"][name] = gone
             return best[1], best[2]
 
         def pick(name, values, agree):
             got = choose(name, values, lambda r, v: sorted({r2.source for r2, v2 in values if agree(v, v2)} |
-                                                           {r2.source for r2 in recs if r2.text and r2.states(v)}))
+                                                           {r2.source for r2 in recs if r2.text and r2.states(v)}),
+                         lambda v, won, sup: agree(v, won))
             if got:
                 out["facts"][name], out["support"][name] = got
                 return got[0]
@@ -1151,7 +1180,9 @@ class Catalogue:
         title = ""
         # a near-same title in another medium is another work (Whistler's Riva pastel, the Salute oil)
         got = choose("title", tvals, lambda r, t: sorted({r2.source for r2 in recs if not medium_clash(r.medium, r2.medium)
-                                                          and (any(same_title(t, t2) for t2 in r2.all_titles()) or r2.states(t))}))
+                                                          and (any(same_title(t, t2) for t2 in r2.all_titles()) or r2.states(t))}),
+                     # agreeing with any wording of any supporting source (the card may print Wikidata's English)
+                     lambda t, won, sup: any(same_title(t, t2) for r2 in recs if r2.source in sup for t2 in r2.all_titles()))
         if got:
             t, sup = got
             wd = next((x for x in recs if x.source == "wikidata"), None)
