@@ -38,6 +38,7 @@ from .placard import card_margin, card_size, compose, viewer_grid
 from .references import Wikimedia
 from .upscale import Upscaler
 from .vision_web import VisionWebDetection
+from .lens_pool import Ledger
 from .vlm import VLM
 from .websearch import WebImageSearch
 
@@ -108,7 +109,8 @@ class Docent:
         self.identifier = Identifier(cfg, self.vlm, self.wiki, self.embedder,
                                      WebImageSearch(searxng_url=s.get("searxng_url", ""), text_search=s.get("text_search")),
                                      Imify(im) if im.get("enabled") else None,
-                                     VisionWebDetection(vw, cfg.path("state_dir") / "vision_web")
+                                     VisionWebDetection(vw, cfg.path("state_dir") / "vision_web",
+                                                        Ledger(cfg.path("state_dir") / "lens_pool.json"))
                                      if vw.get("enabled") else None)
         W, H = cfg["display"]["width"], cfg["display"]["height"]
         dsp = cfg["display"]

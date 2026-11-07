@@ -720,7 +720,8 @@ def test_a_paced_host_keeps_its_gap_across_threads_and_a_retry_after_pauses_them
     with ThreadPoolExecutor(4) as ex:
         list(ex.map(lambda _: (matching._wait_turn(host, 0.05), starts.append(time.time())), range(6)))
     starts.sort()
-    assert all(b - a >= 0.045 for a, b in zip(starts, starts[1:]))
+    # stamped after each thread wakes: wake jitter (up to ~10 ms measured 2026-11-06, HEAD too) shrinks a 50 ms slot gap
+    assert all(b - a >= 0.03 for a, b in zip(starts, starts[1:]))
     matching._back_off(host, 0.3)
     t = time.time(); matching._wait_turn(host, 0.0)
     assert time.time() - t >= 0.25
@@ -1045,23 +1046,87 @@ def test_walled_catalogue_titles_come_from_googles_index_and_vote_on_the_title_o
     assert "Google" in recs[0].verified_by
 
 
-def test_google_lens_runs_at_most_once_per_work(monkeypatch):
-    from neural_canvas.identify import Identifier
-    idf = Identifier.__new__(Identifier)
-    calls = []
+def test_lens_pool_errors_never_carry_a_key(monkeypatch):
+    import requests
+    from neural_canvas import lens_pool
+    lens_pool._KEYS.add("sekret-key-123456")
 
-    class Web:
-        def temp_public_url(self, img):
-            return "https://tmp/x.jpg"
+    def boom(*a, **k):      # a connection error quotes the whole URL, query-string key included
+        raise requests.ConnectionError("HTTPSConnectionPool: /search.json?engine=google_lens&api_key=sekret-key-123456")
+    monkeypatch.setattr(requests, "request", boom)
+    import pytest
+    with pytest.raises(RuntimeError) as e:
+        lens_pool._req("GET", "https://serpapi.com/search.json", params={"api_key": "sekret-key-123456"})
+    assert "sekret" not in str(e.value) and "api_key=***" in str(e.value)
 
-        def serpapi_lens(self, url):
-            calls.append(url)
-            return []
-    idf.web, idf._lens_done = Web(), False
-    monkeypatch.setattr(idf, "_score", lambda *a: [])
-    assert idf._lens_tier(None, None, "before a catalogue sweep", set(), [], [], 0, [], "", "") is None
-    assert idf._lens_tier(None, None, "fallback", set(), [], [], 0, [], "", "") is None
-    assert calls == ["https://tmp/x.jpg"]
+
+def _pool(tmp_path, specs):
+    from neural_canvas.lens_pool import LensPool, Ledger, Provider
+    providers = []
+    for name, allowance, live, refs in specs:
+        providers.append(Provider(name, lambda w, r=refs, n=name: (_ for _ in ()).throw(RuntimeError("down")) if r == "error" else r,
+                                  allowance, "monthly", balance=(lambda v=live: v) if live is not None else None))
+    return LensPool(providers, Ledger(tmp_path / "pool.json"), lambda img: "https://tmp/x.jpg")
+
+
+def test_lens_pool_picks_largest_share_and_skips_providers_under_the_10_percent_floor(tmp_path):
+    pool = _pool(tmp_path, [("a", 250, 208, ["r"]), ("b", 100, 60, ["r"]), ("c", 1000, 99, ["r"])])
+    assert pool.pick().name == "a"                      # 83% left beats 60%; c (9.9%) is under the floor
+    assert [s["eligible"] for s in pool.status()] == [True, True, False]
+
+
+def test_lens_pool_spends_monthly_pools_before_one_time_reserves(tmp_path):
+    pool = _pool(tmp_path, [("monthly", 250, 50, ["r"]), ("reserve", 2500, 2400, ["r"])])
+    pool.providers[1].renews = "one-time"
+    assert pool.pick().name == "monthly"                # 20% left, but it renews; the 96% reserve waits
+    pool.providers[0].balance = lambda: 20
+    pool.ledger.update("monthly", remaining=20)
+    assert pool.pick().name == "reserve"                # the monthly pool hit its floor
+
+
+def test_lens_pool_never_runs_a_provider_to_its_last_credits(tmp_path):
+    pool = _pool(tmp_path, [("a", 100, 11, ["r"])])
+    assert pool.pick().name == "a"                      # 11 - 1 >= 10
+    assert pool.ledger.reserve(pool.providers[0])
+    pool.providers[0].balance = lambda: 10
+    assert pool.pick() is None                          # 10 - 1 < 10: skipped, never paid
+    pool.ledger.update("a", remaining=10)
+    assert not pool.ledger.reserve(pool.providers[0])   # the locked check refuses it too
+
+
+def test_lens_pool_rereads_real_balances_when_only_one_provider_is_left(tmp_path):
+    pool = _pool(tmp_path, [("a", 100, 50, ["r"]), ("b", 100, 5, ["r"])])
+    reads = []
+    pool.providers[1].balance = lambda: reads.append(1) or 100    # b's month renewed since the last check
+    pool.ledger.update("b", remaining=5, checked=__import__("time").time())
+    assert pool.pick().name == "b" and reads             # only a was above the floor -> live re-read found b reset
+
+
+def test_lens_pool_treats_errors_and_empty_replies_as_failures_and_alerts_when_all_fail(tmp_path):
+    from neural_canvas.lens_pool import LensSlotUnavailable
+    pool = _pool(tmp_path, [("a", 100, 90, "error"), ("b", 100, 80, []), ("c", 100, 50, ["r"])])
+    prov, refs, errs = pool.search("img")
+    assert prov == "c" and refs == ["r"] and errs == ["a: down", "b: empty reply"]
+    alerts = []
+    pool2 = _pool(tmp_path / "2", [("a", 100, 90, "error")])
+    pool2.alert = lambda text, data: alerts.append(text)
+    import pytest
+    with pytest.raises(LensSlotUnavailable):
+        pool2.search("img")
+    assert alerts and "a: down" in alerts[0]
+
+
+def test_vision_counts_locally_and_stops_at_the_free_floor(tmp_path, monkeypatch):
+    import time
+    from neural_canvas.lens_pool import Ledger
+    from neural_canvas.vision_web import VisionWebDetection
+    from PIL import Image
+    led = Ledger(tmp_path / "pool.json")
+    led.update("vision", month=time.strftime("%Y-%m"), used_month=900)
+    v = VisionWebDetection({"credentials_path": "x", "key_path": "y"}, tmp_path / "vw", led)
+    import pytest
+    with pytest.raises(RuntimeError, match="spill into paid"):
+        v.detect(Image.new("RGB", (8, 8)))
 
 
 def test_nationality_prints_demonyms_and_a_compound_only_when_the_sources_state_each_part():

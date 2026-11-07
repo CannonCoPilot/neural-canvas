@@ -133,6 +133,16 @@ def _gate(host: str) -> threading.Semaphore | None:
         return _in_flight.setdefault(family, threading.Semaphore(1))
 
 
+# headers a host asks callers to send, each carrying the caller's user agent. The Art Institute's image server
+# challenges our user agent on its own (HTTP 403, cf-mitigated) and serves it with AIC-User-Agent: measured
+# 2026-11-06, 3 of 3 each way; its API docs ask every caller to name itself in that header.
+HOST_HEADERS = {"artic.edu": ("AIC-User-Agent",)}
+
+
+def _host_headers(host: str) -> tuple[str, ...]:
+    return next((v for k, v in HOST_HEADERS.items() if host == k or host.endswith("." + k)), ())
+
+
 _walled: dict[str, float] = {}           # host -> until when its rate challenge is assumed to hold
 WALL_S = 300.0
 
@@ -158,19 +168,27 @@ def fetch_image(url: str, user_agent: str) -> Image.Image | None:
         hit = _CACHE.get(url)
     if hit is not None:
         return hit
+    if url.startswith("data:image") and "base64," in url:
+        # some Lens providers return thumbnails inline (Oxylabs, SearchAPI): decoded in memory, nothing fetched
+        import base64
+        try:
+            return Image.open(io.BytesIO(base64.b64decode(url.split("base64,", 1)[1] + "=="))).convert("RGB")
+        except Exception:
+            return None
     host = urlparse(url).netloc
     gap = _interval(host)
     if _walled.get(host, 0.0) > time.time():
         return None                          # challenged a moment ago: every image would be refused alike
     gate = _gate(host)
+    headers = {"User-Agent": user_agent, **{k: user_agent for k in _host_headers(host)}}
     for attempt in range(4):
         _wait_turn(host, gap)
         try:
             if gate:
                 with gate:
-                    r = _session().get(url, headers={"User-Agent": user_agent}, timeout=12)
+                    r = _session().get(url, headers=headers, timeout=12)
             else:
-                r = _session().get(url, headers={"User-Agent": user_agent}, timeout=12)
+                r = _session().get(url, headers=headers, timeout=12)
             if r.status_code == 403 and r.headers.get("cf-mitigated") == "challenge":
                 _walled[host] = time.time() + WALL_S   # a challenge holds for minutes: skip the host, do not retry
                 log.warning("reference host %s answers with a rate challenge; skipped for %d s", host, WALL_S)

@@ -7,8 +7,9 @@ when they end a round without a confirmation, or when a near-miss shows the work
 no free copy matched on both instruments.
 
 Like every other source, its results are *candidates*: a page becomes a reference only by passing
-the same two-instrument match. Each call is billed (~$3.50/1000 after the first 1000 a month), so
-every call is counted in the run record, and ``vision_web.enabled: false`` turns the tier off.
+the same two-instrument match. Calls past the first 1,000 a month are billed (~$3.50/1000), and nothing
+may ever spill into paid (Sir, 2026-11-06): calls are counted in the shared credit ledger and stop at 90% of
+the free 1,000 (the pool's 10% floor). ``vision_web.enabled: false`` turns the tier off.
 
 The API key never lives in code or config: config names the credentials file and the key's dotted
 path inside it, and the key is read at call time.
@@ -52,11 +53,32 @@ def _scrub(text: str, key: str) -> str:
 
 
 class VisionWebDetection:
-    def __init__(self, cfg: dict, cache_dir: Path):
+    free_per_month = 1000
+
+    def __init__(self, cfg: dict, cache_dir: Path, ledger=None):
         self.cfg = cfg
         self.calls = 0          # billed calls this process has made (copied into each run record)
         self.cache_dir = cache_dir
         cache_dir.mkdir(parents=True, exist_ok=True)
+        self.ledger = ledger    # lens_pool.Ledger; None = no limit kept (tests)
+        if ledger is not None:
+            import time
+            e = ledger.get("vision")
+            if e.get("month") != time.strftime("%Y-%m"):   # first sight of this month: count the replies on disk
+                start = time.mktime(time.strptime(time.strftime("%Y-%m-01"), "%Y-%m-%d"))
+                n = sum(1 for f in cache_dir.glob("*.json") if f.stat().st_mtime >= start)
+                ledger.update("vision", month=time.strftime("%Y-%m"), used_month=n)
+
+    def used_this_month(self) -> int:
+        import time
+        e = self.ledger.get("vision") if self.ledger is not None else {}
+        return e.get("used_month", 0) if e.get("month") == time.strftime("%Y-%m") else 0
+
+    def cached(self, img: Image.Image) -> bool:
+        return self._cache(img).exists()
+
+    def _cache(self, img: Image.Image) -> Path:
+        return self.cache_dir / f"{hashlib.sha256(img.convert('RGB').tobytes()).hexdigest()[:24]}.json"
 
     @property
     def enabled(self) -> bool:
@@ -66,9 +88,14 @@ class VisionWebDetection:
         """One billed call per distinct image, ever: the response is kept on disk by pixel hash, so a
         rerun (even --fresh) reads it back instead of paying again."""
         im = img.convert("RGB")
-        cache = self.cache_dir / f"{hashlib.sha256(im.tobytes()).hexdigest()[:24]}.json"
+        cache = self._cache(im)
         if cache.exists():
             return json.loads(cache.read_text())
+        if self.ledger is not None:          # the floor check and the charge are one locked step
+            from .lens_pool import Provider
+            if not self.ledger.reserve(Provider("vision", lambda w: [], self.free_per_month, "monthly")):
+                raise RuntimeError(f"Vision web detection: {self.used_this_month()} of the {self.free_per_month} free calls "
+                                   f"this month are spent down to the 10% floor; nothing may spill into paid")
         im.thumbnail((self.cfg.get("max_side", 1600),) * 2)
         buf = io.BytesIO()
         im.save(buf, "JPEG", quality=90)

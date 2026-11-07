@@ -30,6 +30,7 @@ from .artsites import Arthur, Artvee, WalledCatalogue
 from .imify import Imify
 from .style import StyleShortlist
 from .vision_web import VisionWebDetection
+from .lens_pool import build_pool
 from .websearch import WebImageSearch, WebReference
 from .vlm import VLM
 
@@ -138,6 +139,8 @@ class Identifier:
         self.artvee = Artvee(cfg.path("state_dir"), embedder)
         self.arthur = Arthur(web) if web else None
         self.walled = WalledCatalogue(web) if web and hasattr(web, "index_images") else None
+        # the Lens slot (Sir, 2026-11-06): one Google Lens-type search per work from a rotating free-credit pool
+        self.lens = build_pool(cfg, web, vision) if web is not None and hasattr(web, "temp_public_url") else None
 
     # ── catalogue sweep: an artist's whole Wikidata oeuvre, embedded once and cached ──
     def _oeuvre_vectors(self, artist_qid: str, cold: bool = False) -> tuple[list[dict], np.ndarray]:
@@ -325,8 +328,10 @@ class Identifier:
 
     def identify(self, img: Image.Image) -> Identification:
         calls0 = self.vision.calls if self.vision else 0
-        pool = ThreadPoolExecutor(1)
+        pool = ThreadPoolExecutor(2)      # the reverse-image arms (Imify, the Lens slot) run beside the rounds
         self._imify_pending = None
+        self._lens_log = {"providers": [], "errors": []}
+        self._lens_pending = None
         try:
             ident = self._identify(img, pool)
         finally:
@@ -336,6 +341,11 @@ class Identifier:
             self._imify_pending.add_done_callback(lambda f: log.info(
                 "late imify result (unused): %s", f.exception() or f"{len(f.result())} candidates"))
         ident.evidence["vision_web_calls"] = (self.vision.calls - calls0) if self.vision else 0
+        if self._lens_pending is not None:       # its credit is spent either way: say so in the run record
+            self._lens_log["unused"] = "confirmed before the Lens slot answered"
+            self._lens_pending.add_done_callback(lambda f: log.info(
+                "late lens result (unused): %s", f.exception() or f"{f.result()[0]}, {len(f.result()[1])} references"))
+        ident.evidence["lens_slot"] = self._lens_log
         sig = getattr(self, "_signature", None) or {}
         it = str(sig.get("inscribed_title") or "").strip()
         if it and sig.get("inscribed_title_legible") is True and "?" not in it:
@@ -346,6 +356,10 @@ class Identifier:
     def _identify(self, img: Image.Image, pool: ThreadPoolExecutor) -> Identification:
         # the reverse-image arm starts now and is scored the moment it answers
         imify_fut = pool.submit(self.imify.search_image, img) if self.imify else None
+        # the Lens slot starts now too, on every work (it found 34 of 34 test works): first look, not a fallback
+        lens_fut = pool.submit(self.lens.search, img) if self.lens else None
+        self._lens_pending = lens_fut
+        lens_retried = False
         self._imify_pending = imify_fut
         img_vec = self.emb.embed([img])[0]
         self._img_vec = img_vec
@@ -356,7 +370,6 @@ class Identifier:
         self._used_keywords: set[str] = set()
         self._vision_hints: dict = {}
         self._hint_round = False
-        self._lens_done = False
         vision_due = bool(self.vision and self.vision.enabled)
         max_rounds = self.t["id_max_rounds"]
         self._signature = self.read_signature(img)
@@ -401,6 +414,10 @@ class Identifier:
                     f, imify_fut = imify_fut, None   # waits only when nothing else is left to try
                     self._imify_pending = None
                     pending.insert(0, ("imify", "reverse-image search", f.result))
+                if lens_fut is not None and (lens_fut.done() or not pending):
+                    f, lens_fut = lens_fut, None
+                    self._lens_pending = None
+                    pending.insert(0, ("google_lens", "google lens slot", lambda f=f: self._lens_refs(f)))
                 if not pending:
                     break
                 tier, q, fn = pending.pop(0)
@@ -409,9 +426,7 @@ class Identifier:
                     # one web-detection call answers in seconds; sweeps and web searches take many minutes
                     vision_due = False
                     ident = self._vision_tier(img, img_vec, "before a catalogue sweep", seen, matches, rounds, rnd,
-                                              cands, sig, summary) \
-                        or self._lens_tier(img, img_vec, "before a catalogue sweep", seen, matches, rounds, rnd, cands,
-                                           sig, summary)
+                                              cands, sig, summary)
                     if ident:
                         return ident
                 log.info("  tier %s: %s", tier, q[:80])
@@ -423,6 +438,12 @@ class Identifier:
                     continue
                 matches += batch
                 hits = [m for m in batch if m.confirmed]
+                if tier == "google_lens" and not hits and not lens_retried and self.lens:
+                    # the providers' hit rates differ (Serper found 7 of 10): one more provider before giving up
+                    lens_retried = True
+                    lens_fut = pool.submit(self.lens.search, img, set(self._lens_log["providers"])
+                                           | {e.split(":", 1)[0] for e in self._lens_log["errors"]})
+                    self._lens_pending = lens_fut
                 if hits:
                     ident = self._finish(tier, hits, matches, rounds, rnd, cands, sig, summary)
                     if ident.status == "confirmed":
@@ -457,34 +478,19 @@ class Identifier:
                     if ident.status == "confirmed":
                         return ident
                     rounds.pop()
-        # Google Lens, when no earlier round reached it
-        ident = self._lens_tier(img, img_vec, "fallback", seen, [], rounds, rnd, refuted[:5], sig, summary)
-        if ident:
-            return ident
         return Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
                               evidence={"reason": "no reference image matched on both instruments"})
 
-    def _lens_tier(self, img, img_vec, why, seen, matches, rounds, rnd, cands, sig, summary) -> Identification | None:
-        """Google Lens on a public copy of the picture that deletes itself within the hour (Sir, 2026-11-05).
-        One SerpAPI search per work: it runs before the first slow catalogue sweep (it found a living painter
-        in seconds where sweeps spent half an hour), or last if no round got that far."""
-        if self._lens_done or self.web is None or not hasattr(self.web, "serpapi_lens"):
-            return None
-        self._lens_done = True
-        log.info("  tier google_lens (%s)", why)
+    def _lens_refs(self, fut) -> list:
+        """The Lens slot's answer, with the provider and any failed providers kept for the run record."""
         try:
-            batch = self._score(img, img_vec, self.web.serpapi_lens(self.web.temp_public_url(img)), "google lens", seen)
-        except Exception as e:
-            log.warning("google lens failed: %s", e)
-            return None
-        matches += batch
-        hits = [m for m in batch if m.confirmed]
-        if hits:
-            ident = self._finish("google_lens", hits, matches, rounds, rnd, cands, sig, summary)
-            if ident.status == "confirmed":
-                return ident
-            rounds.pop()
-        return None
+            prov, refs, errs = fut.result()
+        except Exception as e:                  # LensSlotUnavailable: recorded as an error row, and alerted
+            self._lens_log["errors"].append(str(e)[:300])
+            raise
+        self._lens_log["providers"].append(prov)
+        self._lens_log["errors"] += errs
+        return refs
 
     def _vision_tier(self, img, img_vec, why, seen, matches, rounds, rnd, cands, sig, summary) -> Identification | None:
         """Web detection: one billed call per image, ever (the response is cached on disk). Its pages are

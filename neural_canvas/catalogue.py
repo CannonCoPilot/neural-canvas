@@ -21,10 +21,12 @@ the wall, so the run's failure record says what would open it.
 """
 from __future__ import annotations
 
+import functools
 import html
 import json
 import logging
 import re
+import time
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -48,8 +50,13 @@ UNAVAILABLE = {
     "Norman Rockwell Museum": "collection.nrm.org answers every automated request with a bot challenge (2026-11-05)",
 }
 # Smithsonian art units. The API ignores its fq filter; a fielded unit_code term inside q filters (2026-11-05).
+# With it, q is a strict AND of every word: "unit_code:(..) AND James McNeill Whistler The Riva Sunset Red and Gold"
+# matches nothing, so the title goes in as an OR of its words beside the surname (2026-11-06).
 SI_UNITS = "SAAM OR NPG OR HMSG OR NMAA OR CHNDM OR NMAfA"   # NMAA = Freer|Sackler (FSG matches nothing)
-ARTIC_FIELDS = "id,title,alt_titles,artist_title,artist_display,date_display,medium_display,style_title,image_id"
+LUCENE_WORDS = {"and", "or", "not", "to"}
+MET_API = "https://collectionapi.metmuseum.org/public/collection"
+MET_IDS_MAX = 5000      # v1.1 pages at 500 at most; an artist or title past this is read to here and logged
+ARTIC_FIELDS = "id,title,alt_titles,artist_title,artist_display,date_display,medium_display,style_title,image_id,thumbnail"
 LUX = "https://lux.collections.yale.edu"     # Yale: Linked Art records, Yale-provided metadata CC0
 TRANSLATE_PROMPT = """Artwork titles, possibly in German, French, Dutch, Italian, Spanish or another language:
 {titles}
@@ -167,6 +174,14 @@ def _surname(name: str) -> str:
     return w[-1] if w else ""
 
 
+def _one(v) -> dict:
+    """A Linked Art node that may come as an object or as a list of them (the Rijksmuseum gives a timespan
+    both ways: Bouguereau's records crashed the adapter, 2026-11-06)."""
+    if isinstance(v, list):
+        v = next((x for x in v if isinstance(x, dict)), {})
+    return v if isinstance(v, dict) else {}
+
+
 def _years(s: str) -> tuple[int, int] | None:
     """The span a date string covers: '1886–1894' -> (1886, 1894); '1860s' -> (1860, 1869); '19th century' -> (1800, 1899)."""
     t = fold(s)
@@ -237,6 +252,46 @@ def institution(url_or_source: str) -> str:
     return reg[0] if len(reg) > 1 else host        # the name without its country domain: meisterdrucke.us = .uk
 
 
+class SourceError(RuntimeError):
+    """A source that could not answer, or whose candidate records could not be compared with the picture. An
+    empty reply is an error, never a no-match (Sir, 2026-11-06): the run's consulted list and the benchmark show it."""
+
+
+def source(name: str):
+    """A museum adapter's no-match is believed only when every candidate record it found was compared with the
+    picture. A record served without an image, or an image that would not load, leaves the answer unknown: the
+    adapter raises SourceError naming them instead of returning [] (Sir, 2026-11-06; every museum step of the
+    2026-11-05 benchmark returned 0 with no error, AIC's images were behind a rate challenge)."""
+    def wrap(fn):
+        @functools.wraps(fn)
+        def run(self, *a, **k):
+            outer, self._unchecked = getattr(self, "_unchecked", None), []
+            try:
+                out = fn(self, *a, **k)
+                if not out and self._unchecked:
+                    lost = list(dict.fromkeys(self._unchecked))
+                    raise SourceError(f"{name}: no record matched the picture, and {len(lost)} candidate(s) could not be "
+                                      f"compared with it: " + "; ".join(lost[:5])[:500])
+                return out
+            finally:
+                self._unchecked = outer
+        return run
+    return wrap
+
+
+def _copy_after(title: str, surname: str) -> bool:
+    """A reproduction names its model: "Chromolithograph after Jan van Eyck" (Wellcome), "Am Attersee nach Gustav
+    Klimt" (MAK). Its picture matches; its date, medium and holder are the copy's, never the work's (2026-11-06)."""
+    return bool(surname) and bool(re.search(rf"\b(?:after|nach|naar|apres)\s+(?:\w+\s+){{0,3}}{re.escape(surname)}\b",
+                                            fold(title)))
+
+
+def _title_words(title: str, drop: str = "") -> list[str]:
+    """A title's significant words, safe inside a Lucene query (no operators, no punctuation)."""
+    skip = set(fold(drop).split()) | LUCENE_WORDS
+    return [w for w in dict.fromkeys(fold(title).split()) if len(w) > 2 and w not in STOP and w not in skip][:8]
+
+
 @dataclass
 class Record:
     source: str                  # one vote per source: "wikidata", "artic", "met", "cleveland", or a curated host
@@ -285,11 +340,14 @@ class Catalogue:
         self.s.headers["User-Agent"] = UA
         self.s.headers["AIC-User-Agent"] = UA       # the Art Institute asks callers to name themselves
         self.consulted: list[str] = []
+        self._unchecked: list[str] | None = None     # inside a @source adapter: candidates never compared
 
     # ── is this record's picture the input? ───────────────────────────────
-    def _verify(self, img: Image.Image, img_vec, url: str) -> tuple[bool, float, int]:
+    def _verify(self, img: Image.Image, img_vec, url: str, what: str = "") -> tuple[bool, float, int]:
         im = fetch_image(url, UA) if url else None
         if im is None:
+            if getattr(self, "_unchecked", None) is not None:     # unknown, not a no-match (Sir, 2026-11-06)
+                self._unchecked.append(f"{what or url} ({'image would not load' if url else 'no image served'})")
             return False, 0.0, 0
         sim = float(self.emb.similarity(img_vec, self.emb.embed([im]))[0])
         if sim < self.t["id_clip_min"] - 0.08:
@@ -306,12 +364,12 @@ class Catalogue:
     def _get(self, url: str, **params) -> dict:
         try:
             r = self.s.get(url, params=params, timeout=20)
-            if r.status_code != 200:
-                log.info("catalogue %s -> HTTP %s", url[:80], r.status_code)
+            if r.status_code != 200:            # a linked lookup, not a search: logged where it shows (2026-11-06)
+                log.warning("catalogue %s -> HTTP %s", url[:80], r.status_code)
                 return {}
             return r.json()
         except Exception as e:
-            log.info("catalogue %s failed: %s", url[:80], e)
+            log.warning("catalogue %s failed: %s", url[:80], e)
             return {}
 
     def keys(self) -> dict:
@@ -328,16 +386,49 @@ class Catalogue:
                 pass
         return self._apikeys
 
-    def _keyed(self, url: str, key: str, **params) -> dict:
-        try:
-            r = self.s.get(url, params=params, timeout=20)
-            if r.status_code != 200:
-                log.info("catalogue %s -> HTTP %s", url[:60], r.status_code)
-                return {}
-            return r.json()
-        except Exception as e:      # the key travels in the query string: never let it reach a log
-            log.info("catalogue %s failed: %s", url[:60], str(e).replace(key, "***"))
-            return {}
+    def _key(self, name: str, label: str) -> str:
+        key = self.keys().get(name)
+        if not key:      # a missing key is a wall to open, never a quiet skip (Sir, 2026-11-06)
+            path = (self.cfg["sources"].get("api_keys_path") if self.cfg else "") or "(sources.api_keys_path unset)"
+            raise SourceError(f"{label}: no '{name}' key in {path}")
+        return key
+
+    def _api(self, url: str, expect: str, method: str = "GET", body: dict | None = None, gone: tuple = (),
+             **params) -> dict:
+        """A museum API's JSON reply. Unreachable, refused (HTTP != 200 after two paced retries on 429/5xx), not
+        JSON, or without the field every reply of that API carries: SourceError, never {} (Sir, 2026-11-06: an
+        empty reply is an error, never a no-match). Keys travel in query strings: they never reach a message."""
+        secrets = [v for v in self.keys().values() if len(v) > 6]
+        def clean(s: str) -> str:
+            for k in secrets:
+                s = s.replace(k, "***")
+            return s
+        err = ""
+        for attempt in range(3):
+            try:
+                r = self.s.request(method, url, params=params or None, json=body, timeout=30)
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+            else:
+                if r.status_code == 200:
+                    try:
+                        d = r.json()
+                    except ValueError:
+                        raise SourceError(clean(f"{url[:80]}: HTTP 200 but not JSON ({r.headers.get('content-type', '')})"))
+                    if isinstance(d, dict) and expect in d:
+                        return d
+                    raise SourceError(clean(f"{url[:80]}: reply without '{expect}': {str(d)[:160]}"))
+                if r.status_code in gone:          # the caller's "no such record" (a withdrawn object): {}
+                    log.warning("catalogue %s -> HTTP %s: no such record", url[:80], r.status_code)
+                    return {}
+                err = f"HTTP {r.status_code} {r.text[:160]}"
+                if r.status_code != 429 and r.status_code < 500:
+                    break
+                wait = r.headers.get("Retry-After", "")
+                time.sleep(min(float(wait), 30) if wait.isdigit() else 2.0 * (attempt + 1))
+                continue
+            time.sleep(2.0 * (attempt + 1))
+        raise SourceError(clean(f"{method} {url[:80]}: {err}"))
 
     def _sparql(self, endpoint: str, query: str) -> list[dict]:
         try:
@@ -419,41 +510,64 @@ class Catalogue:
                       "" if non_title(title) else title, [], re.sub(r"\s+", " ", val("Artist"))[:120], "",
                       val("DateTimeOriginal")[:40], "", "", "", info.get("thumburl", ""), verified_by, text=text)
 
-    def _europeana(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
-        key = self.keys().get("europeana")
-        if not key:
-            return []
+    @source("Europeana")
+    def _europeana(self, img, img_vec, queries: list[str], surname: str, titles: list[str] = ()) -> list[Record]:
+        """Europeana's search ANDs every word, so a whole "artist title" phrase rarely matches: the creator field
+        AND any of the title's words first, then the phrases (2026-11-06)."""
+        key = self._key("europeana", "Europeana")
         self.consulted.append("Europeana")
-        for q in queries[:4]:
-            d = self._keyed("https://api.europeana.eu/record/v2/search.json", key, wskey=key, query=q, rows=12,
-                            media="true", qf="TYPE:IMAGE")
+        fielded = [f"who:{surname} AND ({' OR '.join(ws)})" for t in (titles or queries)[:4]
+                   for ws in [_title_words(t, surname)] if ws and surname]
+        seen: set[str] = set()
+        for q in list(dict.fromkeys(fielded + list(queries[:4]))):
+            d = self._api("https://api.europeana.eu/record/v2/search.json", "success", wskey=key, query=q, rows=12,
+                          media="true", qf="TYPE:IMAGE")
             for x in d.get("items") or []:
-                creator = " ".join(x.get("dcCreator") or [])
-                if surname not in fold(creator):
+                # creators come as names, agent URIs or both; a record naming only URIs is judged by its picture
+                names = [c for c in [*(x.get("dcCreator") or []), *((x.get("dcCreatorLangAware") or {}).get("en") or [])]
+                         if not c.startswith("http")]
+                creator = " ".join(dict.fromkeys(names))
+                title = (x.get("title") or [""])[0]
+                desc = x.get("dcDescription") or ""                     # titles come cut short ("after Jan van Ey"):
+                desc = desc[0] if isinstance(desc, list) and desc else str(desc)   # the description names the model
+                if x.get("id") in seen or (names and surname not in fold(creator)) or _copy_after(f"{title} {desc[:300]}", surname):
                     continue
-                url = (x.get("edmIsShownBy") or x.get("edmPreview") or [""])[0]
-                ok, sim, inl = self._verify(img, img_vec, url)
+                seen.add(x.get("id"))
+                # the provider's image, else Europeana's own thumbnail of it (the Belvedere answers 403 to us; its
+                # thumbnail loads: 2026-11-06)
+                shown, preview = (x.get("edmIsShownBy") or [""])[0], (x.get("edmPreview") or [""])[0]
+                url = next((u for u in (shown, preview) if u and fetch_image(u, UA) is not None), "")
+                if not url:
+                    self._unchecked.append(f"Europeana {x.get('id', '')} (image would not load)")
+                    continue
+                ok, sim, inl = self._verify(img, img_vec, url, f"Europeana {x.get('id', '')}")
                 if ok:
                     prov = (x.get("dataProvider") or ["Europeana"])[0]
-                    return [Record(f"europeana:{fold(prov)}", x.get("guid", ""), (x.get("title") or [""])[0], [], creator,
+                    others = [t for ts in (x.get("dcTitleLangAware") or {}).values() for t in ts if t != title]
+                    return [Record(f"europeana:{fold(prov)}", x.get("guid", ""), title, list(dict.fromkeys(others)), creator,
                                    "", (x.get("year") or [""])[0], "", prov, "", url, "image", sim, inl)]
         return []
 
+    @source("Harvard Art Museums")
     def _harvard(self, img, img_vec, queries: list[str], surname: str, titles: list[str] = ()) -> list[Record]:
-        key = self.keys().get("harvard")
-        if not key:
-            return []
+        key = self._key("harvard", "Harvard Art Museums")
         self.consulted.append("Harvard Art Museums")
         url = "https://api.harvardartmuseums.org/object"
         # person + title together is a fielded AND (either alone does not filter); free text q is the fallback
-        fielded = (self._keyed(url, key, apikey=key, person=surname, title=t, size=10) for t in titles[:4] if surname)
-        plain = (self._keyed(url, key, apikey=key, q=q, size=10, hasimage=1) for q in queries[:4])
+        fielded = (self._api(url, "records", apikey=key, person=surname, title=t, size=10) for t in titles[:4] if surname)
+        plain = (self._api(url, "records", apikey=key, q=q, size=10, hasimage=1) for q in queries[:4])
+        seen: set = set()
         for d in chain(fielded, plain):
             for x in d.get("records") or []:
                 people = " ".join(p.get("name", "") for p in x.get("people") or [])
-                if surname not in fold(people) or not x.get("primaryimageurl"):
+                if x.get("id") in seen or surname not in fold(people):
                     continue
-                ok, sim, inl = self._verify(img, img_vec, x["primaryimageurl"] + "?height=800")
+                seen.add(x.get("id"))
+                if not x.get("primaryimageurl"):        # a title match served without a picture cannot be checked
+                    if any(same_title(t, x.get("title", "")) for t in titles):
+                        self._unchecked.append(f"Harvard {x.get('id')} '{x.get('title', '')}' (no image served)")
+                    continue
+                ok, sim, inl = self._verify(img, img_vec, x["primaryimageurl"] + "?height=800", f"Harvard {x.get('id')}")
                 if ok:
                     bio = next((p.get("displaydate", "") for p in x.get("people") or [] if surname in fold(p.get("name", ""))), "")
                     former = [t.get("title", "") for t in x.get("titles") or [] if t.get("title") and t.get("title") != x.get("title")]
@@ -462,18 +576,23 @@ class Catalogue:
                                    x["primaryimageurl"], "image", sim, inl)]
         return []
 
-    def _smithsonian(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
+    @source("Smithsonian Open Access")
+    def _smithsonian(self, img, img_vec, queries: list[str], surname: str, titles: list[str] = ()) -> list[Record]:
         """Smithsonian Open Access: the art museums (American Art, Portrait Gallery, Hirshhorn, Freer|Sackler,
-        Cooper Hewitt, African Art). Images come from its own image server at 800 px."""
-        key = self.keys().get("smithsonian")
-        if not key:
-            return []
+        Cooper Hewitt, African Art). Images come from its own image server at 800 px. The unit filter makes q a
+        strict AND, so: surname AND any word of each title, then the surname alone (SI_UNITS, 2026-11-06)."""
+        key = self._key("smithsonian", "Smithsonian Open Access")
         self.consulted.append("Smithsonian Open Access")
-        for q in queries[:4]:
-            q = re.sub(r"[^\w\s'’]", " ", q)          # its query parser reads : ( ) " - as syntax
-            d = self._keyed("https://api.si.edu/openaccess/api/v1.0/search", key, api_key=key,
-                            q=f"unit_code:({SI_UNITS}) AND {q}", rows=10)
+        sur = fold(surname).replace(" ", "")
+        qs = [f"{sur} AND ({' OR '.join(ws)})" for t in (titles or queries)[:4] for ws in [_title_words(t, surname)] if ws]
+        seen: set = set()
+        for q in list(dict.fromkeys(qs + [sur]))[:5] if sur else []:
+            d = self._api("https://api.si.edu/openaccess/api/v1.0/search", "response", api_key=key,
+                          q=f"unit_code:({SI_UNITS}) AND {q}", rows=10)
             for x in (d.get("response") or {}).get("rows") or []:
+                if x.get("id") in seen:
+                    continue
+                seen.add(x.get("id"))
                 c = x.get("content") or {}
                 ft, dn = c.get("freetext") or {}, c.get("descriptiveNonRepeating") or {}
                 def first(k, label=None):
@@ -484,7 +603,7 @@ class Catalogue:
                 if surname not in fold(maker) or not media:
                     continue
                 url = f"https://ids.si.edu/ids/deliveryService?id={media[0]}&max=800"
-                ok, sim, inl = self._verify(img, img_vec, url)
+                ok, sim, inl = self._verify(img, img_vec, url, f"Smithsonian {x.get('id', '')}")
                 if ok:
                     artist, _, bio = maker.partition(", ")         # "Winslow Homer, born Boston, MA 1836-died ..."
                     title = x.get("title") or (dn.get("title") or {}).get("content", "")
@@ -506,11 +625,11 @@ class Catalogue:
                       if i.get("type") == "Name" and "Primary Title" in cls(i)), x.get("_label", ""))
         others = [i.get("content", "") for i in x.get("identified_by") or []
                   if i.get("type") == "Name" and "Primary Title" not in cls(i) and i.get("content") != title]
-        prod = x.get("produced_by") or {}
+        prod = _one(x.get("produced_by"))
         makers = [a.get("_label", "") for part in [prod, *(prod.get("part") or [])] for a in part.get("carried_out_by") or []]
         maker = re.sub(r"^[A-Z][a-z ]+:\s*", "", makers[0]) if makers else ""   # "Artist: Name (American, 1834–1903)"
         artist, _, bio = maker.partition(" (")
-        date = next((i.get("content", "") for i in (prod.get("timespan") or {}).get("identified_by") or []), "")
+        date = next((i.get("content", "") for i in _one(prod.get("timespan")).get("identified_by") or []), "")
         refs = x.get("referred_to_by") or []
         medium = next((r.get("content", "") for r in refs if "Medium" in cls(r)), "")
         owner = next((o.get("_label", "") for o in x.get("current_owner") or []), "")
@@ -520,22 +639,28 @@ class Catalogue:
         return Record("yale", x["id"], title, others, artist, bio.rstrip(")"), date, medium, owner, "", image, "image",
                       text=text)
 
-    def _yale(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
+    @source("Yale University (LUX)")
+    def _yale(self, img, img_vec, queries: list[str], surname: str, titles: list[str] = ()) -> list[Record]:
         """Yale (LUX): the Art Gallery, the Center for British Art and the libraries. Yale-provided metadata is
-        CC0 (LUX Open Access page, read 2026-11-05); one lookup per work, never a harvest."""
+        CC0 (LUX Open Access page, read 2026-11-05); one lookup per work, never a harvest. Only object records
+        (a /data/digital/ stub is an image file, not a work: 2026-11-06)."""
         self.consulted.append("Yale University (LUX)")
         seen: set[str] = set()
         for q in queries[:3]:
-            d = self._get(f"{LUX}/api/search/item", q=json.dumps({"text": q}))
+            d = self._api(f"{LUX}/api/search/item", "type", q=json.dumps({"text": q}))   # an empty page has no orderedItems
             for stub in (d.get("orderedItems") or [])[:6]:
                 u = stub.get("id", "")
-                if not u.startswith(LUX) or u in seen:
+                if not u.startswith(f"{LUX}/data/object/") or u in seen:
                     continue
                 seen.add(u)
-                rec = self._lux_rec(self._get(u))
-                if not rec or surname not in fold(rec.artist) or not rec.image_url:
+                rec = self._lux_rec(self._api(u, "id"))
+                if not rec or surname not in fold(rec.artist):
                     continue
-                ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url)
+                if not rec.image_url:
+                    if any(same_title(t, x) for t in titles for x in rec.all_titles()):
+                        self._unchecked.append(f"Yale {u.rsplit('/', 1)[-1]} '{rec.title}' (no image served)")
+                    continue
+                ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url, f"Yale {u.rsplit('/', 1)[-1]}")
                 if ok:
                     return [rec]
         return []
@@ -552,14 +677,23 @@ class Catalogue:
         names = [n for n in x.get("identified_by") or [] if n.get("type") == "Name" and n.get("content")]
         pref = [n for n in names if AAT_PREFERRED in ids(n)] or names
         title = next((n["content"] for n in pref if en(n)), pref[0]["content"] if pref else "")
-        prod = x.get("produced_by") or {}
+        prod = _one(x.get("produced_by"))
         def name(maker):          # notation is a list of language forms, or a single one
             notes = maker.get("notation") or []
             notes = [notes] if isinstance(notes, dict) else notes
             return next((n.get("@value", "") for n in notes if n.get("@language") == "en"), notes[0].get("@value", "") if notes else "")
-        makers = [name(a) for part in [prod, *(prod.get("part") or [])] for a in part.get("carried_out_by") or []]
+        parts = [prod, *(p for p in prod.get("part") or [] if isinstance(p, dict))]
+        makers = [name(a) for part in parts for a in part.get("carried_out_by") or []]
+        # most records name a maker only by an attribute assignment (a bare person id) and an English statement
+        # on the part: "printmaker: Kobayashi Kiyochika (mentioned on object), Japan". Read the name from it,
+        # publishers last (every Kiyochika and Zeshin print read as artistless and was skipped, 2026-11-06)
+        said = [(re.sub(r"\s*\(.*$|,.*$", "", c.split(":", 1)[-1]).strip(), c.split(":", 1)[0].strip().lower() if ":" in c else "")
+                for part in parts if part.get("assigned_by") for r in part.get("referred_to_by") or []
+                if en(r) for c in [str(r.get("content", ""))] if c]
+        makers += [n for n, role in sorted(said, key=lambda s: s[1] in ("publisher", "printer")) if n]
+        makers = list(dict.fromkeys(m for m in makers if m))
         artist = next((m for m in makers if surname and surname in fold(m)), makers[0] if makers else "")
-        stamps = (prod.get("timespan") or {}).get("identified_by") or []
+        stamps = _one(prod.get("timespan")).get("identified_by") or []
         date = next((t.get("content", "") for t in stamps if en(t)), stamps[0].get("content", "") if stamps else "")
         refs = x.get("referred_to_by") or []
         medium = next((r.get("content", "") for r in refs if AAT_MATERIALS in ids(r) and en(r)), "")
@@ -571,6 +705,7 @@ class Catalogue:
         return Record("rijksmuseum.nl", x["id"], title, others, artist, "",
                       date, medium, "Rijksmuseum", "", image, "image", text=text)
 
+    @source("Rijksmuseum")
     def _rijksmuseum(self, img, img_vec, titles: list[str], artist: str, surname: str) -> list[Record]:
         """Rijksmuseum data services (keyless Linked Art; the old key API is retired): artist AND title,
         then the artist's works with images."""
@@ -580,16 +715,20 @@ class Catalogue:
         seen: set[str] = set()
         searches = [{"creator": artist, "title": t} for t in titles[:4]] + [{"creator": artist, "imageAvailable": "true"}]
         for params in searches:
-            d = self._get("https://data.rijksmuseum.nl/search/collection", **params)
+            d = self._api("https://data.rijksmuseum.nl/search/collection", "type", **params)   # empty: no orderedItems
             for stub in (d.get("orderedItems") or [])[:6]:
                 u = stub.get("id", "")
                 if u in seen:
                     continue
                 seen.add(u)
-                rec = self._rijks_rec(self._get(u), surname)
-                if not rec or surname not in fold(rec.artist) or not rec.image_url:
+                rec = self._rijks_rec(self._api(u, "id"), surname)
+                if not rec or surname not in fold(rec.artist):
                     continue
-                ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url)
+                if not rec.image_url:
+                    if any(same_title(t, x) for t in titles for x in rec.all_titles()):
+                        self._unchecked.append(f"Rijksmuseum {u.rsplit('/', 1)[-1]} '{rec.title}' (no image served)")
+                    continue
+                ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url, f"Rijksmuseum {u.rsplit('/', 1)[-1]}")
                 if ok:
                     return [rec]
         return []
@@ -603,10 +742,12 @@ class Catalogue:
         return not self.wiki.claim_year(ent, "P570"), aq
 
     # ── Wikidata ───────────────────────────────────────────────────────────
+    @source("Wikidata")
     def _wikidata_items(self, img, img_vec, artist: str, ident: dict, titles: list[str] = ()) -> list[str]:
         """Catalogue items of THIS picture: the identification's own item; else the artist's works whose
         Wikidata title matches a lead (one listing query, seconds), then the cached catalogue's nearest by
-        embedding. Each is verified on its picture. A run never sweeps a catalogue cold (Sir, 2026-11-05)."""
+        embedding. Each is verified on its picture. A run never sweeps a catalogue cold (Sir, 2026-11-05), so
+        works not yet embedded were never compared: with no match that is an error, not a no-match (2026-11-06)."""
         if ident.get("wikidata"):
             return [ident["wikidata"]]
         qid = self.wiki.find_artist(artist) if artist else None
@@ -618,9 +759,13 @@ class Catalogue:
         near = [works[int(i)] for i in np.argsort(-(vecs @ img_vec))[:4]] if works else []
         out = []
         for w in list({w["qid"]: w for w in named + near}.values()):
-            ok, sim, inl = self._verify(img, img_vec, file_thumb(w["file"], 500))
+            ok, sim, inl = self._verify(img, img_vec, file_thumb(w["file"], 500), f"Wikidata {w['qid']}")
             if ok:
                 out.append(w["qid"])
+        cached = {w["qid"] for w in works} | {w["qid"] for w in named}
+        if len({w["qid"] for w in listing} - cached):
+            self._unchecked.append(f"{len({w['qid'] for w in listing} - cached)} of {artist}'s {len(listing)} Wikidata "
+                                   f"works not embedded yet ({qid}; the background indexer embeds them)")
         return out
 
     def _wikidata_record(self, qid: str) -> tuple[Record, dict]:
@@ -698,8 +843,11 @@ class Catalogue:
     @staticmethod
     def _artic_rec(x: dict, verified_by: str) -> Record:
         bio = (x.get("artist_display") or "").split("\n", 1)[-1]
-        # 843 px is the Art Institute's standard derivative; other widths are refused (HTTP 403)
-        img = f"https://www.artic.edu/iiif/2/{x['image_id']}/full/843,/0/default.jpg" if x.get("image_id") else ""
+        # 843 px is the Art Institute's standard derivative; widths off its allowlist are refused (HTTP 403), and so
+        # is any width past the original's: a 526 px drawing is served at 400 or 200 only (6 works, 2026-11-06)
+        full = int((x.get("thumbnail") or {}).get("width") or 843)
+        w = next((w for w in (843, 400, 200) if w <= full), 200)
+        img = f"https://www.artic.edu/iiif/2/{x['image_id']}/full/{w},/0/default.jpg" if x.get("image_id") else ""
         return Record("artic", f"https://www.artic.edu/artworks/{x['id']}", x.get("title", ""), x.get("alt_titles") or [],
                       x.get("artist_title") or "", bio, x.get("date_display") or "", x.get("medium_display") or "",
                       "Art Institute of Chicago", x.get("style_title") or "", img, verified_by)
@@ -707,20 +855,16 @@ class Catalogue:
     def _artic_post(self, artist: str, title: str) -> dict:
         """The Art Institute's fielded search: artist AND title must both match (plain q ranks the
         artist's other works first)."""
-        try:
-            r = self.s.post("https://api.artic.edu/api/v1/artworks/search", timeout=20, json={
-                "size": 5, "fields": ARTIC_FIELDS.split(","),
-                "query": {"bool": {"must": [{"match": {"artist_title": artist}}, {"match": {"title": title}}]}}})
-            return r.json() if r.status_code == 200 else {}
-        except Exception as e:
-            log.info("artic fielded search failed: %s", e)
-            return {}
+        return self._api("https://api.artic.edu/api/v1/artworks/search", "data", "POST", {
+            "size": 5, "fields": ARTIC_FIELDS.split(","),
+            "query": {"bool": {"must": [{"match": {"artist_title": artist}}, {"match": {"title": title}}]}}})
 
+    @source("Art Institute of Chicago")
     def _artic_search(self, img, img_vec, queries: list[str], surname: str,
                       artist: str = "", titles: tuple[str, ...] | list[str] = ()) -> list[Record]:
-        out, seen = [], set()
-        precise = [self._artic_post(artist, t) for t in titles[:4]] if artist else []
-        plain = (self._get("https://api.artic.edu/api/v1/artworks/search", q=q, limit=10, fields=ARTIC_FIELDS)
+        seen: set = set()
+        precise = (self._artic_post(artist, t) for t in titles[:4]) if artist else ()
+        plain = (self._api("https://api.artic.edu/api/v1/artworks/search", "data", q=q, limit=10, fields=ARTIC_FIELDS)
                  for q in queries)
         for d in chain(precise, plain):          # plain queries run only if the fielded ones find nothing
             for x in d.get("data") or []:
@@ -728,49 +872,87 @@ class Catalogue:
                     continue
                 seen.add(x["id"])
                 rec = self._artic_rec(x, "image")
-                ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url)
+                if not rec.image_url:
+                    if any(same_title(t, y) for t in titles for y in rec.all_titles()):
+                        self._unchecked.append(f"Art Institute {x['id']} '{rec.title}' (no image served)")
+                    continue
+                # its image host answers a burst with a Cloudflare challenge: that image is unchecked, never a no-match
+                ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url, f"Art Institute {x['id']}")
                 if ok:
                     return [rec]
-        return out
+        return []
 
-    def _met(self, oid: str | int, verified_by: str) -> Record | None:
-        d = self._get(f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{oid}")
+    def _met(self, oid: str | int, verified_by: str, strict: bool = False) -> Record | None:
+        url = f"{MET_API}/v1/objects/{oid}"
+        # its search lists withdrawn objects the object API calls "Not a valid object" (404): no record, not a wall
+        d = self._api(url, "objectID", gone=(404,)) if strict else self._get(url)
         if not d.get("title"):
             return None
         return Record("met", d.get("objectURL") or f"https://www.metmuseum.org/art/collection/search/{oid}", d["title"], [],
                       d.get("artistDisplayName", ""), d.get("artistDisplayBio", ""), d.get("objectDate", ""), d.get("medium", ""),
                       "The Metropolitan Museum of Art", "", d.get("primaryImageSmall") or "", verified_by)
 
+    def _met_ids(self, q: str, most: int = MET_IDS_MAX, **flags) -> list[int]:
+        """Object IDs a Met search returns. The v1 search was retired on 2026-10-01; v1.1 pages (100 IDs by default,
+        500 at most), so one bare call saw 100 of Whistler's 569 works and 100 of 205 "Mouse" titles (2026-11-06)."""
+        ids: list[int] = []
+        while len(ids) < most:
+            d = self._api(f"{MET_API}/v1.1/search", "total", q=q, offset=len(ids), limit=min(500, most - len(ids)), **flags)
+            page = d.get("objectIDs") or []
+            ids += page
+            if not page or len(ids) >= d["total"]:
+                return ids
+        if most >= MET_IDS_MAX:          # a whole read cut short (a plain query asks for its first 5 on purpose)
+            log.warning("met search %r: read the first %d of its matches", q, len(ids))
+        return ids
+
+    @source("Metropolitan Museum")
     def _met_search(self, img, img_vec, queries: list[str], surname: str, artist: str = "",
                     titles: list[str] = ()) -> list[Record]:
-        api = "https://collectionapi.metmuseum.org/public/collection/v1.1/search"
+        """The Met serves an image only for public-domain works; a title match without one is unchecked (Signac's
+        'Le Pont des Arts', 396898, 2026-11-06), so a no-match there is an error, never an empty list."""
         # the Met honours one field flag per call: artist-only AND title-only, intersected here
         both = []
-        by_artist = set(self._get(api, q=artist, artistOrCulture="true").get("objectIDs") or []) if artist and titles else set()
+        by_artist = set(self._met_ids(artist, artistOrCulture="true")) if artist and titles else set()
         for t in titles[:3] if by_artist else []:
-            ids = [i for i in self._get(api, q=t, title="true").get("objectIDs") or [] if i in by_artist]
+            ids = [i for i in self._met_ids(t, title="true") if i in by_artist]
             if ids:
                 both.append(ids)
-        plain = ((self._get(api, q=q).get("objectIDs") or []) for q in queries[:3])
+        plain = (self._met_ids(q, 5) for q in queries[:3])
+        seen: set = set()
         for ids in chain(both, plain):
             for oid in ids[:5]:
-                rec = self._met(oid, "image")
-                if not rec or surname not in fold(rec.artist) or not rec.image_url:
-                    continue                      # the Met's records rarely carry an image now: unverifiable
-                ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url)
+                if oid in seen:
+                    continue
+                seen.add(oid)
+                rec = self._met(oid, "image", strict=True)
+                if not rec or surname not in fold(rec.artist):
+                    continue
+                if not rec.image_url:
+                    if any(same_title(t, rec.title) for t in titles):
+                        self._unchecked.append(f"Met {oid} '{rec.title}' (no image served: not public domain)")
+                    continue
+                ok, rec.clip, rec.inliers = self._verify(img, img_vec, rec.image_url, f"Met {oid}")
                 if ok:
                     return [rec]
         return []
 
-    def _cleveland_search(self, img, img_vec, queries: list[str], surname: str) -> list[Record]:
-        for q in queries:
-            d = self._get("https://openaccess-api.clevelandart.org/api/artworks/", q=q, limit=8)
+    @source("Cleveland Museum of Art")
+    def _cleveland_search(self, img, img_vec, queries: list[str], surname: str, titles: list[str] = ()) -> list[Record]:
+        """Fielded artist AND title first (its q ranks an artist's 8 best-known works, so a lesser one never came up),
+        then q, images only (2026-11-06). Every creator is read, not just the first."""
+        api = "https://openaccess-api.clevelandart.org/api/artworks/"
+        fielded = (self._api(api, "data", artists=surname, title=t, has_image=1, limit=8) for t in titles[:4] if surname)
+        plain = (self._api(api, "data", q=q, has_image=1, limit=8) for q in queries)
+        seen: set = set()
+        for d in chain(fielded, plain):
             for x in d.get("data") or []:
-                cr = (x.get("creators") or [{}])[0]
-                if surname not in fold(cr.get("description") or ""):
+                cr = next((c for c in x.get("creators") or [] if surname in fold(c.get("description") or "")), None)
+                if cr is None or x.get("id") in seen:
                     continue
+                seen.add(x.get("id"))
                 url = ((x.get("images") or {}).get("web") or {}).get("url") or ""
-                ok, sim, inl = self._verify(img, img_vec, url)
+                ok, sim, inl = self._verify(img, img_vec, url, f"Cleveland {x.get('accession_number') or x.get('id')}")
                 if ok:
                     bio = re.sub(r"^[^(]*\(|\)\s*$", "", cr.get("description") or "")
                     return [Record("cleveland", x.get("url") or "", x.get("title", ""), [], cr.get("description", "").split(" (")[0],
@@ -1043,26 +1225,37 @@ class Catalogue:
                                   verified_by="image (Google's indexed copy)", clip=sim, inliers=inl))
         return out
 
+    @source("National Gallery of Art")
     def _nga(self, img, img_vec, titles: list[str], artist: str) -> list[Record]:
         """National Gallery of Art, from its open data (nga.gov itself is walled): the artist's NGA works whose
-        titles match a lead first, then all of them ranked by embedding; images from its IIIF server."""
+        titles match a lead first, then all of them ranked by embedding; images from its IIIF server. Works with
+        no cached embedding were never ranked, so a no-match among them is an error (the 2026-11-05 benchmark ran
+        before Corot's cache existed: 6 arbitrary works of his were compared, San Bartolomeo was not)."""
         from .nga import NGA
+        if not artist:
+            return []
         path = (self.cfg["sources"].get("nga_db") if self.cfg else "") or ""
         nga = NGA(Path(path).expanduser()) if path else None
-        if not artist or nga is None or not nga.available:
-            return []
+        if nga is None or not nga.available:
+            raise SourceError(f"National Gallery of Art: no open-data index at {path or '(sources.nga_db unset)'} "
+                              "(build it with `neural-canvas nga-index <csv dir>`)")
         self.consulted.append("National Gallery of Art (open data)")
         rows = [r for r in nga.works_by(artist) if r.get("iiif")]
         if not rows:
             return []
         titled = [r for r in rows if any(same_title(t, r["title"]) for t in titles)]
         rest = [r for r in rows if r not in titled]
+        ranked = False
         if rest and len(rest) <= 800:          # the artist's other NGA works by embedding (thumbnails cached)
             vecs = self._nga_vectors(artist, rest)
             if vecs is not None:
+                ranked = bool(np.any(vecs, axis=1).all())          # a work missing from the cache ranks as zeros
                 rest = [rest[int(i)] for i in np.argsort(-(vecs @ img_vec))]
+        if len(rest) > 6 and not ranked:
+            self._unchecked.append(f"{len(rest) - 6} of {artist}'s {len(rows)} NGA works were never ranked by the picture "
+                                   "(no embedding cache yet; the background indexer fills it)")
         for r in (titled[:6] + rest[:6]):
-            ok, sim, inl = self._verify(img, img_vec, NGA.image(r))
+            ok, sim, inl = self._verify(img, img_vec, NGA.image(r), f"NGA {r['objectid']}")
             if ok:
                 return [Record("nga", f"https://www.nga.gov/collection/art-object-page.{r['objectid']}.html", r["title"], [],
                                r["artist"], ", ".join(x for x in (r["nationality"], r["artist_dates"]) if x),
@@ -1114,9 +1307,9 @@ class Catalogue:
         """A source that fails is recorded and skipped; it never takes the run down with it."""
         try:
             return fn() or []
-        except Exception as e:
+        except Exception as e:      # the reason travels with the run: a SourceError names the wall (2026-11-06)
             log.warning("catalogue source %s failed: %s", name, e)
-            self.consulted.append(f"{name} (failed: {type(e).__name__})")
+            self.consulted.append(f"{name} (failed: {type(e).__name__}: {str(e)[:240]})")
             return []
 
     # ── gather + rule ─────────────────────────────────────────────────────
@@ -1174,7 +1367,7 @@ class Catalogue:
                     n += 1
             return recs
 
-        for qid in self._wikidata_items(img, img_vec, artist, ident, titles):
+        for qid in self._safe("wikidata", lambda: self._wikidata_items(img, img_vec, artist, ident, titles)):
             recs += from_wikidata(qid)
         over(recs)                      # the Wikidata item and every record it links to
         have = {r.source for r in recs}
@@ -1182,13 +1375,13 @@ class Catalogue:
             recs += over(self._safe("artic_search", lambda: self._artic_search(img, img_vec, queries, surname, artist, titles)))
         if "met" not in have:
             recs += over(self._safe("met_search", lambda: self._met_search(img, img_vec, queries, surname, artist, titles)))
-        recs += over(self._safe("cleveland_search", lambda: self._cleveland_search(img, img_vec, queries, surname)))
-        recs += over(self._safe("europeana", lambda: self._europeana(img, img_vec, queries, surname)))
+        recs += over(self._safe("cleveland_search", lambda: self._cleveland_search(img, img_vec, queries, surname, titles)))
+        recs += over(self._safe("europeana", lambda: self._europeana(img, img_vec, queries, surname, titles)))
         recs += over(self._safe("harvard", lambda: self._harvard(img, img_vec, queries, surname, titles)))
         if "si" not in {institution(r.source) for r in recs}:
-            recs += over(self._safe("smithsonian", lambda: self._smithsonian(img, img_vec, queries, surname)))
+            recs += over(self._safe("smithsonian", lambda: self._smithsonian(img, img_vec, queries, surname, titles)))
         if "yale" not in {institution(r.source) for r in recs}:
-            recs += over(self._safe("yale", lambda: self._yale(img, img_vec, queries, surname)))
+            recs += over(self._safe("yale", lambda: self._yale(img, img_vec, queries, surname, titles)))
         if "rijksmuseum" not in {institution(r.source) for r in recs}:
             recs += over(self._safe("rijksmuseum", lambda: self._rijksmuseum(img, img_vec, titles, artist, surname)))
         if "wikipedia.org" not in {r.source for r in recs}:
