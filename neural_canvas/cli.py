@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("build-index", help="embed the catalogues of the N painters with the most catalogued "
                                            "paintings (Wikidata, NGA, Artvee), resumable; runs search them from cache")
     p.add_argument("--top", type=int, default=500)
+    sub.add_parser("build-global-index", help="rebuild first look's cached picture index from every embedded catalogue")
     p = sub.add_parser("nga-index", help="index the National Gallery of Art open-data CSVs (objects, constituents, "
                                          "objects_constituents, published_images) into the configured SQLite file")
     p.add_argument("csv_dir")
@@ -67,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "build-index":
         from .indexer import build_top_painters
         return build_top_painters(cfg, a.top)
+    if a.cmd == "build-global-index":
+        from .global_index import GlobalIndex
+        from .references import Wikimedia
+        s = cfg["sources"]
+        print(GlobalIndex(cfg.path("state_dir")).rebuild(Wikimedia(s["commons_api"], s["wikidata_api"], s["user_agent"])))
+        return 0
     if a.cmd == "nga-index":
         from .nga import build_index
         print(build_index(Path(a.csv_dir).expanduser(), Path(cfg["sources"]["nga_db"]).expanduser()))

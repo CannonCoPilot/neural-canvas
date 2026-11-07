@@ -1190,3 +1190,23 @@ def test_a_run_never_embeds_a_cold_catalogue(tmp_path, monkeypatch):
     monkeypatch.setattr(ident, "fetch_image", lambda *a: fetched.append(a))
     works, vecs = idf._oeuvre_vectors("Q9")
     assert works == [] and fetched == []                    # nothing cached, nothing fetched: no wait
+
+
+def test_hits_are_rejudged_by_site_trust_when_reused_copies_carry_the_wrong_name():
+    from neural_canvas.identify import _site_rank
+    assert _site_rank("https://www.metmuseum.org/art/collection/search/1") == 0
+    assert _site_rank("https://artvee.com/dl/colour-harmony-and-contrast/") == 1
+    assert _site_rank("https://open.spotify.com/album/x") == 7       # album covers reuse paintings
+    assert _site_rank("https://www.pinterest.at/pin/1/") == 6
+    assert _site_rank("https://www.etsy.com/listing/1") == 5
+    assert _site_rank("https://example.org/page") == 3
+
+
+def test_a_commons_file_name_is_never_printed_as_a_title():
+    from neural_canvas.catalogue import display_title as d
+    assert d("File:Alexej von Jawlensky Landschaft mit orangener Wolke 1909.jpg", "Alexej von Jawlensky") == \
+        "Landschaft mit orangener Wolke"
+    assert d("File:László Moholy-Nagy, croce rossa e palle bianche, 1921 (museum kunstpalast, düsseldorf).jpg",
+             "László Moholy-Nagy") == "croce rossa e palle bianche"
+    assert d("File:Château de Chillon by Courbet.jpg", "Gustave Courbet") == "Château de Chillon"
+    assert d("Three Worlds", "M. C. Escher") == "Three Worlds"

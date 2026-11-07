@@ -74,7 +74,7 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     # free reverse-image arm: the local Imify service (~/Claude/Staging/verified/imify/run-imify.sh)
-    "imify": {"enabled": True, "url": "http://127.0.0.1:8890", "timeout_s": 90, "num_results": 40},
+    "imify": {"enabled": False, "url": "http://127.0.0.1:8890", "timeout_s": 90, "num_results": 40},
     # billed reverse-image fallback: Google Cloud Vision web detection, at most one call per image.
     # The key is read from the credentials file at call time; it never appears in config.
     "vision_web": {

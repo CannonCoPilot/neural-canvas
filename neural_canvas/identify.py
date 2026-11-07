@@ -17,7 +17,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from dataclasses import asdict, dataclass, field
 
@@ -26,7 +27,9 @@ from PIL import Image
 
 from .matching import Embedder, fetch_image, geometric_inliers, save_npz
 from .references import Reference, Wikimedia, file_thumb
-from .artsites import Arthur, Artvee, WalledCatalogue
+from .artsites import Artvee
+from .global_index import GlobalIndex
+from .reverse_image import ReverseImage
 from .imify import Imify
 from .style import StyleShortlist
 from .vision_web import VisionWebDetection
@@ -36,6 +39,7 @@ from .vlm import VLM
 
 log = logging.getLogger(__name__)
 WEB_UA = "Mozilla/5.0 (compatible; neural-canvas/1.0; +https://github.com/CannonCoPilot/neural-canvas)"
+YANDEX_TOP = 60
 FETCH_WORKERS = 6     # reference fetches in flight across hosts; Wikimedia and the Art Institute take one at a time
 
 PROPOSE_PROMPT = """You are a museum curator identifying an artwork from a photograph of it.
@@ -137,8 +141,11 @@ class Identifier:
         self._artist_qids: dict[str, str] = {}
         self._free_sweeps = 0
         self.artvee = Artvee(cfg.path("state_dir"), embedder)
-        self.arthur = Arthur(web) if web else None
-        self.walled = WalledCatalogue(web) if web and hasattr(web, "index_images") else None
+        # first look's free arms (Sir, 2026-11-06): Bing and Yandex visual search called directly (the Imify
+        # service filtered out good Yandex matches and its Bing engine landed on the homepage), and the
+        # cached picture index. Arthur.io, walled catalogues and Commons keyword searches are cut.
+        self.reverse = ReverseImage(self.ua) if web is not None else None
+        self.index = GlobalIndex(cfg.path("state_dir"))
         # the Lens slot (Sir, 2026-11-06): one Google Lens-type search per work from a rotating free-credit pool
         self.lens = build_pool(cfg, web, vision) if web is not None and hasattr(web, "temp_public_url") else None
 
@@ -259,93 +266,22 @@ class Identifier:
                                  required=("candidates",), max_side=1280)
 
     # ── main entry ─────────────────────────────────────────────────────────
-    def _tiers(self, cands: list[dict], swept: set[str]):
-        """Ordered (tier, query, search-fn) list for one round, cheapest and most specific first:
-        catalogued titles, web titles, description-only web, artist+description web, then the
-        expensive whole-catalogue sweeps and generic artist queries."""
-        out = []
-        for c in cands:
-            for q in (f"{c.get('title', '')} {c['artist']}", c.get("title", "")):
-                if len(q.strip()) >= 4:
-                    out.append(("commons", q, lambda q=q: self.wiki.search_files(q, 12)))
-        artists = [a for a in dict.fromkeys(c["artist"] for c in cands) if _norm(a) not in swept]
-        by_style = []
-        if artists:   # interleave the model's picks (its order) with the closest styles, then cached first
-            sty = self.emb.embed_text([f"a painting by {a}" for a in artists]) @ self._img_vec
-            styled = [artists[i] for i in np.argsort(-sty)]
-            model = [c["artist"] for c in cands if c.get("source") != "style"]
-            mixed = [a for pair in zip(model, styled) for a in pair] + model + styled
-            prio = list(dict.fromkeys(a for a in mixed if a in artists))
-            cached = [a for a in prio if self._oeuvre_cached(a)]
-            # the closest style and the model's first pick sweep first; cached catalogues (free) come next,
-            # never ahead of them (Turner and Monet, cached, once took both early slots from Aivazovsky)
-            early = list(dict.fromkeys([styled[0]] + [a for a in prio if a != styled[0]][:1]))
-            by_style = list(dict.fromkeys(early + cached + prio))
-            self._free_sweeps = len(set(early) | set(cached))
-        # only catalogues already embedded are searched in a run; a new artist's catalogue is embedded in the
-        # background after its work is identified (indexer.py), so no run waits on a cold sweep
-        by_style = [a for a in by_style if self._oeuvre_cached(a)]
-        for a in by_style[:2]:   # the two closest cached catalogues, early
-            out.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, self._img_vec)))
-        for kw in self._keywords:      # artist-agnostic on the catalogued collection: short keyword AND query
-            q = f"{kw} painting"
-            out.append(("commons", q, lambda q=q: self.wiki.search_files(q, 50)))
-        if self.web:
-            for c in cands:
-                if c.get("title"):
-                    q = f"{c['artist']} {c['title']} painting"
-                    out.append(("web", q, lambda q=q: self.web.search(q, 15)))
-            for ph in self._phrases[:5]:      # artist-agnostic: when the model cannot name the painter
-                core = re.sub(r"\b(oil|acrylic|watercolou?r)?\s*(painting|print|on canvas|artwork)\b", "", ph, flags=re.I).strip()
-                # contemporary work circulates mostly as print and shop listings: search each medium wording
-                for q in dict.fromkeys([ph, f"{core} acrylic painting", f"{core} art print"]):
-                    out.append(("web", q, lambda q=q: self.web.search(q, 25)))
-            for a in artists[:3]:
-                for ph in self._phrases[:2]:
-                    q = f"{a} {ph}"
-                    out.append(("web", q, lambda q=q: self.web.search(q, 20)))
-        # Artvee and Arthur.io (Sir, 2026-11-05): the picture in two large collections. Their captions are
-        # leads, never rulings. Titles first, then each likely artist's whole Artvee catalogue by embedding.
-        titled = [c for c in cands if c.get("title")]
-        insc = (self._signature.get("inscribed_title") or "").strip()
-        for q in dict.fromkeys([insc] + [c["title"] for c in titled]):
-            if len(q) >= 4:
-                out.append(("artvee", f"artvee: {q}", lambda q=q: self.artvee.search(q)))
-        for a in artists[:2]:
-            words = [c["title"] for c in titled if c["artist"] == a] + ([insc] if insc else [])
-            if self.arthur:
-                out.append(("arthur", f"arthur: {a}", lambda a=a, w=words: self.arthur.search(a, w)))
-            if self.walled and WalledCatalogue.sites(a):    # a walled catalogue raisonné, through Google's index
-                out.append(("walled", f"walled catalogue: {a}", lambda a=a, w=words: self.walled.search(a, w)))
-            out.append(("artvee", f"artvee catalogue: {a}", lambda a=a: self.artvee.nearest(a, self._img_vec, 6)))
-        for a in by_style[2:max(4, self._free_sweeps)]:  # four per round (cached catalogues are free)
-            out.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, self._img_vec)))
-        if self.web:
-            for a in by_style[:3]:
-                out.append(("web", f"{a} painting", lambda a=a: self.web.search(f"{a} painting", 30)))
-        swept.update(_norm(a) for a in by_style[:max(4, self._free_sweeps)])
-        return out
-
     def identify(self, img: Image.Image) -> Identification:
         calls0 = self.vision.calls if self.vision else 0
-        pool = ThreadPoolExecutor(2)      # the reverse-image arms (Imify, the Lens slot) run beside the rounds
-        self._imify_pending = None
+        pool = ThreadPoolExecutor(4)      # first look's web arms (Bing, Yandex, the Lens slot) run at once
+        self._pending: dict[str, object] = {}
         self._lens_log = {"providers": [], "errors": []}
-        self._lens_pending = None
+        self._timing: dict[str, float] = {}
         try:
             ident = self._identify(img, pool)
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
-        if self._imify_pending is not None:      # confirmed before the reverse search answered
-            ident.evidence["imify"] = "not consulted: identification confirmed first"
-            self._imify_pending.add_done_callback(lambda f: log.info(
-                "late imify result (unused): %s", f.exception() or f"{len(f.result())} candidates"))
+        for name, fut in self._pending.items():   # confirmed before these answered: their calls are spent anyway
+            ident.evidence.setdefault("unused_arms", []).append(name)
+            fut.add_done_callback(lambda f, n=name: log.info("late %s result (unused): %s", n, f.exception() or "answered"))
         ident.evidence["vision_web_calls"] = (self.vision.calls - calls0) if self.vision else 0
-        if self._lens_pending is not None:       # its credit is spent either way: say so in the run record
-            self._lens_log["unused"] = "confirmed before the Lens slot answered"
-            self._lens_pending.add_done_callback(lambda f: log.info(
-                "late lens result (unused): %s", f.exception() or f"{f.result()[0]}, {len(f.result()[1])} references"))
         ident.evidence["lens_slot"] = self._lens_log
+        ident.evidence["seconds_by_arm"] = self._timing
         sig = getattr(self, "_signature", None) or {}
         it = str(sig.get("inscribed_title") or "").strip()
         if it and sig.get("inscribed_title_legible") is True and "?" not in it:
@@ -353,164 +289,227 @@ class Identifier:
         ident.evidence["signature"] = sig
         return ident
 
-    def _identify(self, img: Image.Image, pool: ThreadPoolExecutor) -> Identification:
-        # the reverse-image arm starts now and is scored the moment it answers
-        imify_fut = pool.submit(self.imify.search_image, img) if self.imify else None
-        # the Lens slot starts now too, on every work (it found 34 of 34 test works): first look, not a fallback
-        lens_fut = pool.submit(self.lens.search, img) if self.lens else None
-        self._lens_pending = lens_fut
-        lens_retried = False
-        self._imify_pending = imify_fut
-        img_vec = self.emb.embed([img])[0]
-        self._img_vec = img_vec
-        self._img = img
-        self._phrases: list[str] = []
-        self._keywords: list[str] = []
-        self._used_phrases: set[str] = set()
-        self._used_keywords: set[str] = set()
-        self._vision_hints: dict = {}
-        self._hint_round = False
-        vision_due = bool(self.vision and self.vision.enabled)
-        max_rounds = self.t["id_max_rounds"]
-        self._signature = self.read_signature(img)
-        log.info("signature pass: %s", self._signature)
-        seen: set[int] = set()
-        refuted: list[dict] = []
-        swept: set[str] = set()
-        rounds = []
-        sig, summary = "", ""
-        rnd = -1
-        while rnd + 1 < max_rounds:
-            rnd += 1
-            prop = self._propose(img, refuted)
-            sig = sig or self._signature.get("signature_text", "") or prop.get("signature_text", "")
-            summary = summary or prop.get("visual_summary", "")
-            done = {(_norm(c["artist"]), _norm(c.get("title", ""))) for c in refuted}
-            cands = [c for c in prop.get("candidates", []) if c.get("artist")
-                     and (_norm(c["artist"]), _norm(c.get("title", ""))) not in done][:5]
-            self._phrases = [str(x) for x in (prop.get("search_phrases") or [])
-                             if str(x).strip() and str(x).strip().lower() not in self._used_phrases]
-            self._used_phrases.update(p.strip().lower() for p in self._phrases)
-            self._keywords = [str(x).strip() for x in (prop.get("subject_keywords") or [])
-                              if 2 <= len(str(x).strip()) <= 30 and str(x).strip().lower() not in self._used_keywords][:2]
-            self._used_keywords.update(k.lower() for k in self._keywords)
-            if rnd == 0:   # painters the picture *looks like*, independent of the model's memory
-                try:
-                    style = self.style.top(img_vec, 4)
-                    log.info("style shortlist: %s", style)
-                    for name, _ in style:
-                        if _norm(name) not in {_norm(c["artist"]) for c in cands}:
-                            cands.append({"artist": name, "title": "", "year": "", "confidence": 0, "source": "style"})
-                except Exception as e:
-                    log.warning("style shortlist unavailable: %s", e)
-            sa = (self._signature.get("artist") or "").strip()
-            if sa and _norm(sa) not in {_norm(c["artist"]) for c in cands}:
-                cands.append({"artist": sa, "title": "", "year": "", "confidence": 0, "source": "signature"})
-            log.info("round %d candidates: %s", rnd + 1, [(c["artist"], c.get("title")) for c in cands])
-            matches: list[Match] = []
-            pending = self._tiers(cands, swept)
-            while True:
-                if imify_fut is not None and (imify_fut.done() or not pending):
-                    f, imify_fut = imify_fut, None   # waits only when nothing else is left to try
-                    self._imify_pending = None
-                    pending.insert(0, ("imify", "reverse-image search", f.result))
-                if lens_fut is not None and (lens_fut.done() or not pending):
-                    f, lens_fut = lens_fut, None
-                    self._lens_pending = None
-                    pending.insert(0, ("google_lens", "google lens slot", lambda f=f: self._lens_refs(f)))
-                if not pending:
-                    break
-                tier, q, fn = pending.pop(0)
-                if vision_due and (tier not in ("commons", "imify")
-                                   or (tier == "oeuvre" and not self._oeuvre_cached(q.removeprefix("oeuvre:")))):
-                    # one web-detection call answers in seconds; sweeps and web searches take many minutes
-                    vision_due = False
-                    ident = self._vision_tier(img, img_vec, "before a catalogue sweep", seen, matches, rounds, rnd,
-                                              cands, sig, summary)
-                    if ident:
-                        return ident
-                log.info("  tier %s: %s", tier, q[:80])
-                try:
-                    batch = self._score(img, img_vec, fn(), q, seen)
-                except Exception as e:   # a dead source is recorded in the round, not fatal
-                    log.warning("%s search failed for %r: %s", tier, q, e)
-                    matches.append(Match(f"ERROR {tier}: {e}", "", "", 0.0, 0, False, q))
-                    continue
-                matches += batch
-                hits = [m for m in batch if m.confirmed]
-                if tier == "google_lens" and not hits and not lens_retried and self.lens:
-                    # the providers' hit rates differ (Serper found 7 of 10): one more provider before giving up
-                    lens_retried = True
-                    lens_fut = pool.submit(self.lens.search, img, set(self._lens_log["providers"])
-                                           | {e.split(":", 1)[0] for e in self._lens_log["errors"]})
-                    self._lens_pending = lens_fut
-                if hits:
-                    ident = self._finish(tier, hits, matches, rounds, rnd, cands, sig, summary)
-                    if ident.status == "confirmed":
-                        return ident
-                    rounds.pop()          # facts failed their gate; keep searching
-            near = [m for m in matches if m.clip >= self.cfg["vision_web"]["near_miss_clip"]]
-            if vision_due and (near or rnd + 1 == max_rounds):
-                vision_due = False
-                ident = self._vision_tier(img, img_vec, "near-miss" if near else "free rounds exhausted", seen, matches,
-                                          rounds, rnd, cands, sig, summary)
-                if ident:
-                    return ident
-            if self._vision_hints and rnd + 1 == max_rounds and not self._hint_round:
-                self._hint_round = True
-                max_rounds += 1   # its hints name new candidates: they get one round of their own
-            best = sorted(matches, key=lambda m: (-m.clip, -m.inliers))[:5]
-            rounds.append({"round": rnd + 1, "candidates": cands, "best_matches": [_mdict(m) for m in best],
-                           **({"vision_hints": self._vision_hints} if self._vision_hints else {})})
-            refuted += cands
-        # unresolved after every free tier: Google Images through SerpAPI (free plan), two searches at most
-        if self.web is not None and hasattr(self.web, "serpapi_images") and refuted:
-            for q in list(dict.fromkeys(f"{c['artist']} {c.get('title', '')}".strip() for c in refuted[:3]))[:2]:
-                log.info("  tier serpapi (fallback): %s", q)
-                try:
-                    batch = self._score(img, img_vec, self.web.serpapi_images(q), q, seen)
-                except Exception as e:
-                    log.warning("serpapi fallback for %r: %s", q, e)
-                    break
-                hits = [m for m in batch if m.confirmed]
-                if hits:
-                    ident = self._finish("serpapi", hits, batch, rounds, rnd, refuted[:5], sig, summary)
-                    if ident.status == "confirmed":
-                        return ident
-                    rounds.pop()
-        return Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
-                              evidence={"reason": "no reference image matched on both instruments"})
-
-    def _lens_refs(self, fut) -> list:
-        """The Lens slot's answer, with the provider and any failed providers kept for the run record."""
+    def _timed(self, name: str, fn):
+        t = time.time()
         try:
-            prov, refs, errs = fut.result()
-        except Exception as e:                  # LensSlotUnavailable: recorded as an error row, and alerted
-            self._lens_log["errors"].append(str(e)[:300])
-            raise
+            return fn()
+        finally:
+            self._timing[name] = round(self._timing.get(name, 0.0) + time.time() - t, 2)
+
+    def _try(self, tier: str, q: str, refs, img, img_vec, seen, matches, rounds, cands, sig, summary
+             ) -> Identification | None:
+        """Score one arm's references; a confirmed identification ends the search."""
+        try:
+            batch = self._timed(f"verify:{tier}", lambda: self._score(img, img_vec, refs() if callable(refs) else refs, q, seen))
+        except Exception as e:      # a dead source is recorded in the run, never read as "no match"
+            log.warning("%s search failed for %r: %s", tier, q, e)
+            matches.append(Match(f"ERROR {tier}: {str(e)[:200]}", "", "", 0.0, 0, False, q))
+            return None
+        matches += batch
+        hits = [m for m in batch if m.confirmed]
+        if not hits:
+            return None
+        for h in hits:      # an Artvee copy's caption is the page title: the artist is read from the page
+            r = h.reference_obj  # type: ignore[attr-defined]
+            if "artvee.com/dl/" in (r.page_url or "") and " by " not in (r.file_title or ""):
+                try:
+                    artist = self.artvee.page_artist(r.page_url)
+                    if artist:
+                        r.file_title = f"{re.sub(r' [-–] Artvee$', '', r.file_title or '')} by {artist}"
+                except Exception as e:
+                    log.info("artvee page %s unread: %s", r.page_url, e)
+        # verified copies are judged most trusted first: a collection's or reference's caption alone, then every
+        # copy together. Album covers, posters and shops reuse pictures under other names (withheld bench,
+        # 2026-11-06: Spotify covers of a James Ward colour study named the band; Artvee named the work).
+        groups: dict[int, list] = {}
+        for h in hits:
+            groups.setdefault(_site_rank(h.reference_obj.page_url), []).append(h)  # type: ignore[attr-defined]
+        trials = [(f"site rank {r} alone", groups[r]) for r in sorted(groups) if r <= 2 and len(groups[r]) < len(hits)]
+        for label, group in trials + [("every verified copy", hits)]:
+            ident = self._finish(tier, group, matches, rounds, len(rounds), cands, sig, summary)
+            log.info("  %s, %s (%d of %d): %s", tier, label, len(group), len(hits),
+                     "confirmed" if ident.status == "confirmed" else ident.evidence.get("reason"))
+            if ident.status == "confirmed":
+                if group is not hits:
+                    ident.evidence["hits_judged"] = f"{label} ({len(group)} of {len(hits)})"
+                return ident
+            rounds.pop()          # facts failed their gate
+        return None
+
+    def _identify(self, img: Image.Image, pool: ThreadPoolExecutor) -> Identification:
+        """FIRST LOOK on every work, all arms at once: Bing and Yandex visual search, one Google Lens search
+        from the rotating free-credit pool, our cached picture index, and the style shortlist (names only).
+        Each arm is scored the moment it answers. RESCUE runs only when first look verified nothing: one model
+        round, then free searches by the names it gives, then paid credits (Sir's plan, 2026-11-06). The model's
+        repeated guessing rounds are gone: re-guessing alone identified 0 works."""
+        img_vec = self.emb.embed([img])[0]
+        self._img_vec, self._img = img_vec, img
+        self._signature: dict = {}
+        self._bing_guess = ""
+        seen: set[int] = set()
+        matches: list[Match] = []
+        rounds: list = []
+        sig, summary = "", ""
+        arms: dict = {}
+        if self.reverse is not None:
+            arms[pool.submit(self._timed, "bing", lambda: self._bing(img))] = "bing"
+            # Yandex returns up to ~340 candidates for a famous work; its first 60 hold the copies (agent trial)
+            arms[pool.submit(self._timed, "yandex", lambda: self.reverse.yandex(img)[:YANDEX_TOP])] = "yandex"
+        if self.lens is not None:
+            arms[pool.submit(self._timed, "google_lens", lambda: self._lens_refs(self.lens.search(img)))] = "google_lens"
+        self._pending = {n: f for f, n in arms.items()}
+        try:
+            style = self._timed("style", lambda: self.style.top(img_vec, 4))
+        except Exception as e:
+            log.warning("style shortlist unavailable: %s", e)
+            style = []
+        cands = [{"artist": n, "title": "", "year": "", "confidence": 0, "source": "style"} for n, _ in style]
+        log.info("style shortlist: %s", [n for n, _ in style])
+        if self.index is not None:
+            ident = self._try("cached_index", "cached picture index",
+                              lambda: self._timed("cached_index", lambda: self.index.nearest(img_vec, 10)),
+                              img, img_vec, seen, matches, rounds, cands, sig, summary)
+            if ident:
+                return self._absorb(ident, arms, img, img_vec, seen)
+        lens_retried = False
+        while arms:
+            done, _ = wait(list(arms), return_when=FIRST_COMPLETED)
+            for f in done:
+                name = arms.pop(f)
+                self._pending.pop(name, None)
+                ident = self._try(name, name, f.result, img, img_vec, seen, matches, rounds, cands, sig, summary)
+                if ident:
+                    return self._absorb(ident, arms, img, img_vec, seen)
+                if name == "google_lens" and not lens_retried:
+                    # hit rates differ by provider (Serper found 7 of 10): one more provider before rescue
+                    lens_retried = True
+                    tried = set(self._lens_log["providers"]) | {e.split(":", 1)[0] for e in self._lens_log["errors"]}
+                    if self.lens is not None and len(tried) < len(self.lens.providers):
+                        g = pool.submit(self._timed, "google_lens", lambda: self._lens_refs(self.lens.search(img, tried)))
+                        arms[g] = "google_lens"
+                        self._pending["google_lens"] = g
+        rounds.append({"round": 1, "stage": "first look", "candidates": cands,
+                       "best_matches": [_mdict(m) for m in sorted(matches, key=lambda m: (-m.clip, -m.inliers))[:5]]})
+        return self._rescue(img, img_vec, seen, matches, rounds, cands)
+
+    def _absorb(self, ident: Identification, arms: dict, img, img_vec, seen, timeout_s: float = 90) -> Identification:
+        """The other first-look arms are already running and paid for: their verified copies join the evidence the
+        catalogue reads (confirmed_by). Without them the card depended on which arm answered first (withheld
+        bench, 2026-11-07: Bing won the race for a Jawlensky, and the Artvee and Wikimedia copies Lens had found,
+        which ruled the facts in the passes before, never reached the catalogue)."""
+        from concurrent.futures import TimeoutError as Timeout, as_completed
+        got = ident.rounds[-1].setdefault("confirmed_by", []) if ident.rounds else []
+        lines = list(ident.evidence.get("web_references") or [])
+        also = []
+        try:
+            for f in as_completed(list(arms), timeout=timeout_s):
+                name = arms.pop(f)
+                self._pending.pop(name, None)
+                try:
+                    hits = [m for m in self._timed(f"verify:{name}", lambda: self._score(img, img_vec, f.result(), name, seen))
+                            if m.confirmed]
+                except Exception as e:
+                    log.info("  %s (after confirmation) failed: %s", name, e)
+                    continue
+                if hits:
+                    also.append(name)
+                    got += [_mdict(h) for h in hits]
+                    lines += [_web_line(h.reference_obj) for h in hits if isinstance(h.reference_obj, WebReference)]  # type: ignore
+        except Timeout:
+            log.info("  first look arms still out after %.0f s: %s", timeout_s, list(arms.values()))
+        ident.evidence["web_references"] = list(dict.fromkeys(lines))
+        ident.evidence["also_verified_by"] = also
+        return ident
+
+    def _bing(self, img) -> list:
+        refs, guess = self.reverse.bing(img)
+        self._bing_guess = guess
+        return refs
+
+    def _rescue(self, img, img_vec, seen, matches, rounds, style_cands) -> Identification:
+        """First look verified nothing. One model round names candidates (with the signature and the style
+        shortlist); free searches by those names run first, then searches that spend credits."""
+        self._signature = self._timed("signature", lambda: self.read_signature(img))
+        self._phrases, self._used_phrases, self._vision_hints = [], set(), {}
+        try:
+            prop = self._timed("propose", lambda: self._propose(img, []))
+        except Exception as e:
+            log.warning("model round failed: %s", e)
+            prop = {}
+        sig = self._signature.get("signature_text", "") or prop.get("signature_text", "")
+        summary = prop.get("visual_summary", "")
+        cands = [c for c in prop.get("candidates", []) if c.get("artist")][:5]
+        sa = (self._signature.get("artist") or "").strip()
+        for c in ([{"artist": sa, "title": "", "source": "signature"}] if sa else []) + style_cands:
+            if _norm(c["artist"]) not in {_norm(x["artist"]) for x in cands}:
+                cands.append(c)
+        log.info("rescue candidates: %s", [(c["artist"], c.get("title")) for c in cands])
+        artists = list(dict.fromkeys(c["artist"] for c in cands))
+        titled = [c for c in cands if c.get("title")]
+        insc = (self._signature.get("inscribed_title") or "").strip()
+        tiers = []
+        # free: Artvee, Wikidata titles, Commons titles, the web by guess, cached catalogues
+        for q in dict.fromkeys([insc] + [c["title"] for c in titled]):
+            if len(q) >= 4:
+                tiers.append(("artvee", f"artvee: {q}", lambda q=q: self.artvee.search(q)))
+        for a in artists[:3]:
+            tiers.append(("artvee", f"artvee catalogue: {a}", lambda a=a: self.artvee.nearest(a, img_vec, 6)))
+        for c in titled[:4]:
+            tiers.append(("wikidata_title", f"wikidata: {c['artist']} {c['title']}",
+                          lambda c=c: self._wikidata_title_refs(c["artist"], c["title"])))
+        for c in titled[:4]:
+            q = f"{c['title']} {c['artist']}"
+            tiers.append(("commons", q, lambda q=q: self.wiki.search_files(q, 12)))
+        if self.web:
+            for c in titled[:4]:
+                q = f"{c['artist']} {c['title']} painting"
+                tiers.append(("web", q, lambda q=q: self.web.search(q, 15)))
+        for a in artists[:4]:
+            if self._oeuvre_cached(a):
+                tiers.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, img_vec)))
+        # credits, cheapest first; each pool stops at 10% of its free allowance
+        if self.lens is not None:
+            tiers.append(("yandex_searchapi", "yandex via SearchAPI", lambda: self.lens.extra("searchapi_yandex", img)))
+            tiers.append(("lens_exact", "Google Lens exact matches", lambda: self.lens.extra("serpapi_exact", img)))
+        if self.web is not None:
+            for c in titled[:2]:
+                q = f"{c['artist']} {c['title']}"
+                tiers.append(("google_images", q, lambda q=q: self.web.serpapi_images(q)))
+            if summary:
+                tiers.append(("google_images_desc", summary[:120], lambda: self.web.index_images(summary[:120], 30)))
+        for tier, q, fn in tiers:
+            log.info("  rescue %s: %s", tier, q[:80])
+            ident = self._try(tier, q, lambda fn=fn, tier=tier: self._timed(tier, fn), img, img_vec, seen, matches,
+                              rounds, cands, sig, summary)
+            if ident:
+                return ident
+        best = sorted(matches, key=lambda m: (-m.clip, -m.inliers))[:5]
+        rounds.append({"round": 2, "stage": "rescue", "candidates": cands, "best_matches": [_mdict(m) for m in best]})
+        return Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
+                              evidence={"reason": "no reference image matched on both instruments",
+                                        "errors": [m.reference for m in matches if m.reference.startswith("ERROR")]})
+
+    def _wikidata_title_refs(self, artist: str, title: str) -> list:
+        """The artist's catalogued works whose title shares most words with the guessed title."""
+        qid = self.wiki.find_artist(artist)
+        if not qid:
+            raise LookupError(f"no Wikidata artist record for {artist!r}")
+        want = {w for w in _norm(title).split() if len(w) > 2}
+        out = []
+        for w in self.wiki.oeuvre(qid):
+            have = set(_norm(w["label"]).split())
+            if want and len(want & have) / len(want) >= 0.6:
+                out.append(Reference(file_title=f"{w['label']} [{w['qid']}]", page_id=10**12 + int(w["qid"][1:]),
+                                     thumb_url=file_thumb(w["file"], 500), page_url=f"https://www.wikidata.org/wiki/{w['qid']}",
+                                     width=500, height=500, meta={"wikidata": w["qid"], "artist_wikidata": qid}))
+        return out[:8]
+
+    def _lens_refs(self, res) -> list:
+        """The Lens slot's answer, with the provider and any failed providers kept for the run record."""
+        prov, refs, errs = res
         self._lens_log["providers"].append(prov)
         self._lens_log["errors"] += errs
         return refs
-
-    def _vision_tier(self, img, img_vec, why, seen, matches, rounds, rnd, cands, sig, summary) -> Identification | None:
-        """Web detection: one billed call per image, ever (the response is cached on disk). Its pages are
-        scored like any other tier; its entity hints steer the next round's candidates."""
-        log.info("  tier vision_web (%s)", why)
-        try:
-            web = self.vision.detect(img)
-            self._vision_hints = VisionWebDetection.hints(web)
-            batch = self._score(img, img_vec, VisionWebDetection.references(web), f"vision web detection ({why})", seen)
-        except Exception as e:
-            log.warning("vision web detection failed: %s", e)
-            batch = [Match(f"ERROR vision_web: {e}", "", "", 0.0, 0, False, "vision web detection")]
-        matches += batch
-        hits = [m for m in batch if m.confirmed]
-        if hits:
-            ident = self._finish("vision_web", hits, matches, rounds, rnd, cands, sig, summary)
-            if ident.status == "confirmed":
-                return ident
-            rounds.pop()
-        return None
 
     def _corroborate(self, hits: list, cands: list[dict]) -> list:
         """After a first web match, look for the same image on more sites so the facts rest on several
@@ -545,14 +544,17 @@ class Identifier:
                        "best_matches": [_mdict(m) for m in sorted(matches, key=lambda m: -m.clip)[:5]]})
         ident = Identification(status="confirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
                                evidence={"tier": tier, **_mdict(hit)})
-        if tier in ("commons", "oeuvre"):
+        captions = True
+        if tier in ("commons", "oeuvre", "wikidata_title") or ref.meta.get("wikidata"):
             qid = ref.meta.get("wikidata") or self.wiki.depicted_item(ref.page_id)
             facts = self.wiki.artwork_facts(qid) if qid else {}
             if facts.get("title") and facts.get("artist"):
+                captions = False
                 ident.facts_source = "wikidata"
                 for k, v in facts.items():
                     setattr(ident, k, v)
-            else:
+            elif not isinstance(ref, WebReference):      # a Commons file: its own metadata names the work
+                captions = False
                 m = ref.meta
                 parsed = self.vlm.ask_json(TITLE_PROMPT.format(
                     file_title=ref.file_title, object_name=m.get("ObjectName", ""),
@@ -561,7 +563,10 @@ class Identifier:
                 ident.facts_source = "commons-metadata"
                 ident.title, ident.artist = parsed["title"].strip(), clean_artist(parsed["artist"])
                 ident.date = str(parsed.get("date", "")).strip()
-        else:
+            # else: a Wikidata row of the cached index whose item lacks a creator or title (Vallotton's
+            # "Route from Goubing to Sierre" carries the Tower of Goubing's picture and no artist, withheld
+            # bench 2026-11-06): the verified copies' captions are read instead
+        if captions:
             hits = self._corroborate(hits, cands)
             caption_artist = self._caption_artist(hits)
             # upgrade: find the same image in the caption artist's catalogued works -> Wikidata facts.
@@ -590,8 +595,12 @@ class Identifier:
             seen_names = " ".join([sig] + [c["artist"] for c in cands])
             surname = _norm(ident.artist).split()[-1:] or [""]
             by_model = bool(surname[0]) and surname[0] in _norm(seen_names)
+            # a witness is a page that can attribute art. Print shops and blogs usually name the painter (they carry
+            # Wyeth's Crows in Winter); music and social pages name whoever reused the picture (two music pages
+            # named a cover's band for a James Ward study, withheld bench 2026-11-07)
             sites = {h.reference_obj.domain for h in hits  # type: ignore[attr-defined]
-                     if surname[0] and surname[0] in _norm(_web_line(h.reference_obj)).split()}  # type: ignore
+                     if surname[0] and surname[0] in _norm(_web_line(h.reference_obj)).split()  # type: ignore
+                     and _site_rank(h.reference_obj.page_url) <= 5}  # type: ignore[attr-defined]
             if not by_model and len(sites) < 2 and ident.artist and ident.title:
                 # one more look, now that the facts name an artist and title: the artist's own site,
                 # galleries and catalogues usually title the same image the same way
@@ -599,7 +608,8 @@ class Identifier:
                 hits = hits + [m for m in self._score(self._img, self._img_vec, self.web.search(q, 20), q,
                                                       {h.reference_obj.page_id for h in hits}) if m.confirmed]  # type: ignore
                 sites = {h.reference_obj.domain for h in hits  # type: ignore[attr-defined]
-                         if surname[0] and surname[0] in _norm(_web_line(h.reference_obj)).split()}  # type: ignore
+                         if surname[0] and surname[0] in _norm(_web_line(h.reference_obj)).split()  # type: ignore
+                         and _site_rank(h.reference_obj.page_url) <= 5}  # type: ignore[attr-defined]
                 ident.evidence["web_references"] = [_web_line(h.reference_obj) for h in hits]  # type: ignore
             ident.evidence["artist_corroborated"] = by_model or len(sites) >= 2
             ident.evidence["artist_corroborated_by"] = ("the model's own reading" if by_model
@@ -623,7 +633,35 @@ class Identifier:
         if not (ident.title and ident.artist):
             ident.status = "unconfirmed"
             ident.evidence["reason"] = "image matched but the reference carries no usable title/artist"
+        if ident.status == "confirmed":
+            self._confirm(ident)
+            # artist leads for the catalogue, best first: a wrong first name no longer hides the work from
+            # the museums (the benchmark asked only the model's top 2, right for 13 of 24 works)
+            ident.evidence["artist_leads"] = list(dict.fromkeys(      # the model's names; style look-alikes are not leads
+                a for a in [ident.artist, *[c["artist"] for c in cands if c.get("source") != "style"]] if a))[:5]
         return ident
+
+    def _confirm(self, ident: Identification):
+        """CONFIRM (Sir, 2026-11-06: all three on every found work): the found artist and title searched on the
+        web, in Google Images through SerpAPI, and in Google's image index through Serper. Copies that pass
+        both instruments become more references for the catalogue; credits stop at each pool's 10% floor."""
+        if self.web is None or not (ident.artist and ident.title):
+            return
+        q = f"{ident.artist} {ident.title}"
+        seen: set[int] = set()
+        out, refs = {}, list(ident.evidence.get("web_references", []) or [])
+        for name, fn in (("web_images", lambda: self.web.search(f"{q} painting", 20)),
+                         ("google_images", lambda: self.web.serpapi_images(q)),
+                         ("google_images_desc", lambda: self.web.index_images(q, 30))):
+            try:
+                ms = self._timed(f"confirm:{name}", lambda fn=fn: self._score(self._img, self._img_vec, fn(), q, set(seen)))
+                hits = [m for m in ms if m.confirmed]
+                out[name] = {"verified": len(hits), "best_clip": max((m.clip for m in ms), default=0.0)}
+                refs += [_web_line(h.reference_obj) for h in hits if isinstance(h.reference_obj, WebReference)]  # type: ignore
+            except Exception as e:     # recorded, never read as "no match"
+                out[name] = {"error": str(e)[:200]}
+        ident.evidence["confirmation"] = out
+        ident.evidence["web_references"] = list(dict.fromkeys(refs))
 
     def _artist_facts(self, name: str) -> dict:
         data = self.wiki._get(self.wiki.wikidata_api, {"action": "wbsearchentities", "search": name,
@@ -643,6 +681,22 @@ class Identifier:
 
 
 _DANGLING = re.compile(r"\b(on|and|with|of|in|over|en|sur|auf|su|y|et|und)\s*[|,;:.\u2026-]*\s*$|\.\.\.$|\u2026$", re.I)
+
+
+_RANK = {"curated": 0, "reference": 1, "market": 2, "unknown": 3, "blog": 4, "commercial": 5, "social": 6}
+_ART_SITES = ("artvee.com", "wikiart.org", "the-athenaeum.org", "wga.hu", "artuk.org")
+
+
+def _site_rank(url: str) -> int:
+    """How far a page's caption can be trusted to name the work: collections first, shops and feeds last."""
+    from .sources import classify
+    u = (url or "").lower()
+    if any(d in u for d in _ART_SITES):
+        return 1
+    if any(d in u for d in ("spotify.", "music.apple", "soundcloud", "deezer", "bandcamp", "youtube.", "amselcom",
+                            "beatport", "tidal.com", "shazam", "last.fm", "discogs", "audiomack")):
+        return 7      # music pages use paintings as covers and name the band (James Ward -> "Latteo")
+    return _RANK.get(classify(u), 3)
 
 
 def clean_artist(name: str) -> str:

@@ -225,6 +225,27 @@ def same_medium(a: str, b: str) -> bool:
     return bool(_materials(a) & _materials(b))
 
 
+def display_title(t: str, artist: str = "") -> str:
+    """A title as a card prints it: a Commons file name ("File:Alexej von Jawlensky Landschaft mit orangener Wolke
+    1909.jpg", ruled as the title on the withheld bench, 2026-11-06) loses its prefix, extension, the artist's
+    name and the year."""
+    t = (t or "").strip()
+    if not re.match(r"(?i)file:", t) and not re.search(r"\.(jpe?g|png|tiff?|gif|webp)$", t, re.I):
+        return t
+    t = re.sub(r"(?i)^file:", "", t)
+    t = re.sub(r"\.(jpe?g|png|tiff?|gif|webp)$", "", t, flags=re.I).replace("_", " ")
+    t = re.sub(r"\((?:[^()]*museum|[^()]*collection|[^()]*gallery)[^()]*\)", " ", t, flags=re.I)   # holder in brackets
+    def plain(x: str) -> str:
+        return unicodedata.normalize("NFKD", x).encode("ascii", "ignore").decode().lower()
+    names = {x for x in re.split(r"[\s\-.,]+", plain(artist)) if len(x) > 1}
+    keep = [w for w in t.split() if not ((parts := [x for x in re.split(r"[\-.]+", plain(w).strip(",;:()")) if x])
+                                          and all(x in names for x in parts))]
+    t = re.sub(r"(?i)\s+by$", "", " ".join(keep).strip(" ,;:-–—"))
+    t = re.sub(r"\b(1[0-9]{3}|20[0-9]{2})\b", " ", t)
+    t = re.sub(r"\s*[,;:\-–—]\s*(?=[,;:\-–—]|$)", " ", t)
+    return re.sub(r"\s+", " ", t).strip(" ,;:-–—")
+
+
 def same_collection(a: str, b: str) -> bool:
     drop = {"museum", "art", "arts", "gallery", "national", "collection", "fine", "institute", "the", "of"}
     ta, tb = _toks(a) - drop, _toks(b) - drop
@@ -554,8 +575,12 @@ class Catalogue:
         self.consulted.append("Harvard Art Museums")
         url = "https://api.harvardartmuseums.org/object"
         # person + title together is a fielded AND (either alone does not filter); free text q is the fallback
-        fielded = (self._api(url, "records", apikey=key, person=surname, title=t, size=10) for t in titles[:4] if surname)
-        plain = (self._api(url, "records", apikey=key, q=q, size=10, hasimage=1) for q in queries[:4])
+        # the API parses every field as Lucene: a quote, colon or bracket in a title is a syntax error
+        # ("token_mgr_error", withheld bench 2026-11-06), so those characters go
+        def lq(t: str) -> str:
+            return re.sub(r'[+\-!(){}\[\]^"~*?:\\/&|]', " ", t).strip()
+        fielded = (self._api(url, "records", apikey=key, person=lq(surname), title=lq(t), size=10) for t in titles[:4] if surname)
+        plain = (self._api(url, "records", apikey=key, q=lq(q), size=10, hasimage=1) for q in queries[:4])
         seen: set = set()
         for d in chain(fielded, plain):
             for x in d.get("records") or []:
@@ -1448,7 +1473,7 @@ class Catalogue:
         def rank(r):     # what the card prints: the holding museum's wording, then Wikidata, references last
             if r.source == "inscription":
                 return 3     # the inscription is shown after a catalogue's title, in quotes, when they differ
-            if r.source in ("wikipedia.org", "commons.wikimedia.org", "artvee.com") or "meisterdrucke" in r.source \
+            if r.source in ("wikipedia.org", "commons.wikimedia.org", "wikimedia", "artvee.com") or "meisterdrucke" in r.source \
                     or any(d in r.source for d in ("wikiart", "artchive", "wga.hu", "britannica", "oxfordartonline", "jstor")):
                 return 2
             return 1 if r.source in ("wikidata", "rkd.nl") else 0
@@ -1490,7 +1515,7 @@ class Catalogue:
             return ""
 
         # title: any of a source's titles (languages, aliases) may agree; the display is the preferred source's
-        tvals = [(r, r.title) for r in pref if r.title]
+        tvals = [(r, t) for r in pref if (t := display_title(r.title, ident.get("artist", "")))]
         title = ""
         # a near-same title in another medium is another work (Whistler's Riva pastel, the Salute oil)
         got = choose("title", tvals, lambda r, t: sorted({r2.source for r2 in recs if not medium_clash(r.medium, r2.medium)

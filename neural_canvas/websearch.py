@@ -125,7 +125,9 @@ class WebImageSearch:
         return out[:limit * 2]
 
     # ── SerpAPI: Google's results on a free plan of 250 searches a month, for unresolved works only ──
-    SERPAPI_RESERVE = 10        # searches always left untouched on the plan
+    # nothing ever spills into paid, and no pool is spent below 10% of its free allowance (Sir, 2026-11-06)
+    SERPAPI_RESERVE = 25        # 10% of the free plan's 250 searches a month
+    SERPER_RESERVE = 250        # 10% of Serper's 2,500 one-time credits
 
     def serpapi_left(self) -> int:
         """Searches left on the SerpAPI plan, from its own account endpoint (which costs no search)."""
@@ -178,17 +180,20 @@ class WebImageSearch:
         im.save(buf, "JPEG", quality=90)
         data = buf.getvalue()
         errors = []
-        try:
-            r = requests.post("https://litterbox.catbox.moe/resources/internals/api.php",
-                              data={"reqtype": "fileupload", "time": "1h"},
-                              files={"fileToUpload": ("work.jpg", data, "image/jpeg")}, timeout=120)
-            r.raise_for_status()
-            url = r.text.strip()
-            if url.startswith("https://"):
-                return url
-            errors.append(f"litterbox: {url[:120]}")
-        except requests.RequestException as e:
-            errors.append(f"litterbox: {e}"[:160])
+        # litterbox twice before tmpfiles: Google Lens refuses tmpfiles links (HTTP 403 through Apify, 2026-11-06)
+        for attempt in range(2):
+            try:
+                r = requests.post("https://litterbox.catbox.moe/resources/internals/api.php",
+                                  data={"reqtype": "fileupload", "time": "1h"},
+                                  files={"fileToUpload": ("work.jpg", data, "image/jpeg")}, timeout=120)
+                r.raise_for_status()
+                url = r.text.strip()
+                if url.startswith("https://"):
+                    return url
+                errors.append(f"litterbox: {url[:120]}")
+            except requests.RequestException as e:
+                errors.append(f"litterbox: {e}"[:160])
+            time.sleep(3)
         try:
             r = requests.post("https://tmpfiles.org/api/v1/upload",
                               files={"file": ("work.jpg", data, "image/jpeg")}, timeout=120)
@@ -219,7 +224,24 @@ class WebImageSearch:
         r.raise_for_status()
         return [(x["url"], x.get("title", "")) for x in r.json().get("results", [])[:limit] if x.get("url", "").startswith("http")]
 
+    def serper_left(self) -> int:
+        """Serper credits left, from its account endpoint (free)."""
+        key = self._key("serper")
+        try:
+            r = requests.get("https://google.serper.dev/account", headers={"X-API-KEY": key}, timeout=20)
+            r.raise_for_status()
+            return int(r.json().get("balance") or 0)
+        except Exception as e:
+            log.warning("serper account check failed: %s", str(e).replace(key, "***")[:200])
+            return 0
+
+    def _serper_guard(self):
+        left = self.serper_left()
+        if left - 1 < self.SERPER_RESERVE:
+            raise RuntimeError(f"Serper credits at the 10% floor ({left} left, {self.SERPER_RESERVE} kept)")
+
     def _serper_pages(self, query: str, limit: int) -> list[tuple[str, str]]:
+        self._serper_guard()
         r = requests.post("https://google.serper.dev/search", json={"q": query, "num": min(limit, 20)},
                           headers={"X-API-KEY": self._key("serper")}, timeout=30)
         r.raise_for_status()
@@ -230,6 +252,7 @@ class WebImageSearch:
         walls automated visitors is never contacted; the original's address is kept in meta."""
         if not self._key("serper"):
             return []
+        self._serper_guard()
         r = requests.post("https://google.serper.dev/images", json={"q": query},     # this endpoint refuses "num" (HTTP 400)
                           headers={"X-API-KEY": self._key("serper")}, timeout=30)
         r.raise_for_status()

@@ -159,6 +159,22 @@ class LensPool:
         self.ledger = ledger
         self.url_fn = url_fn
         self.alert: Callable[[str, dict], None] | None = None     # set by the service: a Pulse alert
+        self.extras: dict[str, tuple[str, Callable[[Work], list[WebReference]]]] = {}
+
+    def extra(self, name: str, img: Image.Image) -> list[WebReference]:
+        """A rescue search that spends one pool's credits (Yandex through SearchAPI, Lens exact matches through
+        SerpAPI): the same ledger, the same 10% floor. An empty reply is a failure, never "no match"."""
+        prov_name, fn = self.extras[name]
+        p = next(p for p in self.providers if p.name == prov_name)
+        if not p.enabled():
+            raise RuntimeError(f"{name}: no {prov_name} key")
+        self.refresh(p)
+        if not self.ledger.reserve(p):
+            raise RuntimeError(f"{name}: {prov_name} is at its 10% floor")
+        refs = fn(Work(img, self.url_fn))
+        if not refs:
+            raise RuntimeError(f"{name}: empty reply")
+        return refs
 
     # ── balances ──────────────────────────────────────────────────────────
     def remaining(self, p: Provider) -> int:
@@ -281,6 +297,36 @@ def _http_json(r: requests.Response, key: str, name: str) -> dict:
         body = (json.dumps(d) if d else r.text)[:240]
         raise RuntimeError(_scrub(f"{name} HTTP {r.status_code}: {body.replace(key, '***') if key else body}"))
     return d
+
+
+def serpapi_exact(key: Callable[[], str]) -> Callable[[Work], list[WebReference]]:
+    """Lens exact matches: thumbnails only (verification is weaker), but the pages' titles are the best
+    provenance leads (Sir: rescue only)."""
+    def fn(w: Work) -> list[WebReference]:
+        k = key()
+        up = _http_json(_req("POST", "https://serpapi.com/image", data={"api_key": k},
+                             files={"image": ("work.jpg", w.jpeg(490_000), "image/jpeg")}, timeout=90), k, "serpapi upload")
+        d = _http_json(_req("GET", "https://serpapi.com/search.json", timeout=90, params={
+            "engine": "google_lens", "type": "exact_matches", "hl": "en", "country": "us", "image_id": up.get("image_id", ""),
+            "api_key": k}), k, "serpapi lens exact")
+        return [r for x in d.get("exact_matches") or []
+                if (r := _ref(x.get("title", ""), x.get("link", ""), "", x.get("thumbnail", ""), "lens_exact:serpapi",
+                              x.get("source", "")))]
+    return fn
+
+
+def searchapi_yandex(key: Callable[[], str]) -> Callable[[Work], list[WebReference]]:
+    """Yandex reverse image through SearchAPI: the same engine as the free direct arm, a paid route (rescue)."""
+    def fn(w: Work) -> list[WebReference]:
+        k = key()
+        d = _http_json(_req("GET", "https://www.searchapi.io/api/v1/search", timeout=120,
+                            params={"engine": "yandex_reverse_image", "url": w.url()},
+                            headers={"Authorization": "Bearer " + k}), k, "searchapi yandex")
+        out = _visual_rows(d.get("visual_matches"), "yandex:searchapi")
+        for size_list in (d.get("image_sizes") or {}).values():     # other copies of the same picture
+            out += _visual_rows([{"image": x.get("link", ""), "link": ""} for x in size_list or []], "yandex:searchapi")
+        return out
+    return fn
 
 
 def serpapi_provider(key: Callable[[], str]) -> Provider:
@@ -420,8 +466,12 @@ def apify_provider(key: Callable[[], str]) -> Provider:
                           json={"images": [w.url()], "mode": "visual_matches", "country": "US", "language": "en"})
         if r.status_code not in (200, 201):
             raise RuntimeError(f"apify HTTP {r.status_code}: {r.text[:240].replace(k, '***')}")
+        items = r.json() or []
+        if not items:      # the actor pushes nothing when Google refuses the picture's host (not billed)
+            raise RuntimeError("apify: no result pushed (Google Lens refused the image URL"
+                               + (", a tmpfiles link)" if "tmpfiles" in w.url() else ")"))
         out = []
-        for it in r.json() or []:
+        for it in items:
             for x in it.get("visual_matches") or []:
                 im = x.get("image")
                 im = im.get("link", "") if isinstance(im, dict) else (im or "")
@@ -567,4 +617,7 @@ def build_pool(cfg, web, vision) -> LensPool:
     if vision is not None:
         providers.append(vision_provider(vision))
     ledger = vision.ledger if vision is not None and vision.ledger is not None else Ledger(cfg.path("state_dir") / "lens_pool.json")
-    return LensPool(providers, ledger, web.temp_public_url)
+    pool = LensPool(providers, ledger, web.temp_public_url)
+    pool.extras = {"serpapi_exact": ("serpapi", serpapi_exact(key("serpapi", "serpapi"))),
+                   "searchapi_yandex": ("searchapi", searchapi_yandex(key("searchapi")))}
+    return pool

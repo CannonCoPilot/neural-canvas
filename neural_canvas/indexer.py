@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 class ArtistIndexer:
     def __init__(self, state_dir: Path, docent_factory):
+        self.state_dir = Path(state_dir)
         self.queue_path = Path(state_dir) / "index_queue.json"
         self.done_path = Path(state_dir) / "indexed.json"
         self._docent_factory = docent_factory
@@ -133,6 +134,9 @@ class ArtistIndexer:
                 log.exception("indexing %s failed", artist)
                 result = {"error": f"{type(e).__name__}: {e}"[:300]}
             self._finish(artist, result)
+            if "error" not in result:        # first look searches the grown index (Sir, 2026-11-06)
+                from .global_index import maybe_rebuild
+                maybe_rebuild(self.state_dir, self._docent.identifier.wiki)
 
 
 TOP_PAINTERS_QUERY = """PREFIX wdt: <http://www.wikidata.org/prop/direct/> PREFIX wd: <http://www.wikidata.org/entity/>
@@ -175,5 +179,9 @@ def build_top_painters(cfg, top: int = 500) -> int:
         ix.mark(p["artist"], {"qid": p["qid"], **res})
         el = time.time() - t0
         log.info("build-index %d/%d %s: %s (%.1f h elapsed)", k, len(todo), p["artist"], res, el / 3600)
+        from .global_index import maybe_rebuild
+        maybe_rebuild(cfg.path("state_dir"), d.identifier.wiki)
+    from .global_index import GlobalIndex
+    GlobalIndex(cfg.path("state_dir")).rebuild(d.identifier.wiki)
     log.info("build-index done: %d painters", len(painters))
     return 0

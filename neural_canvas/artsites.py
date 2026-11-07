@@ -50,6 +50,7 @@ def _pid(url: str) -> int:
 
 class Artvee:
     def __init__(self, state_dir: Path, embedder=None, interval_s: float = 1.0):
+        self._artist_cache: dict[str, str] = {}
         self.dir = Path(state_dir) / "artvee"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.emb, self.interval_s = embedder, interval_s
@@ -94,6 +95,17 @@ class Artvee:
 
     def search(self, query: str) -> list[WebReference]:
         return self.parse(self._get(f"{ARTVEE}/main/?s={quote(query)}"))
+
+    def page_artist(self, url: str) -> str:
+        """The artist an artwork page names ("James Ward (Irish, 1851–1924)" -> "James Ward"). A verified copy
+        found by reverse image search carries only the page title, which names the work, not the artist."""
+        if url in self._artist_cache:
+            return self._artist_cache[url]
+        page = self._get(url)
+        el = BeautifulSoup(page, "html.parser").select_one(".tartist a") if page else None
+        name = el.get_text(" ", strip=True) if el else ""
+        self._artist_cache[url] = name
+        return name
 
     def artist_pages(self, artist: str) -> list[str]:
         """Artvee's artist page slugs for this artist, found by searching the surname rather than guessing

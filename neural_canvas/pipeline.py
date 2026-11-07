@@ -28,7 +28,6 @@ from .crop import Composer, CropPlan
 from .dedup import ArtworkRegistry, phash
 from .deliver import AuthRequired, GooglePhotos
 from .identify import Identifier
-from .imify import Imify
 from .interpret import Interpretation, Subject, interpret
 from .catalogue import Catalogue, leads as catalogue_leads
 from .colour import rebalance
@@ -105,10 +104,10 @@ class Docent:
         self.vlm = VLM(m["ollama_url"], m["vlm"], m["vlm_timeout_s"])
         self.wiki = Wikimedia(s["commons_api"], s["wikidata_api"], s["user_agent"])
         self.embedder = Embedder(m["clip"])
-        im, vw = cfg["imify"], cfg["vision_web"]
+        vw = cfg["vision_web"]
         self.identifier = Identifier(cfg, self.vlm, self.wiki, self.embedder,
                                      WebImageSearch(searxng_url=s.get("searxng_url", ""), text_search=s.get("text_search")),
-                                     Imify(im) if im.get("enabled") else None,
+                                     None,       # Imify retired (Sir, 2026-11-06): Bing and Yandex are called directly
                                      VisionWebDetection(vw, cfg.path("state_dir") / "vision_web",
                                                         Ledger(cfg.path("state_dir") / "lens_pool.json"))
                                      if vw.get("enabled") else None)
@@ -221,7 +220,21 @@ class Docent:
                 if ruling["failures"]:          # unresolved: the SerpAPI fallback, then rule once more
                     extra = cat.fallback(img, st["identify"], found, lead_list)
                     if extra:
-                        ruling = cat.rule(found + extra, st["identify"])
+                        found += extra
+                        ruling = cat.rule(found, st["identify"])
+                # still unresolved: the museums asked about the next artist leads (the caption's artist can be
+                # wrong; the bench found the true artist among the model's top 2 for only 13 of 24 works). A lead
+                # is ruled only by two curated sources whose pictures match on both instruments.
+                # only when no curated source matched the picture at all: when some did, the artist is not the
+                # problem, and every other name costs minutes of museum calls (Wyeth: 750 s, withheld bench)
+                for alt in ((st["identify"].get("evidence", {}).get("artist_leads") or [])[1:3] if not found else []):
+                    if not ruling["failures"]:
+                        break
+                    alt_ident = {**st["identify"], "artist": alt}
+                    more = cat.gather(img, alt_ident, lead_list)
+                    alt_ruling = cat.rule(found + more, alt_ident)
+                    if not alt_ruling["failures"]:
+                        found, ruling = found + more, {**alt_ruling, "artist_lead_used": alt}
                 st[stage] = {"passed": not ruling["failures"], "seconds": round(time.time() - t0, 1), **ruling}
                 save()
                 if ruling["failures"]:
