@@ -34,7 +34,7 @@ from .imify import Imify
 from .style import StyleShortlist
 from .vision_web import VisionWebDetection
 from .lens_pool import Work as LensWork, build_pool
-from .agents import Agents, _fact
+from .agents import Agents, _fact, states
 from .evidence import Ledger
 from .evidence import site_rank
 from .websearch import WebImageSearch, WebReference
@@ -265,6 +265,8 @@ class Identifier:
         self._timing: dict[str, float] = {}
         self._signature: dict = {}
         self._confirmed_pairs: set[tuple[str, str]] = set()
+        self._anchor_queries: set[str] = set()
+        self._lens_more = False
         self._confirmation: dict = {}
         self._record_qids: set[str] = set()
         self._verified: list[Match] = []      # every copy verified on both instruments, from any search
@@ -418,7 +420,9 @@ class Identifier:
             return ident
         ident.status = "confirmed"
         if (_norm(ident.artist), _norm(ident.title)) not in self._confirmed_pairs:  # Sir, 2026-11-06: confirm every found work
-            self._aimed({"artist": {"value": ident.artist}, "title": {"value": ident.title}}, [], rounds)
+            # confirm only: the anchors' own words are searched between failing rounds, not after a ruling stands
+            # (bench pass 8: 139 s of searches on a work already confirmed)
+            self._aimed({"artist": {"value": ident.artist}, "title": {"value": ident.title}}, [], rounds, anchors=False)
         rounds[-1]["confirmed_by"] = [_mdict(m) for m in self._verified]
         qid = next((r.claims.get("wikidata") for r in self.ledger.items if r.kind == "record" and r.claims.get("wikidata")
                     and _norm(r.claims.get("artist", "")).split()[-1:] == _norm(ident.artist).split()[-1:]), "")
@@ -436,12 +440,24 @@ class Identifier:
             a for a in [ident.artist, *[c["artist"] for c in cands if c.get("source") != "style"]] if a))[:5]
         return ident
 
-    def _aimed(self, ruling: dict, queries: list[str], rounds: list) -> int:
+    def _aimed(self, ruling: dict, queries: list[str], rounds: list, anchors: bool = True) -> int:
         """Searches aimed by a ruling: the three confirm searches (once per work), the ruled artist's cached
         catalogue, and the agents' own requests. Returns how many items the ledger gained."""
         n0 = len(self.ledger.items)
         artist, title = _fact(ruling, "artist")[0], _fact(ruling, "title")[0]
         found: list[Match] = []
+        if anchors and self.lens is not None and not self._lens_more:
+            # an unsettled work asks one more Lens provider: Cloud Vision returns no web results, and Visser was
+            # settled only on runs where a text-rich provider answered (bench passes 4-8). One credit, 10% floor.
+            self._lens_more = True
+            tried = set(self._lens_log["providers"]) | {e.split(":", 1)[0] for e in self._lens_log["errors"]}
+            if len(tried) < len(self.lens.providers):
+                w = LensWork(self._img, self.lens.url_fn)
+                try:
+                    refs = self._timed("google_lens_more", lambda: self._lens_refs(self.lens.search(self._img, tried, work=w), w))
+                    self._records(self._arm("google_lens_more", refs, self._img, self._img_vec, set(), []))  # _arm keeps them
+                except Exception as e:      # recorded; an unavailable pool already alerted
+                    log.warning("second Lens provider failed: %s", e)
         if artist and title and (_norm(artist), _norm(title)) not in self._confirmed_pairs:
             # once per ruled pair: a feedback round that turns the ruling gets confirm searches of its own
             self._confirmed_pairs.add((_norm(artist), _norm(title)))
@@ -452,6 +468,17 @@ class Identifier:
                                                  f"oeuvre:{artist}", set(), "oeuvre") if m.confirmed]
             except Exception as e:
                 log.info("no catalogue look-up for %r: %s", artist, e)
+        if anchors and self.web is not None and (artist or title):
+            # the anchors' own words: a verified copy that names the ruled artist or title is searched by its caption,
+            # which finds the other sites carrying that wording (James Ward, bench pass 7: Artvee's caption led to the
+            # second and third sites that the ruled names alone did not)
+            for i in sorted(self.ledger.verified(), key=lambda i: -i.inliers)[:6]:
+                if not ((artist and states(i, "artist", artist)) or (title and states(i, "title", title))):
+                    continue
+                q = re.split(r"\s+[|]\s+|\s+[-–—]\s+(?=[^-–—]*$)", i.text)[0].strip(" .…")
+                if len(q) >= 12 and _norm(q) not in self._anchor_queries and len(self._anchor_queries) < 4:
+                    self._anchor_queries.add(_norm(q))
+                    queries = [q, *queries]
         if self.web is not None:
             for q in queries:
                 try:

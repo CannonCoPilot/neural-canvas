@@ -37,6 +37,10 @@ FACTS = ("artist", "title", "date", "medium", "collection")
 # but never anchor: engines name look-alikes (withheld bench pass 4: a James Ward colour study was ruled
 # "Josef Albers" on engine answers about similar squares)
 ANCHORS = ("copy", "record")
+# a caption is evidence about the picture beside it: only a near-copy (the identification bar is 0.86 with geometry)
+# speaks for this one. An article on Eric Wert's own paintings, found by a search for his name, ruled a Suzan Visser
+# "Eric Wert" (bench pass 7); Visser's Instagram caption sits beside a 0.86 near-copy
+CAPTION_CLIP = 0.85
 
 ADJUDICATE_PROMPT = """You are a museum registrar ruling on what an artwork is. The photograph is attached. Searches of
 the web, search engines and catalogues have gathered the evidence below, one item per line, each with an id.
@@ -177,14 +181,16 @@ def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] 
         # can be compared: it missed Instagram's "Hummingbird and Fish. Painted by Suzan Visser" (bench pass 5)
         # and rejected verified copies reading "... Different Colours by James Ward" (smoke test, 2026-11-07)
         items = [i for x in _ids(cites) if (i := ledger.get(x)) and i.kind in EVIDENCE
+                 and (i.kind != "caption" or i.clip >= CAPTION_CLIP)
                  and ((lex := states(i, f, value)) is True or (lex is None and x in confirmed and x not in rejected))]
         origins = {i.origin for i in items}
+        anchors = [i for i in items if i.kind in ANCHORS]
         why = ""
         if f == "title" and re.search(r"(\.\.\.|\u2026)\s*$", value):
             why = "cut off mid-title (a page caption's ellipsis)"
         elif len(origins) < 2:
             why = f"{len(origins)} independent item(s) state it (2 needed)"
-        elif not any(i.kind in ANCHORS for i in items):
+        elif not anchors:
             why = "no verified copy or catalogue record states it"
         elif f in record_facts and not any(i.kind == "record" for i in items):
             why = "no catalogue record states it"

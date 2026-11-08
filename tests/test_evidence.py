@@ -48,7 +48,7 @@ def _visser_ledger():
             verified=True, clip=0.95, inliers=80)                                                              # E1
     led.add("engine", "google_lens:omkar", "Hummingbird and fish - Suzan Visser (1967 -) : r/oilpaintings", "",
             "Reddit · r/oilpaintings")                                                                         # E2
-    led.add("copy", "google_lens:apify", "Hummingbird and Fish. Painted by Suzan Visser (1967– ), 2019", "https://www.instagram.com/p/1",
+    led.add("copy", "google_lens:apify", "Hummingbird and Fish. Painted by Suzan Visser (1967– ), 2019", "https://suzanvisser.art/work/1",
             verified=True, clip=0.94, inliers=70)                                                              # E3
     led.add("lead", "model", "model guess: Sandra Younes")                                                    # E4
     return led
@@ -97,7 +97,7 @@ def test_no_verified_copy_means_no_identification_whatever_the_text_says():
 def test_card_facts_need_a_record_and_a_curated_record_can_veto():
     led = _visser_ledger()
     led.add("record", "wikidata", "Wikidata item Q1: date 1890", "https://www.wikidata.org/wiki/Q1", overrule=True)  # E5
-    led.add("copy", "bing", "Suzan Visser, Hummingbird and Fish (2019)", "https://suzanvisser.art/1", verified=True,
+    led.add("copy", "bing", "Suzan Visser, Hummingbird and Fish (2019)", "https://www.saatchiart.com/art/1", verified=True,
             clip=0.95, inliers=70)                                                                                 # E6
     ruling = {**_ruling(["E1", "E3"], ["E1", "E3"]), "date": {"value": "2019", "cites": ["E3", "E6"]}}
     chk = {**_check(["E1", "E3"]), "date": {"supports": ["E3", "E6"], "contradicts": []}}
@@ -203,7 +203,7 @@ def test_engine_answers_and_captions_support_but_never_anchor():
     led = Ledger()
     led.add("copy", "yandex", "colour study", "https://a.org/1", verified=True, clip=0.95, inliers=60)          # E1
     e = led.add("engine", "google_lens:serpapi", "Josef Albers Homage to the Square", "https://moma.org/x")      # E2
-    c = led.add("caption", "yandex", "Josef Albers - Homage to the Square", "https://pinterest.com/pin/2")       # E3
+    c = led.add("caption", "yandex", "Josef Albers - Homage to the Square", "https://pinterest.com/pin/2", clip=0.9)  # E3
     v = rule_facts(led, _ruling([e.id, c.id], [e.id, c.id], "Josef Albers", "Homage to the Square"), _check([e.id, c.id]))
     assert "artist" not in v["facts"] and "no verified copy or catalogue record" in v["unruled"]["artist"]
 
@@ -212,3 +212,18 @@ def test_a_title_cut_off_by_a_caption_is_never_ruled():
     led = _visser_ledger()
     v = rule_facts(led, _ruling(["E1", "E2", "E3"], ["E1", "E3"], title="Hummingbird and..."), _check(["E1", "E2", "E3"]))
     assert "title" not in v["facts"] and "cut off" in v["unruled"]["title"]
+
+
+def test_a_caption_beside_another_picture_does_not_speak_for_this_one():
+    # bench pass 7: a Pinterest pin titled after Eric Wert, plus an article on Wert's own paintings, ruled a Visser "Eric Wert"
+    led = Ledger()
+    pin = led.add("copy", "yandex", "Eric Wert: Masterful Dutch-Inspired Still Life Paintings", "https://www.pinterest.com/pin/1",
+                  verified=True, clip=0.97, inliers=80)
+    far = led.add("caption", "agent_search", "The hyper-realism of Eric Wert's still-life paintings", "https://visualflood.com/x",
+                  clip=0.66)
+    similar = led.add("caption", "agent_search", "Eric Wert still life", "https://ericwert.com/1", clip=0.84)
+    copy = led.add("caption", "google_lens", "Eric Wert, still life", "https://www.artsy.net/artwork/1", clip=0.87)
+    v = rule_facts(led, _ruling([pin.id, far.id, similar.id], [pin.id], "Eric Wert", "x"), _check([]))
+    assert "artist" not in v["facts"] and "1 independent" in v["unruled"]["artist"]  # similar pictures, not this one
+    v2 = rule_facts(led, _ruling([pin.id, copy.id], [pin.id], "Eric Wert", "x"), _check([]))
+    assert v2["facts"].get("artist") == "Eric Wert"           # a near-copy's caption does speak for it
