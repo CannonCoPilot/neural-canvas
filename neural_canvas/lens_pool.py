@@ -35,6 +35,7 @@ from typing import Callable
 import requests
 from PIL import Image
 
+from .evidence import engine_texts
 from .websearch import WebReference
 
 log = logging.getLogger(__name__)
@@ -71,6 +72,12 @@ class Work:
     _url: str = ""
     _t: float = 0.0
     tried: list[str] = field(default_factory=list)
+    texts: list[dict] = field(default_factory=list)    # engine answers besides the image matches (evidence.py)
+
+    def note(self, source: str, reply) -> None:
+        """Keep what a reply says about the picture besides its image matches: web results, knowledge panel,
+        entities, related searches (Sir, 2026-11-07: Visser's name was in these fields, and we dropped them)."""
+        self.texts += [{**t, "source": source} for t in engine_texts(reply)]
 
     def url(self) -> str:
         if not self._url or time.time() - self._t > 240:     # tmpfiles' signed link lives about 5 min
@@ -161,7 +168,7 @@ class LensPool:
         self.alert: Callable[[str, dict], None] | None = None     # set by the service: a Pulse alert
         self.extras: dict[str, tuple[str, Callable[[Work], list[WebReference]]]] = {}
 
-    def extra(self, name: str, img: Image.Image) -> list[WebReference]:
+    def extra(self, name: str, img: Image.Image, work: Work | None = None) -> list[WebReference]:
         """A rescue search that spends one pool's credits (Yandex through SearchAPI, Lens exact matches through
         SerpAPI): the same ledger, the same 10% floor. An empty reply is a failure, never "no match"."""
         prov_name, fn = self.extras[name]
@@ -171,7 +178,7 @@ class LensPool:
         self.refresh(p)
         if not self.ledger.reserve(p):
             raise RuntimeError(f"{name}: {prov_name} is at its 10% floor")
-        refs = fn(Work(img, self.url_fn))
+        refs = fn(work or Work(img, self.url_fn))
         if not refs:
             raise RuntimeError(f"{name}: empty reply")
         return refs
@@ -309,6 +316,7 @@ def serpapi_exact(key: Callable[[], str]) -> Callable[[Work], list[WebReference]
         d = _http_json(_req("GET", "https://serpapi.com/search.json", timeout=90, params={
             "engine": "google_lens", "type": "exact_matches", "hl": "en", "country": "us", "image_id": up.get("image_id", ""),
             "api_key": k}), k, "serpapi lens exact")
+        w.note("lens_exact:serpapi", d)
         return [r for x in d.get("exact_matches") or []
                 if (r := _ref(x.get("title", ""), x.get("link", ""), "", x.get("thumbnail", ""), "lens_exact:serpapi",
                               x.get("source", "")))]
@@ -322,6 +330,7 @@ def searchapi_yandex(key: Callable[[], str]) -> Callable[[Work], list[WebReferen
         d = _http_json(_req("GET", "https://www.searchapi.io/api/v1/search", timeout=120,
                             params={"engine": "yandex_reverse_image", "url": w.url()},
                             headers={"Authorization": "Bearer " + k}), k, "searchapi yandex")
+        w.note("yandex:searchapi", d)
         out = _visual_rows(d.get("visual_matches"), "yandex:searchapi")
         for size_list in (d.get("image_sizes") or {}).values():     # other copies of the same picture
             out += _visual_rows([{"image": x.get("link", ""), "link": ""} for x in size_list or []], "yandex:searchapi")
@@ -341,6 +350,7 @@ def serpapi_provider(key: Callable[[], str]) -> Provider:
         d = _http_json(_req("GET", "https://serpapi.com/search.json", timeout=90, params={
             "engine": "google_lens", "type": "all", "hl": "en", "country": "us", "image_id": up["image_id"], "api_key": k}),
             k, "serpapi lens")
+        w.note("google_lens:serpapi", d)
         return [r for x in d.get("visual_matches") or []
                 if (r := _ref(x.get("title", ""), x.get("link", ""), x.get("image", ""), x.get("thumbnail", ""),
                               "google_lens:serpapi", x.get("source", "")))]
@@ -358,6 +368,7 @@ def searchapi_provider(key: Callable[[], str]) -> Provider:
         d = _http_json(_req("GET", "https://www.searchapi.io/api/v1/search", timeout=120,
                                     params={"engine": "google_lens", "url": w.url(), "search_type": "all"},
                                     headers={"Authorization": "Bearer " + k}), k, "searchapi lens")
+        w.note("google_lens:searchapi", d)
         out = []
         for x in d.get("visual_matches") or []:
             im = x.get("image")
@@ -383,6 +394,7 @@ def serper_provider(key: Callable[[], str]) -> Provider:
         for _ in range(2):        # an empty 200 came back on 2 of 10 trials; a retry answered (not charged)
             d = _http_json(_req("POST", "https://google.serper.dev/lens", json={"url": w.url(), "gl": "us", "hl": "en"},
                                          headers={"X-API-KEY": k}, timeout=90), k, "serper lens")
+            w.note("google_lens:serper", {kk: v for kk, v in d.items() if kk != "organic"})
             out = [r for x in d.get("organic") or []
                    if (r := _ref(x.get("title", ""), x.get("link", ""), x.get("imageUrl", ""), x.get("thumbnailUrl", ""),
                                  "google_lens:serper", x.get("source", "")))]
@@ -432,6 +444,7 @@ def oxylabs_provider(key: Callable[[], str]) -> Provider:
         out = []
         for res in d.get("results") or []:
             js = ((res.get("json") or {}).get("results") or {})
+            w.note("google_lens:oxylabs", {kk: v for kk, v in js.items() if kk not in ("organic", "exact_match")})
             for x in (js.get("exact_match") or []) + (js.get("organic") or []):
                 link = x.get("url") or ""
                 if link.startswith("/goto?") or link.startswith("/url?"):
@@ -472,6 +485,7 @@ def apify_provider(key: Callable[[], str]) -> Provider:
                                + (", a tmpfiles link)" if "tmpfiles" in w.url() else ")"))
         out = []
         for it in items:
+            w.note("google_lens:apify", it)
             for x in it.get("visual_matches") or []:
                 im = x.get("image")
                 im = im.get("link", "") if isinstance(im, dict) else (im or "")
@@ -528,7 +542,9 @@ def rapidapi_provider(name: str, host: str, path: str, params: Callable[[str], d
             quota_path.write_text(json.dumps(allq, indent=1))
             if int(h.get("x-ratelimit-requests-limit") or free_limit) != free_limit:
                 raise RuntimeError(f"{name}: plan limit is not the free quota; refusing further calls")
-        return rows(_http_json(r, k, name))
+        d = _http_json(r, k, name)
+        w.note(f"google_lens:{name}", d)
+        return rows(d)
 
     def balance() -> int:
         q = _quota().get(host)
@@ -554,6 +570,7 @@ def scrapebadger_provider(key: Callable[[], str]) -> Provider:
                 continue
             break
         d = _http_json(r, k, "scrapebadger lens")
+        w.note("google_lens:scrapebadger", {kk: v for kk, v in d.items() if kk not in ("results", "lens_results")})
         return _visual_rows([{**x, "image": x.get("original_thumbnail")} for x in d.get("lens_results") or []],
                             "google_lens:scrapebadger")
 
@@ -570,7 +587,12 @@ def vision_provider(vision) -> Provider:
     """Cloud Vision web detection: 1,000 free calls a month, billed after that, so it is counted locally and
     stops at the floor (VisionWebDetection.detect enforces the same limit for every other caller)."""
     def search(w: Work) -> list[WebReference]:
-        return vision.references(vision.detect(w.img))
+        web = vision.detect(w.img)
+        h = vision.hints(web)
+        w.texts += [{"text": f"Google's best guess for this picture: {g}", "url": "", "site": "", "source": "vision"}
+                    for g in h["best_guess"]]
+        w.texts += [{"text": f"Google web entity: {e}", "url": "", "site": "", "source": "vision"} for e in h["entities"]]
+        return vision.references(web)
     return Provider("vision", search, allowance=vision.free_per_month, renews="monthly", balance=None,
                     enabled=lambda: bool(vision.enabled), charges_itself=True)
 

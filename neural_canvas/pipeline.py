@@ -29,7 +29,7 @@ from .dedup import ArtworkRegistry, phash
 from .deliver import AuthRequired, GooglePhotos
 from .identify import Identifier
 from .interpret import Interpretation, Subject, interpret
-from .catalogue import Catalogue, leads as catalogue_leads
+from .catalogue import Catalogue, catalogue_stage
 from .colour import rebalance
 from .identify import WEB_UA
 from .matching import Embedder, fetch_image
@@ -214,27 +214,8 @@ class Docent:
             if not done(stage):
                 t0 = time.time()
                 cat = Catalogue(self.identifier, self.cfg.thresholds)
-                lead_list = catalogue_leads(st["identify"])
-                found = cat.gather(img, st["identify"], lead_list)
-                ruling = cat.rule(found, st["identify"])
-                if ruling["failures"]:          # unresolved: the SerpAPI fallback, then rule once more
-                    extra = cat.fallback(img, st["identify"], found, lead_list)
-                    if extra:
-                        found += extra
-                        ruling = cat.rule(found, st["identify"])
-                # still unresolved: the museums asked about the next artist leads (the caption's artist can be
-                # wrong; the bench found the true artist among the model's top 2 for only 13 of 24 works). A lead
-                # is ruled only by two curated sources whose pictures match on both instruments.
-                # only when no curated source matched the picture at all: when some did, the artist is not the
-                # problem, and every other name costs minutes of museum calls (Wyeth: 750 s, withheld bench)
-                for alt in ((st["identify"].get("evidence", {}).get("artist_leads") or [])[1:3] if not found else []):
-                    if not ruling["failures"]:
-                        break
-                    alt_ident = {**st["identify"], "artist": alt}
-                    more = cat.gather(img, alt_ident, lead_list)
-                    alt_ruling = cat.rule(found + more, alt_ident)
-                    if not alt_ruling["failures"]:
-                        found, ruling = found + more, {**alt_ruling, "artist_lead_used": alt}
+                # curated records join the work's evidence ledger; the agents rule the card (Sir, 2026-11-07)
+                ruling = catalogue_stage(cat, img, st["identify"])
                 st[stage] = {"passed": not ruling["failures"], "seconds": round(time.time() - t0, 1), **ruling}
                 save()
                 if ruling["failures"]:

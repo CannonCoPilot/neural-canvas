@@ -225,6 +225,12 @@ class ReverseImage:
                 s.get(f"{BING}/images", timeout=self.timeout_s).raise_for_status()
                 r = s.post(f"{BING}/images/kblob", timeout=self.timeout_s,
                            files={"imageBin": (None, base64.b64encode(_jpeg(img, 800, 85)).decode())})
+                if r.status_code == 400:
+                    # 2026-11-07: Bing answers 400 to any upload from outside a browser. Its own page still uploads
+                    # (iss=sbiupload plus size fields), but only with Akamai Bot Manager's browser cookies, which a
+                    # script must not fake. Decision for Sir; until then this arm fails loudly on every work.
+                    raise RuntimeError("bing: upload refused (HTTP 400): Bing's upload now needs its bot-manager browser "
+                                       "session (since 2026-11-07)")
                 r.raise_for_status()
                 try:
                     red = r.json().get("redirectUrl") or ""

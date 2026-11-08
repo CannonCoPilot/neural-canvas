@@ -1621,3 +1621,77 @@ def leads(ident: dict) -> list[str]:
         if len(t) >= 4 and not re.fullmatch(r"[\d\s]+", t):
             clean.append(t)
     return list(dict.fromkeys(clean))
+
+
+def record_items(ledger, recs: list[Record]) -> int:
+    """Catalogue records join the work's evidence ledger (Sir, 2026-11-07): each is a cited witness for the
+    agents, no longer a vote. Artist authority records rule the artist's life only and stay out; auction and
+    press pages corroborate as captions."""
+    n0 = len(ledger.items)
+    for r in recs:
+        if r.authority:
+            continue
+        claims = {"title": r.title, "artist": r.artist, "date": r.date, "medium": r.medium, "collection": r.collection}
+        also = [t for t in r.titles if t and t != r.title][:3]
+        stated = "; ".join(f"{k} {v!r}" for k, v in claims.items() if v) or "no fields read"
+        text = (f"{r.source} {'page' if r.support else 'catalogue record'} ({r.verified_by or 'found by text'}): {stated}"
+                + (f"; also titled {', '.join(map(repr, also))}" if also else ""))
+        if r.support:
+            ledger.add("caption", r.source, text, r.url)
+        else:
+            ledger.add("record", r.source, text, r.url, claims=claims, overrule=r.overrule,
+                       clip=r.clip, inliers=r.inliers, verified=False)
+    return len(ledger.items) - n0
+
+
+def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
+    """The catalogue stage as the pipeline runs it: gather curated records by the identification's leads, add
+    them to the work's ledger, and let the agents rule the card's facts under the same rules as identification,
+    plus one: the date, medium and collection need a catalogue record among their witnesses. When a fact stays
+    unruled, one more round runs after Google's results through SerpAPI. The artist's life and nationality are
+    still ruled by ``rule`` (Wikidata against a printed biography)."""
+    from .evidence import Ledger
+    idf = cat.idf
+    lead_list = leads(ident)
+    found = cat.gather(img, ident, lead_list)
+    ledger = Ledger((ident.get("evidence") or {}).get("ledger") or [])
+    added = record_items(ledger, found)
+    spent = []
+
+    def more(ruling: dict, queries: list[str]) -> int:
+        if spent:
+            return 0
+        spent.append(1)
+        extra = cat.fallback(img, ident, found, lead_list)
+        found.extend(extra)
+        return record_items(ledger, extra)
+
+    prior = (ident.get("evidence") or {}).get("verdict")
+    if not added and prior and not prior.get("failures"):
+        # nothing new to weigh (a living painter in no catalogue): identification's ruling stands, and its
+        # date, medium and collection stay unruled, since no catalogue record states them
+        verdict = {**prior, "facts": {k: v for k, v in prior["facts"].items() if k in ("artist", "title")},
+                   "rounds": [], "note": "no catalogue record found: identification's ruling stands"}
+    else:
+        try:
+            verdict = idf.agents.settle(img, ledger, need=("artist", "title"), record_facts=("date", "medium", "collection"),
+                                        rounds_max=idf.rounds_max, search=more)
+        except Exception as e:      # a failed agent blocks the stage with its reason; it never prints a guess
+            log.error("catalogue adjudication failed: %s", e)
+            verdict = {"facts": {}, "support": {}, "unruled": {}, "rounds": [],
+                       "failures": [f"catalogue adjudication failed: {type(e).__name__}: {str(e)[:200]}"]}
+    facts = dict(verdict["facts"])
+    if facts.get("title"):
+        facts["title"] = display_title(facts["title"], facts.get("artist", ""))
+    life = cat.rule(found, {**ident, "artist": facts.get("artist") or ident.get("artist", "")})
+    for k in ("artist_born", "artist_died", "artist_nationality", "inscribed_title"):
+        if life["facts"].get(k):
+            facts[k] = life["facts"][k]
+    support = {**verdict["support"], **{k: v for k, v in life["support"].items() if k.startswith("artist_")
+                                        and k not in ("artist",)}}
+    unruled = {**verdict["unruled"], **{k: v for k, v in life["unruled"].items() if k.startswith("artist_l")
+                                        or k == "artist_nationality"}}
+    return {"facts": facts, "support": support, "unruled": unruled, "failures": verdict["failures"],
+            "contradicted": verdict.get("contradicted", {}), "adjudication": verdict.get("rounds", []),
+            "sources": life["sources"], "consulted": life["consulted"], "unavailable": life["unavailable"],
+            "corroborating": life["corroborating"], "ledger": ledger.to_list()}

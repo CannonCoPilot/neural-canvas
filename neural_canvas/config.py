@@ -28,6 +28,15 @@ DEFAULTS: dict[str, Any] = {
         # its whole budget reasoning and returns empty content.
         "vlm": "qwen3-vl:32b-instruct",
         "vlm_timeout_s": 900,
+        # the evidence agents (agents.py): the adjudicator is the vision model above; the checker is a separate
+        # text model, so a ruling is never checked by the model that made it. qwen3:8b stays resident (the
+        # estate's context manager uses it): Ollama holds three models, so a 32b checker evicted the VLM on every
+        # call (Visser smoke test, 2026-11-07: 160 s a round, against 31 s with qwen3:8b). gpt-oss:120b would
+        # be the most independent, but beside the VLM it needs 86 GB resident and this machine already swaps.
+        "checker": "qwen3:8b",
+        # 3: a feedback round can turn a look-alike ruling around (James Ward from "Albers"); the turned ruling
+        # then needs its own aimed searches and one more round. Only an unsettled work uses them.
+        "rounds_max": 3,
         "clip": "clip-ViT-B-32",
         "upscaler_weights": str(Path.home() / "Claude" / "Staging" / "verified" / "models"
                                 / "realesrgan" / "RealESRGAN_x4plus.pth"),

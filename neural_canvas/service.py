@@ -149,6 +149,8 @@ class Service:
         d = getattr(self._local, "docent", None)
         if d is None:
             d = self._local.docent = Docent(self.cfg)
+            # a work the evidence cannot settle stays open and alerts: the approach needs redesign, not acceptance
+            d.identifier.alert = lambda text, data: self.pulse.alert("warning", f"neural-canvas: {text}", data)
             if d.identifier.lens is not None:    # an unavailable Lens slot alerts (Sir: never silently dropped)
                 d.identifier.lens.alert = lambda text, data: self.pulse.alert("critical", f"neural-canvas: {text}", data)
         return d

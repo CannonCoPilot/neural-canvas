@@ -1,16 +1,16 @@
-"""Stage 1 — identify the artwork from its pixels alone.
+"""Stage 1 — identify the artwork from its pixels alone, by collecting evidence and then ruling on it.
 
-The model only *proposes*. An identity is CONFIRMED when a reference photograph from an open
-collection matches the input on two independent instruments (see ``matching``); the label's
-facts are then read from that reference's catalogue record, never from the model's guess.
+FIRST LOOK runs every arm at once: Bing and Yandex visual search, one Google Lens search from the rotating
+free-credit pool, the cached picture index and the style shortlist. RESCUE (one model round, then searches by
+the names it gives) runs only when no copy of the picture was verified. Every arm adds typed items to one
+evidence ledger per work (``evidence``): copies verified on two instruments (``matching``), page captions,
+the engines' own answers, catalogue records and model leads. Nothing refuses along the way.
 
-Search widens round by round: the model's candidates by title → a sweep of each proposed
-artist's works (catches right-artist/wrong-title) → a fresh model round told which candidates
-were already refuted. A free reverse-image search (Imify) runs alongside from the start. Google
-Vision web detection, which is billed, is the fallback: once per image, on a near-miss or when the
-free rounds are spent, and its hints buy one more round. No confirmation after the last round ⇒
-the artwork stays UNCONFIRMED and the run blocks; nothing downstream is allowed to print a guessed
-attribution.
+Then two local model agents rule (``agents``): the adjudicator states artist and title citing ledger items,
+the checker verifies every citation, and mechanical rules decide: a picture verified on both instruments,
+and each fact stated by two independent items, one of them tied to the picture. Between rounds the aimed
+searches run (confirm by the ruled names, the artist's cached catalogue, the agents' own requests). A work
+the evidence cannot settle stays UNCONFIRMED, blocks, and alerts (Sir's redesign, 2026-11-07).
 """
 from __future__ import annotations
 
@@ -33,13 +33,17 @@ from .reverse_image import ReverseImage
 from .imify import Imify
 from .style import StyleShortlist
 from .vision_web import VisionWebDetection
-from .lens_pool import build_pool
+from .lens_pool import Work as LensWork, build_pool
+from .agents import Agents, _fact
+from .evidence import Ledger
+from .evidence import site_rank
 from .websearch import WebImageSearch, WebReference
 from .vlm import VLM
 
 log = logging.getLogger(__name__)
 WEB_UA = "Mozilla/5.0 (compatible; neural-canvas/1.0; +https://github.com/CannonCoPilot/neural-canvas)"
 YANDEX_TOP = 60
+ARM_TIMEOUT_S = 240   # a first-look arm with no answer by then is recorded as an error
 FETCH_WORKERS = 6     # reference fetches in flight across hosts; Wikimedia and the Art Institute take one at a time
 
 PROPOSE_PROMPT = """You are a museum curator identifying an artwork from a photograph of it.
@@ -66,29 +70,6 @@ known artist, give that artist's full name. Some artists also write the work's T
 catalogue number, and say whether every letter of it is clearly legible. Reply ONLY with JSON:
 {"signature_text": "exact text or empty string", "artist": "full name or empty string", "confidence": 0.0,
  "inscribed_title": "title as written or empty string", "inscribed_title_legible": false}"""
-
-TITLE_PROMPT = """A museum photograph file is catalogued as:
-file name: {file_title}
-object name: {object_name}
-description: {description}
-artist: {artist}
-date: {date}
-Extract the artwork's own title (no artist, museum, accession number or file suffix) and the
-artist's full name and creation year. Reply ONLY with JSON:
-{{"title": "...", "artist": "...", "date": "..."}}"""
-
-
-WEB_FACTS_PROMPT = """Each line below is a web image that was verified, pixel by pixel, to be the SAME artwork,
-with the image's own file name and the title of the page it appeared on:
-{captions}
-An image's file name usually names the pictured work; a page title may describe a DIFFERENT work shown on
-the same page (shop pages, related-items strips, galleries). Weigh the evidence across all lines.
-Give the artwork's artist (full name only: no dates, nationality or brackets), its own title (no artist, gallery, size, price or "print" wording),
-creation year and medium if any line states them. Use "" for anything no line states. Two years in brackets
-beside the artist's name, e.g. "(Japan, 1922-1994)", are the artist's life, NOT the work's date. A medium
-cut off mid-phrase (e.g. "Oil on |") is not stated: use "". Reply ONLY with JSON:
-{{"artist": "...", "title": "...", "date": "...", "medium": "..."}}"""
-
 
 @dataclass
 class Match:
@@ -148,6 +129,10 @@ class Identifier:
         self.index = GlobalIndex(cfg.path("state_dir"))
         # the Lens slot (Sir, 2026-11-06): one Google Lens-type search per work from a rotating free-credit pool
         self.lens = build_pool(cfg, web, vision) if web is not None and hasattr(web, "temp_public_url") else None
+        m = cfg["models"]
+        self.agents = Agents(vlm, VLM(m["ollama_url"], m.get("checker", "qwen3:8b"), m.get("vlm_timeout_s", 900)))
+        self.rounds_max = int(m.get("rounds_max", 3))
+        self.alert = None          # set by the service: a Pulse alert when a work cannot be settled
 
     # ── catalogue sweep: an artist's whole Wikidata oeuvre, embedded once and cached ──
     def _oeuvre_vectors(self, artist_qid: str, cold: bool = False) -> tuple[list[dict], np.ndarray]:
@@ -202,7 +187,10 @@ class Identifier:
 
     # ── scoring one batch of references against the input ────────────────────
     def _score(self, img: Image.Image, img_vec: np.ndarray, refs: list[Reference], query: str,
-               seen: set[int]) -> list[Match]:
+               seen: set[int], tier: str = "") -> list[Match]:
+        """Score references on both instruments. Every reference lands in the ledger: a verified one as a copy,
+        the rest as captions with their embedding score (what a page says is evidence even when its picture
+        could not be checked)."""
         refs = [r for r in refs if r.page_id not in seen]
         seen.update(r.page_id for r in refs)
         def get(r):
@@ -210,20 +198,31 @@ class Identifier:
                 return fetch_image(r.image_url, WEB_UA) or fetch_image(r.thumb_url, WEB_UA)
             return fetch_image(r.thumb_url, self.ua)
         with ThreadPoolExecutor(FETCH_WORKERS) as ex:   # rate-limited hosts are paced inside fetch_image
-            pairs = list(zip(refs, ex.map(get, refs)))
-        pairs = [(r, im) for r, im in pairs if im is not None]
+            got = list(zip(refs, ex.map(get, refs)))
+        pairs = [(r, im) for r, im in got if im is not None]
+        led = getattr(self, "ledger", None)
+        src = lambda r: (getattr(r, "meta", None) or {}).get("source") or tier or query[:40]   # noqa: E731
+        if led is not None:
+            for r, im in got:
+                if im is None:
+                    led.add_copy(r, src(r), 0.0, 0, False)
         if not pairs:
             return []
         sims = self.emb.similarity(img_vec, self.emb.embed([im for _, im in pairs]))
-        order = np.argsort(-sims)[:4]          # geometry only for the closest few
+        order = np.argsort(-sims)
         out = []
-        for i in order:
+        for rank, i in enumerate(order):
             r, im = pairs[i]
             sim = float(sims[i])
-            inl = geometric_inliers(img, im) if sim >= self.t["id_clip_min"] - 0.08 else 0
+            # geometry for the closest few, and for any other copy close enough to be the same picture
+            near = sim >= self.t["id_clip_min"] - (0.08 if rank < 4 else 0.0)
+            inl = geometric_inliers(img, im) if near and rank < 12 else 0
             ok = sim >= self.t["id_clip_min"] and inl >= self.t["id_inliers_min"]
-            out.append(Match(r.file_title, r.page_url, r.thumb_url, round(sim, 4), inl, ok, query))
-            out[-1].reference_obj = r   # type: ignore[attr-defined]
+            if led is not None:
+                led.add_copy(r, src(r), sim, inl, ok)
+            if rank < 4 or ok:
+                out.append(Match(r.file_title, r.page_url, r.thumb_url, round(sim, 4), inl, ok, query))
+                out[-1].reference_obj = r   # type: ignore[attr-defined]
         return out
 
     def read_signature(self, img: Image.Image) -> dict:
@@ -238,21 +237,13 @@ class Identifier:
             log.warning("signature pass failed: %s", e)
             return {"signature_text": "", "artist": ""}
 
-    def _propose(self, img: Image.Image, refuted: list[dict]) -> dict:
+    def _propose(self, img: Image.Image) -> dict:
         note = ""
-        if refuted:
-            lst = "; ".join(f"{c['artist']} — {c['title']}" for c in refuted[:15])
-            note = (f"These identifications were already checked against museum photographs and DID NOT "
-                    f"match this image: {lst}. Do not repeat them; propose different artists and works.")
-        if self._used_phrases:
-            note += (" These search phrases were already tried without success: "
-                     + "; ".join(sorted(self._used_phrases)[:15]) + ". Give new, differently worded phrases.")
-        if self._vision_hints:
-            h = self._vision_hints
-            note += (" A reverse-image search of the web found this picture on pages titled: "
-                     + "; ".join(t for t in h["page_titles"] if t)[:600]
-                     + f". The search engine's best guess: {', '.join(h['best_guess'])}; "
-                     + f"related names: {', '.join(h['entities'])}. These are leads, not facts.")
+        texts = [i.text for i in self.ledger.items if i.kind in ("engine", "caption", "copy")][:25]
+        if texts:
+            note = ("Reverse-image searches of the web returned these captions and answers for this picture "
+                    "(none of their pictures matched it exactly): " + "; ".join(texts)[:1500]
+                    + ". These are leads, not facts.")
         sig = self._signature
         # Sir, 2026-11-05: signatures and inscriptions are leads only. A faint signature is easily misread
         # (an Aivazovsky read as "A. Sisley" steered a whole run), so it never outweighs the painting itself.
@@ -269,24 +260,35 @@ class Identifier:
     def identify(self, img: Image.Image) -> Identification:
         calls0 = self.vision.calls if self.vision else 0
         pool = ThreadPoolExecutor(4)      # first look's web arms (Bing, Yandex, the Lens slot) run at once
-        self._pending: dict[str, object] = {}
+        self.ledger = Ledger()
         self._lens_log = {"providers": [], "errors": []}
         self._timing: dict[str, float] = {}
+        self._signature: dict = {}
+        self._confirmed_pairs: set[tuple[str, str]] = set()
+        self._confirmation: dict = {}
+        self._record_qids: set[str] = set()
+        self._verified: list[Match] = []      # every copy verified on both instruments, from any search
         try:
             ident = self._identify(img, pool)
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
-        for name, fut in self._pending.items():   # confirmed before these answered: their calls are spent anyway
-            ident.evidence.setdefault("unused_arms", []).append(name)
-            fut.add_done_callback(lambda f, n=name: log.info("late %s result (unused): %s", n, f.exception() or "answered"))
         ident.evidence["vision_web_calls"] = (self.vision.calls - calls0) if self.vision else 0
         ident.evidence["lens_slot"] = self._lens_log
         ident.evidence["seconds_by_arm"] = self._timing
-        sig = getattr(self, "_signature", None) or {}
+        ident.evidence["confirmation"] = self._confirmation
+        ident.evidence["ledger"] = self.ledger.to_list()
+        sig = self._signature or {}
         it = str(sig.get("inscribed_title") or "").strip()
         if it and sig.get("inscribed_title_legible") is True and "?" not in it:
             ident.inscribed_title = it
         ident.evidence["signature"] = sig
+        if ident.status != "confirmed" and self.alert is not None:
+            # a work the evidence could not settle stays OPEN and blocks; the approach needs another look
+            try:
+                self.alert(f"identification unsettled: {ident.evidence.get('reason', '')}"[:300],
+                           {"verified_copies": len(self.ledger.verified()), "items": len(self.ledger.items)})
+            except Exception as e:
+                log.warning("identify alert failed: %s", e)
         return ident
 
     def _timed(self, name: str, fn):
@@ -296,154 +298,249 @@ class Identifier:
         finally:
             self._timing[name] = round(self._timing.get(name, 0.0) + time.time() - t, 2)
 
-    def _try(self, tier: str, q: str, refs, img, img_vec, seen, matches, rounds, cands, sig, summary
-             ) -> Identification | None:
-        """Score one arm's references; a confirmed identification ends the search."""
+    def _arm(self, tier: str, refs, img, img_vec, seen, matches) -> list[Match]:
+        """Score one arm's references into the ledger; a dead source is recorded, never read as "no match"."""
         try:
-            batch = self._timed(f"verify:{tier}", lambda: self._score(img, img_vec, refs() if callable(refs) else refs, q, seen))
-        except Exception as e:      # a dead source is recorded in the run, never read as "no match"
-            log.warning("%s search failed for %r: %s", tier, q, e)
-            matches.append(Match(f"ERROR {tier}: {str(e)[:200]}", "", "", 0.0, 0, False, q))
-            return None
+            batch = self._timed(f"verify:{tier}", lambda: self._score(img, img_vec, refs() if callable(refs) else refs,
+                                                                     tier, seen, tier))
+        except Exception as e:
+            log.warning("%s search failed: %s", tier, e)
+            matches.append(Match(f"ERROR {tier}: {str(e)[:200]}", "", "", 0.0, 0, False, tier))
+            return []
         matches += batch
         hits = [m for m in batch if m.confirmed]
-        if not hits:
-            return None
         for h in hits:      # an Artvee copy's caption is the page title: the artist is read from the page
             r = h.reference_obj  # type: ignore[attr-defined]
             if "artvee.com/dl/" in (r.page_url or "") and " by " not in (r.file_title or ""):
                 try:
                     artist = self.artvee.page_artist(r.page_url)
                     if artist:
-                        r.file_title = f"{re.sub(r' [-–] Artvee$', '', r.file_title or '')} by {artist}"
+                        self.ledger.add("record", "artvee", f"Artvee page names the artist: {artist}", r.page_url,
+                                        claims={"artist": artist})
                 except Exception as e:
                     log.info("artvee page %s unread: %s", r.page_url, e)
-        # verified copies are judged most trusted first: a collection's or reference's caption alone, then every
-        # copy together. Album covers, posters and shops reuse pictures under other names (withheld bench,
-        # 2026-11-06: Spotify covers of a James Ward colour study named the band; Artvee named the work).
-        groups: dict[int, list] = {}
-        for h in hits:
-            groups.setdefault(_site_rank(h.reference_obj.page_url), []).append(h)  # type: ignore[attr-defined]
-        trials = [(f"site rank {r} alone", groups[r]) for r in sorted(groups) if r <= 2 and len(groups[r]) < len(hits)]
-        for label, group in trials + [("every verified copy", hits)]:
-            ident = self._finish(tier, group, matches, rounds, len(rounds), cands, sig, summary)
-            log.info("  %s, %s (%d of %d): %s", tier, label, len(group), len(hits),
-                     "confirmed" if ident.status == "confirmed" else ident.evidence.get("reason"))
-            if ident.status == "confirmed":
-                if group is not hits:
-                    ident.evidence["hits_judged"] = f"{label} ({len(group)} of {len(hits)})"
-                return ident
-            rounds.pop()          # facts failed their gate
-        return None
+        if hits:
+            self._verified += hits
+            self._first_tier = getattr(self, "_first_tier", "") or tier
+            log.info("  %s: %d verified cop%s", tier, len(hits), "y" if len(hits) == 1 else "ies")
+        return hits
 
     def _identify(self, img: Image.Image, pool: ThreadPoolExecutor) -> Identification:
-        """FIRST LOOK on every work, all arms at once: Bing and Yandex visual search, one Google Lens search
-        from the rotating free-credit pool, our cached picture index, and the style shortlist (names only).
-        Each arm is scored the moment it answers. RESCUE runs only when first look verified nothing: one model
-        round, then free searches by the names it gives, then paid credits (Sir's plan, 2026-11-06). The model's
-        repeated guessing rounds are gone: re-guessing alone identified 0 works."""
+        """FIRST LOOK on every work, all arms at once: Bing and Yandex visual search, one Google Lens search from
+        the rotating free-credit pool, our cached picture index, and the style shortlist. Every arm adds to the
+        ledger; none refuses. RESCUE runs only when no copy was verified: one model round, then searches by the
+        names it gives. Then the agents rule on the facts (Sir's redesign, 2026-11-07)."""
         img_vec = self.emb.embed([img])[0]
         self._img_vec, self._img = img_vec, img
-        self._signature: dict = {}
-        self._bing_guess = ""
+        self._first_tier = ""
         seen: set[int] = set()
         matches: list[Match] = []
-        rounds: list = []
-        sig, summary = "", ""
+        hits: list[Match] = []
         arms: dict = {}
+        work = LensWork(img, self.lens.url_fn) if self.lens is not None else None
         if self.reverse is not None:
             arms[pool.submit(self._timed, "bing", lambda: self._bing(img))] = "bing"
             # Yandex returns up to ~340 candidates for a famous work; its first 60 hold the copies (agent trial)
-            arms[pool.submit(self._timed, "yandex", lambda: self.reverse.yandex(img)[:YANDEX_TOP])] = "yandex"
+            arms[pool.submit(self._timed, "yandex", lambda: self._yandex(img))] = "yandex"
         if self.lens is not None:
-            arms[pool.submit(self._timed, "google_lens", lambda: self._lens_refs(self.lens.search(img)))] = "google_lens"
-        self._pending = {n: f for f, n in arms.items()}
+            arms[pool.submit(self._timed, "google_lens", lambda: self._lens_refs(self.lens.search(img, work=work), work))] = "google_lens"
         try:
             style = self._timed("style", lambda: self.style.top(img_vec, 4))
         except Exception as e:
             log.warning("style shortlist unavailable: %s", e)
             style = []
         cands = [{"artist": n, "title": "", "year": "", "confidence": 0, "source": "style"} for n, _ in style]
+        for n, s in style:
+            self.ledger.add("lead", "style", f"style look-alike: {n} (similarity {s:.2f})")
         log.info("style shortlist: %s", [n for n, _ in style])
         if self.index is not None:
-            ident = self._try("cached_index", "cached picture index",
-                              lambda: self._timed("cached_index", lambda: self.index.nearest(img_vec, 10)),
-                              img, img_vec, seen, matches, rounds, cands, sig, summary)
-            if ident:
-                return self._absorb(ident, arms, img, img_vec, seen)
+            hits += self._arm("cached_index", lambda: self._timed("cached_index", lambda: self.index.nearest(img_vec, 10)),
+                              img, img_vec, seen, matches)
         lens_retried = False
         while arms:
-            done, _ = wait(list(arms), return_when=FIRST_COMPLETED)
+            done, _ = wait(list(arms), timeout=ARM_TIMEOUT_S, return_when=FIRST_COMPLETED)
+            if not done:
+                log.warning("first look arms still out after %d s: %s", ARM_TIMEOUT_S, list(arms.values()))
+                matches += [Match(f"ERROR {n}: no answer in {ARM_TIMEOUT_S} s", "", "", 0.0, 0, False, n) for n in arms.values()]
+                break
             for f in done:
                 name = arms.pop(f)
-                self._pending.pop(name, None)
-                ident = self._try(name, name, f.result, img, img_vec, seen, matches, rounds, cands, sig, summary)
-                if ident:
-                    return self._absorb(ident, arms, img, img_vec, seen)
-                if name == "google_lens" and not lens_retried:
-                    # hit rates differ by provider (Serper found 7 of 10): one more provider before rescue
+                got = self._arm(name, f.result, img, img_vec, seen, matches)
+                hits += got
+                if name == "google_lens" and not got and not lens_retried:
+                    # hit rates differ by provider: one more provider when this one verified nothing
                     lens_retried = True
                     tried = set(self._lens_log["providers"]) | {e.split(":", 1)[0] for e in self._lens_log["errors"]}
                     if self.lens is not None and len(tried) < len(self.lens.providers):
-                        g = pool.submit(self._timed, "google_lens", lambda: self._lens_refs(self.lens.search(img, tried)))
+                        w2 = LensWork(img, self.lens.url_fn)
+                        g = pool.submit(self._timed, "google_lens",
+                                        lambda: self._lens_refs(self.lens.search(img, tried, work=w2), w2))
                         arms[g] = "google_lens"
-                        self._pending["google_lens"] = g
-        rounds.append({"round": 1, "stage": "first look", "candidates": cands,
-                       "best_matches": [_mdict(m) for m in sorted(matches, key=lambda m: (-m.clip, -m.inliers))[:5]]})
-        return self._rescue(img, img_vec, seen, matches, rounds, cands)
+        rounds: list = [{"round": 1, "stage": "first look", "candidates": cands,
+                         "best_matches": [_mdict(m) for m in sorted(matches, key=lambda m: (-m.clip, -m.inliers))[:5]]}]
+        if not hits:
+            hits = self._rescue(img, img_vec, seen, matches, rounds, cands)
+        rounds[-1]["confirmed_by"] = [_mdict(h) for h in hits]
+        sig = (self._signature or {}).get("signature_text", "")
+        summary = getattr(self, "_summary", "")
+        if not hits:
+            best = sorted(matches, key=lambda m: (-m.clip, -m.inliers))[:5]
+            rounds[-1]["best_matches"] = [_mdict(m) for m in best]
+            return Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
+                                  evidence={"reason": "no reference image matched on both instruments",
+                                            "errors": [m.reference for m in matches if m.reference.startswith("ERROR")]})
+        self._records(hits)
+        return self._adjudicate(img, hits, matches, rounds, cands, sig, summary)
 
-    def _absorb(self, ident: Identification, arms: dict, img, img_vec, seen, timeout_s: float = 90) -> Identification:
-        """The other first-look arms are already running and paid for: their verified copies join the evidence the
-        catalogue reads (confirmed_by). Without them the card depended on which arm answered first (withheld
-        bench, 2026-11-07: Bing won the race for a Jawlensky, and the Artvee and Wikimedia copies Lens had found,
-        which ruled the facts in the passes before, never reached the catalogue)."""
-        from concurrent.futures import TimeoutError as Timeout, as_completed
-        got = ident.rounds[-1].setdefault("confirmed_by", []) if ident.rounds else []
-        lines = list(ident.evidence.get("web_references") or [])
-        also = []
+    def _adjudicate(self, img, hits, matches, rounds, cands, sig, summary) -> Identification:
+        """The agents rule on artist and title from the ledger (agents.settle). Between rounds the aimed searches
+        run: confirm by the ruled names, the ruled artist's cached catalogue, and any search the agents ask for."""
+        best = max(hits, key=lambda m: (m.inliers, m.clip))
+        ident = Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
+                               evidence={"tier": self._first_tier, **_mdict(best)})
         try:
-            for f in as_completed(list(arms), timeout=timeout_s):
-                name = arms.pop(f)
-                self._pending.pop(name, None)
-                try:
-                    hits = [m for m in self._timed(f"verify:{name}", lambda: self._score(img, img_vec, f.result(), name, seen))
-                            if m.confirmed]
-                except Exception as e:
-                    log.info("  %s (after confirmation) failed: %s", name, e)
-                    continue
-                if hits:
-                    also.append(name)
-                    got += [_mdict(h) for h in hits]
-                    lines += [_web_line(h.reference_obj) for h in hits if isinstance(h.reference_obj, WebReference)]  # type: ignore
-        except Timeout:
-            log.info("  first look arms still out after %.0f s: %s", timeout_s, list(arms.values()))
-        ident.evidence["web_references"] = list(dict.fromkeys(lines))
-        ident.evidence["also_verified_by"] = also
+            verdict = self._timed("adjudicate", lambda: self.agents.settle(
+                img, self.ledger, need=("artist", "title"), rounds_max=self.rounds_max,
+                search=lambda ruling, qs: self._aimed(ruling, qs, rounds)))
+        except Exception as e:          # an agent that fails leaves the work open; it never guesses
+            log.error("adjudication failed: %s", e)
+            ident.evidence["reason"] = f"adjudication failed: {type(e).__name__}: {str(e)[:200]}"
+            return ident
+        ident.evidence["adjudication"] = verdict.pop("rounds", [])
+        ident.evidence["verdict"] = verdict
+        facts = verdict["facts"]
+        ident.artist, ident.title = clean_artist(facts.get("artist", "")), facts.get("title", "")
+        ident.date, ident.medium = facts.get("date", ""), facts.get("medium", "")
+        ident.collection = facts.get("collection", "")
+        ident.facts_source = "evidence"
+        if verdict["failures"]:
+            ident.evidence["reason"] = "; ".join(verdict["failures"])[:400]
+            return ident
+        ident.status = "confirmed"
+        if (_norm(ident.artist), _norm(ident.title)) not in self._confirmed_pairs:  # Sir, 2026-11-06: confirm every found work
+            self._aimed({"artist": {"value": ident.artist}, "title": {"value": ident.title}}, [], rounds)
+        rounds[-1]["confirmed_by"] = [_mdict(m) for m in self._verified]
+        qid = next((r.claims.get("wikidata") for r in self.ledger.items if r.kind == "record" and r.claims.get("wikidata")
+                    and _norm(r.claims.get("artist", "")).split()[-1:] == _norm(ident.artist).split()[-1:]), "")
+        ident.wikidata = qid or ""
+        ident.__dict__.update(self._artist_facts(ident.artist))
+        rejected = check_facts(ident)
+        if rejected:   # a missing fact closes its row; a wrong one would be printed on the card
+            ident.evidence["rejected_facts"] = rejected
+            log.warning("facts rejected for %s — %s: %s", ident.artist, ident.title, rejected)
+        ident.evidence["web_references"] = list(dict.fromkeys(
+            _web_line(m.reference_obj) for m in self._verified  # type: ignore[attr-defined]
+            if isinstance(getattr(m, "reference_obj", None), WebReference)))
+        # artist leads for the catalogue, best first: the ruled artist, then the model's names
+        ident.evidence["artist_leads"] = list(dict.fromkeys(
+            a for a in [ident.artist, *[c["artist"] for c in cands if c.get("source") != "style"]] if a))[:5]
         return ident
+
+    def _aimed(self, ruling: dict, queries: list[str], rounds: list) -> int:
+        """Searches aimed by a ruling: the three confirm searches (once per work), the ruled artist's cached
+        catalogue, and the agents' own requests. Returns how many items the ledger gained."""
+        n0 = len(self.ledger.items)
+        artist, title = _fact(ruling, "artist")[0], _fact(ruling, "title")[0]
+        found: list[Match] = []
+        if artist and title and (_norm(artist), _norm(title)) not in self._confirmed_pairs:
+            # once per ruled pair: a feedback round that turns the ruling gets confirm searches of its own
+            self._confirmed_pairs.add((_norm(artist), _norm(title)))
+            found += self._confirm(artist, title)
+        if artist and self._oeuvre_cached(artist):
+            try:
+                found += [m for m in self._score(self._img, self._img_vec, self._oeuvre_refs(artist, self._img_vec),
+                                                 f"oeuvre:{artist}", set(), "oeuvre") if m.confirmed]
+            except Exception as e:
+                log.info("no catalogue look-up for %r: %s", artist, e)
+        if self.web is not None:
+            for q in queries:
+                try:
+                    found += [m for m in self._timed("agent_search", lambda q=q: self._score(
+                        self._img, self._img_vec, self.web.search(q, 20), q, set(), "agent_search")) if m.confirmed]
+                except Exception as e:
+                    log.warning("agent search %r failed: %s", q, e)
+        if found:
+            self._verified += found
+            self._records(found)
+            rounds[-1]["confirmed_by"] = [_mdict(m) for m in self._verified]
+        log.info("aimed searches (%s — %s; %d asked): %d new items", artist, title, len(queries), len(self.ledger.items) - n0)
+        return len(self.ledger.items) - n0
+
+    def _records(self, hits: list[Match]):
+        """Catalogue records for verified copies that are catalogue entries: a Wikidata item (the cached index, an
+        artist's catalogue), another indexed collection's row, or a Commons file. Each becomes a record in the
+        ledger, never a ruling: a Wikidata item can carry the wrong picture (Vallotton's "Route from Goubing to
+        Sierre", withheld bench 2026-11-06)."""
+        keep = ("title", "artist", "date", "medium", "collection")
+        for h in sorted(hits, key=lambda m: -m.inliers)[:6]:
+            ref = h.reference_obj  # type: ignore[attr-defined]
+            meta = getattr(ref, "meta", None) or {}
+            qid = meta.get("wikidata", "")
+            if not qid and not isinstance(ref, WebReference) and ref.page_id < 10**12:
+                try:
+                    qid = self.wiki.depicted_item(ref.page_id) or ""
+                except Exception as e:
+                    log.info("no Wikidata item for %s: %s", ref.file_title, e)
+            if qid:
+                if qid in self._record_qids:
+                    continue
+                self._record_qids.add(qid)
+                try:
+                    facts = self.wiki.artwork_facts(qid) or {}
+                except Exception as e:
+                    log.info("Wikidata %s unread: %s", qid, e)
+                    facts = {}
+                stated = "; ".join(f"{k}: {facts[k]}" for k in keep if facts.get(k)) or "no title or creator recorded"
+                self.ledger.add("record", "wikidata", f"Wikidata item {qid}, whose image is this picture: {stated}",
+                                f"https://www.wikidata.org/wiki/{qid}", overrule=True,
+                                claims={**{k: facts[k] for k in keep if facts.get(k)}, "wikidata": qid})
+            elif meta.get("artist") or meta.get("title"):      # a row of another indexed collection (NGA, Artvee)
+                self.ledger.add("record", meta.get("source", "index"),
+                                f"indexed collection lists this picture as {meta.get('title', '')!r} by {meta.get('artist', '')}",
+                                ref.page_url, claims={"title": meta.get("title", ""), "artist": meta.get("artist", "")})
+            elif not isinstance(ref, WebReference) and meta:     # a Commons file: its own metadata
+                text = "; ".join(f"{k}: {str(meta.get(k, ''))[:160]}" for k in ("ObjectName", "Artist", "ImageDescription",
+                                                                                "DateTimeOriginal") if meta.get(k))
+                if text:
+                    self.ledger.add("record", "commons", f"Commons file {ref.file_title}: {text}", ref.page_url)
 
     def _bing(self, img) -> list:
         refs, guess = self.reverse.bing(img)
-        self._bing_guess = guess
+        if guess:
+            self.ledger.add("engine", "bing", f"Bing's best guess for this picture: {guess}")
         return refs
 
-    def _rescue(self, img, img_vec, seen, matches, rounds, style_cands) -> Identification:
-        """First look verified nothing. One model round names candidates (with the signature and the style
-        shortlist); free searches by those names run first, then searches that spend credits."""
+    def _yandex(self, img) -> list:
+        tags: list[str] = []
+        refs = self.reverse.yandex(img, tags)[:YANDEX_TOP]
+        for t in tags:
+            self.ledger.add("engine", "yandex", f"Yandex tag for this picture: {t}")
+        return refs
+
+    def _rescue(self, img, img_vec, seen, matches, rounds, style_cands) -> list[Match]:
+        """First look verified nothing. One model round names candidates (with the signature, the style shortlist
+        and what the engines said); free searches by those names run first, then searches that spend credits.
+        Stops at the first tier that verifies a copy."""
         self._signature = self._timed("signature", lambda: self.read_signature(img))
-        self._phrases, self._used_phrases, self._vision_hints = [], set(), {}
         try:
-            prop = self._timed("propose", lambda: self._propose(img, []))
+            prop = self._timed("propose", lambda: self._propose(img))
         except Exception as e:
             log.warning("model round failed: %s", e)
             prop = {}
-        sig = self._signature.get("signature_text", "") or prop.get("signature_text", "")
-        summary = prop.get("visual_summary", "")
+        self._summary = prop.get("visual_summary", "")
+        summary = self._summary
         cands = [c for c in prop.get("candidates", []) if c.get("artist")][:5]
+        for c in cands:
+            self.ledger.add("lead", "model", f"model guess: {c.get('artist')} — {c.get('title', '')} ({c.get('year', '')})")
         sa = (self._signature.get("artist") or "").strip()
+        if self._signature.get("signature_text"):
+            self.ledger.add("signature", "model", f"signature read as {self._signature['signature_text']!r}"
+                            + (f", perhaps {sa}" if sa else ""))
         for c in ([{"artist": sa, "title": "", "source": "signature"}] if sa else []) + style_cands:
             if _norm(c["artist"]) not in {_norm(x["artist"]) for x in cands}:
                 cands.append(c)
         log.info("rescue candidates: %s", [(c["artist"], c.get("title")) for c in cands])
+        rounds.append({"round": 2, "stage": "rescue", "candidates": cands})
         artists = list(dict.fromkeys(c["artist"] for c in cands))
         titled = [c for c in cands if c.get("title")]
         insc = (self._signature.get("inscribed_title") or "").strip()
@@ -451,43 +548,41 @@ class Identifier:
         # free: Artvee, Wikidata titles, Commons titles, the web by guess, cached catalogues
         for q in dict.fromkeys([insc] + [c["title"] for c in titled]):
             if len(q) >= 4:
-                tiers.append(("artvee", f"artvee: {q}", lambda q=q: self.artvee.search(q)))
+                tiers.append(("artvee", lambda q=q: self.artvee.search(q)))
         for a in artists[:3]:
-            tiers.append(("artvee", f"artvee catalogue: {a}", lambda a=a: self.artvee.nearest(a, img_vec, 6)))
+            tiers.append(("artvee", lambda a=a: self.artvee.nearest(a, img_vec, 6)))
         for c in titled[:4]:
-            tiers.append(("wikidata_title", f"wikidata: {c['artist']} {c['title']}",
-                          lambda c=c: self._wikidata_title_refs(c["artist"], c["title"])))
+            tiers.append(("wikidata_title", lambda c=c: self._wikidata_title_refs(c["artist"], c["title"])))
         for c in titled[:4]:
-            q = f"{c['title']} {c['artist']}"
-            tiers.append(("commons", q, lambda q=q: self.wiki.search_files(q, 12)))
+            tiers.append(("commons", lambda q=f"{c['title']} {c['artist']}": self.wiki.search_files(q, 12)))
         if self.web:
             for c in titled[:4]:
-                q = f"{c['artist']} {c['title']} painting"
-                tiers.append(("web", q, lambda q=q: self.web.search(q, 15)))
+                tiers.append(("web", lambda q=f"{c['artist']} {c['title']} painting": self.web.search(q, 15)))
         for a in artists[:4]:
             if self._oeuvre_cached(a):
-                tiers.append(("oeuvre", f"oeuvre:{a}", lambda a=a: self._oeuvre_refs(a, img_vec)))
+                tiers.append(("oeuvre", lambda a=a: self._oeuvre_refs(a, img_vec)))
         # credits, cheapest first; each pool stops at 10% of its free allowance
         if self.lens is not None:
-            tiers.append(("yandex_searchapi", "yandex via SearchAPI", lambda: self.lens.extra("searchapi_yandex", img)))
-            tiers.append(("lens_exact", "Google Lens exact matches", lambda: self.lens.extra("serpapi_exact", img)))
+            for name, tier in (("searchapi_yandex", "yandex_searchapi"), ("serpapi_exact", "lens_exact")):
+                def run(name=name, tier=tier):
+                    w = LensWork(img, self.lens.url_fn)
+                    try:
+                        return self.lens.extra(name, img, w)
+                    finally:
+                        for t in w.texts:
+                            self.ledger.add("engine", t.get("source", tier), t["text"], t.get("url", ""), t.get("site", ""))
+                tiers.append((tier, run))
         if self.web is not None:
             for c in titled[:2]:
-                q = f"{c['artist']} {c['title']}"
-                tiers.append(("google_images", q, lambda q=q: self.web.serpapi_images(q)))
+                tiers.append(("google_images", lambda q=f"{c['artist']} {c['title']}": self.web.serpapi_images(q)))
             if summary:
-                tiers.append(("google_images_desc", summary[:120], lambda: self.web.index_images(summary[:120], 30)))
-        for tier, q, fn in tiers:
-            log.info("  rescue %s: %s", tier, q[:80])
-            ident = self._try(tier, q, lambda fn=fn, tier=tier: self._timed(tier, fn), img, img_vec, seen, matches,
-                              rounds, cands, sig, summary)
-            if ident:
-                return ident
-        best = sorted(matches, key=lambda m: (-m.clip, -m.inliers))[:5]
-        rounds.append({"round": 2, "stage": "rescue", "candidates": cands, "best_matches": [_mdict(m) for m in best]})
-        return Identification(status="unconfirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
-                              evidence={"reason": "no reference image matched on both instruments",
-                                        "errors": [m.reference for m in matches if m.reference.startswith("ERROR")]})
+                tiers.append(("google_images_desc", lambda: self.web.index_images(summary[:120], 30)))
+        for tier, fn in tiers:
+            log.info("  rescue %s", tier)
+            hits = self._arm(tier, lambda fn=fn, tier=tier: self._timed(tier, fn), img, img_vec, seen, matches)
+            if hits:
+                return hits
+        return []
 
     def _wikidata_title_refs(self, artist: str, title: str) -> list:
         """The artist's catalogued works whose title shares most words with the guessed title."""
@@ -504,164 +599,37 @@ class Identifier:
                                      width=500, height=500, meta={"wikidata": w["qid"], "artist_wikidata": qid}))
         return out[:8]
 
-    def _lens_refs(self, res) -> list:
-        """The Lens slot's answer, with the provider and any failed providers kept for the run record."""
+    def _lens_refs(self, res, work) -> list:
+        """The Lens slot's answer: its references to score, its text answers into the ledger, and the provider
+        and any failed providers kept for the run record."""
         prov, refs, errs = res
         self._lens_log["providers"].append(prov)
         self._lens_log["errors"] += errs
+        for t in work.texts:
+            self.ledger.add("engine", t.get("source", f"google_lens:{prov}"), t["text"], t.get("url", ""), t.get("site", ""))
         return refs
 
-    def _corroborate(self, hits: list, cands: list[dict]) -> list:
-        """After a first web match, look for the same image on more sites so the facts rest on several
-        sources. Searches by what the matched copy itself says (caption, file name) first: prefixing a
-        guessed artist would steer away from the copies that carry the real name."""
-        img, vec = self._img, self._img_vec
-        seen = {h.reference_obj.page_id for h in hits}  # type: ignore[attr-defined]
-        r0 = hits[0].reference_obj  # type: ignore[attr-defined]
-        fname = re.sub(r"[+_%20-]+", " ", r0.image_url.split("?")[0].rsplit("/", 1)[-1].rsplit(".", 1)[0]).strip()
-        caption = re.split(r"\s[|—–-]\s", r0.file_title)[0].strip()
-        qs = [q for q in (caption, fname if not re.fullmatch(r"[\w]{20,}|[\d\s]+", fname) else "",
-                          f"{caption} artist") if len(q) >= 6]
-        for q in list(dict.fromkeys(qs))[:3]:
-            try:
-                hits += [m for m in self._score(img, vec, self.web.search(q, 20), q, seen) if m.confirmed]
-            except Exception as e:
-                log.warning("corroboration search failed for %r: %s", q, e)
-        return hits
-
-    def _caption_artist(self, hits: list) -> str:
-        caps = "\n".join(_web_line(h.reference_obj) for h in hits)  # type: ignore[attr-defined]
-        try:
-            d = self.vlm.ask_json(WEB_FACTS_PROMPT.format(captions=caps), required=("artist",))
-            return str(d.get("artist", "")).strip()
-        except Exception:
-            return ""
-
-    def _finish(self, tier, hits, matches, rounds, rnd, cands, sig, summary) -> Identification:
-        hit = max(hits, key=lambda m: m.inliers)
-        ref = hit.reference_obj  # type: ignore[attr-defined]
-        rounds.append({"round": rnd + 1, "candidates": cands, "tier": tier, "confirmed_by": [_mdict(h) for h in hits],
-                       "best_matches": [_mdict(m) for m in sorted(matches, key=lambda m: -m.clip)[:5]]})
-        ident = Identification(status="confirmed", rounds=rounds, signature_text=sig, visual_summary=summary,
-                               evidence={"tier": tier, **_mdict(hit)})
-        captions = True
-        if tier in ("commons", "oeuvre", "wikidata_title") or ref.meta.get("wikidata"):
-            qid = ref.meta.get("wikidata") or self.wiki.depicted_item(ref.page_id)
-            facts = self.wiki.artwork_facts(qid) if qid else {}
-            if facts.get("title") and facts.get("artist"):
-                captions = False
-                ident.facts_source = "wikidata"
-                for k, v in facts.items():
-                    setattr(ident, k, v)
-            elif not isinstance(ref, WebReference):      # a Commons file: its own metadata names the work
-                captions = False
-                m = ref.meta
-                parsed = self.vlm.ask_json(TITLE_PROMPT.format(
-                    file_title=ref.file_title, object_name=m.get("ObjectName", ""),
-                    description=m.get("ImageDescription", "")[:600], artist=m.get("Artist", "")[:200],
-                    date=m.get("DateTimeOriginal", "")), required=("title", "artist"))
-                ident.facts_source = "commons-metadata"
-                ident.title, ident.artist = parsed["title"].strip(), clean_artist(parsed["artist"])
-                ident.date = str(parsed.get("date", "")).strip()
-            # else: a Wikidata row of the cached index whose item lacks a creator or title (Vallotton's
-            # "Route from Goubing to Sierre" carries the Tower of Goubing's picture and no artist, withheld
-            # bench 2026-11-06): the verified copies' captions are read instead
-        if captions:
-            hits = self._corroborate(hits, cands)
-            caption_artist = self._caption_artist(hits)
-            # upgrade: find the same image in the caption artist's catalogued works -> Wikidata facts.
-            # Only from a catalogue already embedded: a first sweep after a confirmed match buys nothing
-            # the catalogue stage does not do anyway (its Wikidata item search sweeps the same oeuvre).
-            if caption_artist and self._oeuvre_cached(caption_artist):
-                try:
-                    cat = [m for m in self._score(self._img, self._img_vec,
-                                                  self._oeuvre_refs(caption_artist, self._img_vec), f"oeuvre:{caption_artist}",
-                                                  set()) if m.confirmed]
-                except Exception as e:
-                    log.info("no catalogue upgrade for %r: %s", caption_artist, e)
-                    cat = []
-                if cat:
-                    rounds.pop()
-                    up = self._finish("oeuvre", cat, matches + cat, rounds, rnd, cands, sig, summary)
-                    up.evidence["found_via"] = {"tier": "web", **_mdict(hit)}
-                    return up
-            caps = "\n".join(_web_line(h.reference_obj) for h in hits)  # type: ignore[attr-defined]
-            parsed = self.vlm.ask_json(WEB_FACTS_PROMPT.format(captions=caps), required=("artist", "title"))
-            ident.facts_source = "web-captions"
-            ident.title, ident.artist = parsed["title"].strip(), clean_artist(parsed["artist"])
-            ident.date, ident.medium = str(parsed.get("date", "")).strip(), str(parsed.get("medium", "")).strip()
-            ident.evidence["web_references"] = [_web_line(h.reference_obj) for h in hits]  # type: ignore[attr-defined]
-            # independent corroboration 1: the caption's artist is the one the model saw
-            seen_names = " ".join([sig] + [c["artist"] for c in cands])
-            surname = _norm(ident.artist).split()[-1:] or [""]
-            by_model = bool(surname[0]) and surname[0] in _norm(seen_names)
-            # a witness is a page that can attribute art. Print shops and blogs usually name the painter (they carry
-            # Wyeth's Crows in Winter); music and social pages name whoever reused the picture (two music pages
-            # named a cover's band for a James Ward study, withheld bench 2026-11-07)
-            sites = {h.reference_obj.domain for h in hits  # type: ignore[attr-defined]
-                     if surname[0] and surname[0] in _norm(_web_line(h.reference_obj)).split()  # type: ignore
-                     and _site_rank(h.reference_obj.page_url) <= 5}  # type: ignore[attr-defined]
-            if not by_model and len(sites) < 2 and ident.artist and ident.title:
-                # one more look, now that the facts name an artist and title: the artist's own site,
-                # galleries and catalogues usually title the same image the same way
-                q = f"{ident.artist} {ident.title}"
-                hits = hits + [m for m in self._score(self._img, self._img_vec, self.web.search(q, 20), q,
-                                                      {h.reference_obj.page_id for h in hits}) if m.confirmed]  # type: ignore
-                sites = {h.reference_obj.domain for h in hits  # type: ignore[attr-defined]
-                         if surname[0] and surname[0] in _norm(_web_line(h.reference_obj)).split()  # type: ignore
-                         and _site_rank(h.reference_obj.page_url) <= 5}  # type: ignore[attr-defined]
-                ident.evidence["web_references"] = [_web_line(h.reference_obj) for h in hits]  # type: ignore
-            ident.evidence["artist_corroborated"] = by_model or len(sites) >= 2
-            ident.evidence["artist_corroborated_by"] = ("the model's own reading" if by_model
-                                                       else f"{len(sites)} independent sites")
-            # 2: the title is actually written in at least one verified reference
-            tw = {w for w in _norm(ident.title).split() if len(w) > 2}
-            support = [h for h in hits if tw and len(tw & set(_norm(_web_line(h.reference_obj)).split())) / len(tw) >= 0.6]  # type: ignore
-            ident.evidence["title_support"] = len(support)
-            if not ident.evidence["artist_corroborated"]:
-                ident.status = "unconfirmed"
-                ident.evidence["reason"] = f"caption artist {ident.artist!r} not corroborated by the image reading"
-            elif not support:
-                ident.status = "unconfirmed"
-                ident.evidence["reason"] = f"title {ident.title!r} is not written in any verified reference"
-        if ident.facts_source != "wikidata" and ident.artist:
-            ident.__dict__.update(self._artist_facts(ident.artist))
-            rejected = check_facts(ident)
-            if rejected:   # a missing fact closes its row; a wrong one would be printed on the card
-                ident.evidence["rejected_facts"] = rejected
-                log.warning("facts rejected for %s — %s: %s", ident.artist, ident.title, rejected)
-        if not (ident.title and ident.artist):
-            ident.status = "unconfirmed"
-            ident.evidence["reason"] = "image matched but the reference carries no usable title/artist"
-        if ident.status == "confirmed":
-            self._confirm(ident)
-            # artist leads for the catalogue, best first: a wrong first name no longer hides the work from
-            # the museums (the benchmark asked only the model's top 2, right for 13 of 24 works)
-            ident.evidence["artist_leads"] = list(dict.fromkeys(      # the model's names; style look-alikes are not leads
-                a for a in [ident.artist, *[c["artist"] for c in cands if c.get("source") != "style"]] if a))[:5]
-        return ident
-
-    def _confirm(self, ident: Identification):
-        """CONFIRM (Sir, 2026-11-06: all three on every found work): the found artist and title searched on the
-        web, in Google Images through SerpAPI, and in Google's image index through Serper. Copies that pass
-        both instruments become more references for the catalogue; credits stop at each pool's 10% floor."""
-        if self.web is None or not (ident.artist and ident.title):
-            return
-        q = f"{ident.artist} {ident.title}"
-        seen: set[int] = set()
-        out, refs = {}, list(ident.evidence.get("web_references", []) or [])
+    def _confirm(self, artist: str, title: str) -> list[Match]:
+        """CONFIRM (Sir, 2026-11-06: all three on every found work): the ruled artist and title searched on the
+        web, in Google Images through SerpAPI, and in Google's image index through Serper. Everything they
+        return joins the ledger; credits stop at each pool's 10% floor."""
+        if self.web is None:
+            return []
+        q = f"{artist} {title}"
+        found: list[Match] = []
         for name, fn in (("web_images", lambda: self.web.search(f"{q} painting", 20)),
                          ("google_images", lambda: self.web.serpapi_images(q)),
                          ("google_images_desc", lambda: self.web.index_images(q, 30))):
             try:
-                ms = self._timed(f"confirm:{name}", lambda fn=fn: self._score(self._img, self._img_vec, fn(), q, set(seen)))
+                ms = self._timed(f"confirm:{name}", lambda fn=fn, name=name: self._score(self._img, self._img_vec, fn(), q,
+                                                                                        set(), f"confirm:{name}"))
                 hits = [m for m in ms if m.confirmed]
-                out[name] = {"verified": len(hits), "best_clip": max((m.clip for m in ms), default=0.0)}
-                refs += [_web_line(h.reference_obj) for h in hits if isinstance(h.reference_obj, WebReference)]  # type: ignore
+                self._confirmation[name] = {"verified": len(hits), "best_clip": max((m.clip for m in ms), default=0.0)}
+                found += hits
             except Exception as e:     # recorded, never read as "no match"
-                out[name] = {"error": str(e)[:200]}
-        ident.evidence["confirmation"] = out
-        ident.evidence["web_references"] = list(dict.fromkeys(refs))
+                self._confirmation[name] = {"error": str(e)[:200]}
+        return found
+
 
     def _artist_facts(self, name: str) -> dict:
         data = self.wiki._get(self.wiki.wikidata_api, {"action": "wbsearchentities", "search": name,
@@ -683,20 +651,7 @@ class Identifier:
 _DANGLING = re.compile(r"\b(on|and|with|of|in|over|en|sur|auf|su|y|et|und)\s*[|,;:.\u2026-]*\s*$|\.\.\.$|\u2026$", re.I)
 
 
-_RANK = {"curated": 0, "reference": 1, "market": 2, "unknown": 3, "blog": 4, "commercial": 5, "social": 6}
-_ART_SITES = ("artvee.com", "wikiart.org", "the-athenaeum.org", "wga.hu", "artuk.org")
-
-
-def _site_rank(url: str) -> int:
-    """How far a page's caption can be trusted to name the work: collections first, shops and feeds last."""
-    from .sources import classify
-    u = (url or "").lower()
-    if any(d in u for d in _ART_SITES):
-        return 1
-    if any(d in u for d in ("spotify.", "music.apple", "soundcloud", "deezer", "bandcamp", "youtube.", "amselcom",
-                            "beatport", "tidal.com", "shazam", "last.fm", "discogs", "audiomack")):
-        return 7      # music pages use paintings as covers and name the band (James Ward -> "Latteo")
-    return _RANK.get(classify(u), 3)
+_site_rank = site_rank      # kept under its old name for callers
 
 
 def clean_artist(name: str) -> str:
