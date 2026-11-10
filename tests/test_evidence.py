@@ -227,3 +227,14 @@ def test_a_caption_beside_another_picture_does_not_speak_for_this_one():
     assert "artist" not in v["facts"] and "1 independent" in v["unruled"]["artist"]  # similar pictures, not this one
     v2 = rule_facts(led, _ruling([pin.id, copy.id], [pin.id], "Eric Wert", "x"), _check([]))
     assert v2["facts"].get("artist") == "Eric Wert"           # a near-copy's caption does speak for it
+
+
+def test_the_lens_picker_prefers_providers_that_return_text():
+    from neural_canvas.lens_pool import LensPool, Provider
+    big = Provider("vision", lambda w: [], allowance=1000, renews="monthly")
+    rich = Provider("serpapi", lambda w: [], allowance=250, renews="monthly", texts=True)
+    pool = LensPool([big, rich], None, lambda im: "")
+    pool.refresh = lambda p, force=False: None
+    pool.remaining = lambda p: {"vision": 990, "serpapi": 60}[p.name]     # vision has the larger share
+    assert pool.pick().name == "serpapi"
+    assert pool.pick({"serpapi"}).name == "vision"                     # the image-only provider is the next witness

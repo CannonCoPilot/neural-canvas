@@ -58,6 +58,7 @@ class Provider:
     balance: Callable[[], int] | None = None   # live remaining credits; None = counted locally per month
     enabled: Callable[[], bool] = lambda: True
     charges_itself: bool = False         # the provider's client keeps the ledger (Vision: cached replies are free)
+    texts: bool = False                  # returns web results / knowledge panel beside the image matches
 
     @property
     def floor(self) -> int:
@@ -219,8 +220,10 @@ class LensPool:
             ok = [p for p in live if self.above_floor(p)]
         if not ok:
             return None
-        # monthly pools first: their unused credits are lost at the reset; one-time pools are the reserve
-        return max(ok, key=lambda p: (p.renews == "monthly", self.remaining(p) / p.allowance, p.name))
+        # text-rich providers first (Sir, 2026-11-10): their web results name the work; Cloud Vision, which has the
+        # largest share, returns none and took every work of bench pass 8. Then monthly pools before the one-time
+        # reserve, whose credits do not come back, then the largest share left.
+        return max(ok, key=lambda p: (p.texts, p.renews == "monthly", self.remaining(p) / p.allowance, p.name))
 
     def search(self, img: Image.Image, exclude: set[str] | frozenset[str] = frozenset(), work: Work | None = None
                ) -> tuple[str, list[WebReference], list[str]]:
@@ -359,7 +362,8 @@ def serpapi_provider(key: Callable[[], str]) -> Provider:
         k = key()
         d = _http_json(_req("GET", "https://serpapi.com/account.json", params={"api_key": k}, timeout=20), k, "serpapi account")
         return int(d.get("total_searches_left") or 0)
-    return Provider("serpapi", search, allowance=250, renews="monthly", balance=balance, enabled=lambda: bool(key()))
+    return Provider("serpapi", search, allowance=250, renews="monthly", balance=balance, enabled=lambda: bool(key()),
+                    texts=True)
 
 
 def searchapi_provider(key: Callable[[], str]) -> Provider:
@@ -384,7 +388,8 @@ def searchapi_provider(key: Callable[[], str]) -> Provider:
                                     timeout=20), k, "searchapi account")
         return int((d.get("account") or {}).get("remaining_credits") or 0)
     # a 100-search grant with no monthly allowance on the account (2026-11-05): one-time until a reset is seen
-    return Provider("searchapi", search, allowance=100, renews="one-time", balance=balance, enabled=lambda: bool(key()))
+    return Provider("searchapi", search, allowance=100, renews="one-time", balance=balance, enabled=lambda: bool(key()),
+                    texts=True)
 
 
 def serper_provider(key: Callable[[], str]) -> Provider:
@@ -516,7 +521,7 @@ def _visual_rows(items, source: str) -> list[WebReference]:
 
 
 def rapidapi_provider(name: str, host: str, path: str, params: Callable[[str], dict], rows: Callable[[dict], list],
-                      free_limit: int, quota_path: Path, key: Callable[[], str]) -> Provider:
+                      free_limit: int, quota_path: Path, key: Callable[[], str], texts: bool = True) -> Provider:
     """A RapidAPI API on its free BASIC plan: a monthly request quota with a HARD limit (no overage, checked
     from each API's plan list, 2026-11-06). Each vendor has its own quota. The balance comes back in every
     reply's x-ratelimit headers, kept in ``quota_path``. If the reply's limit is not the free plan's, a paid
@@ -554,7 +559,8 @@ def rapidapi_provider(name: str, host: str, path: str, params: Callable[[str], d
         if q.get("reset_s") and time.time() > t + int(q["reset_s"]):
             return int(q.get("limit") or free_limit)      # the quota has reset since the last reply
         return int(q["remaining"])
-    return Provider(name, search, allowance=free_limit, renews="monthly", balance=balance, enabled=lambda: bool(key()))
+    return Provider(name, search, allowance=free_limit, renews="monthly", balance=balance, enabled=lambda: bool(key()),
+                    texts=texts)
 
 
 def scrapebadger_provider(key: Callable[[], str]) -> Provider:
