@@ -56,13 +56,48 @@ def test_a_tall_figure_keeps_head_and_body_and_gives_up_the_sky():
     assert plan.detail and "young woman" in plan.detail_reasons[0]   # her feet cannot fit: a detail, said so
 
 
-def test_principal_faces_that_cannot_share_a_window_make_a_detail_not_a_block():
+def test_faces_that_cannot_share_a_window_keep_the_main_head_and_make_a_detail_not_a_block():
     faces = [Subject("a", (0.4, 0.05, 0.5, 0.12), 5, True, "head"), Subject("b", (0.4, 0.85, 0.5, 0.92), 5, True, "head")]
     plan = Composer(3840, 2160, 0.97).plan(_img(1000, 2000), _interp([Subject("a", (0.3, 0.0, 0.7, 1.0), 5, True, "figure")],
                                                                       faces=faces))
     assert plan.passed and plan.detail and _is_16x9_full_bleed(plan)
-    assert any("principal head" in w for w in plan.warnings)
+    assert _retained(faces[0].box, plan.window) == 1.0          # the main subject's head, whole
+    assert any("secondary face of 'b'" in w for w in plan.warnings)
     assert plan.faces_kept == "1/2"                             # one head whole, not two halves
+
+
+def test_a_crowd_of_secondary_faces_never_outvotes_the_main_head():
+    # Bloch, Christus Consolator (1881), as the VLM read it: Christ's head at the top, seven faces below
+    subs = [Subject("Christus Consolator", (0.078, 0.05, 0.885, 1.0), 5, True, "figure"),
+            Subject("woman in dark veil", (0.0, 0.375, 0.215, 1.0), 4, False, "figure"),
+            Subject("child", (0.15, 0.665, 0.265, 0.98), 3, False, "figure"),
+            Subject("bearded man clinging to Christ's robe", (0.575, 0.595, 0.865, 1.0), 4, False, "figure")]
+    faces = [Subject("Christus Consolator", (0.4, 0.05, 0.54, 0.265), 5, True, "head"),
+             Subject("woman in dark veil", (0.095, 0.4, 0.17, 0.525), 5, False, "head"),
+             Subject("child", (0.17, 0.68, 0.24, 0.8), 5, False, "head"),
+             Subject("bearded man clinging to Christ's robe", (0.59, 0.6, 0.68, 0.74), 5, False, "head"),
+             Subject("man with blue headband", (0.735, 0.575, 0.805, 0.725), 5, False, "head"),
+             Subject("elderly man with staff", (0.275, 0.75, 0.385, 0.93), 5, False, "head")]
+    plan = Composer(3840, 2160, 0.97).plan(_img(1937, 1426), _interp(subs, "religious-historical", faces))
+    assert _retained(faces[0].box, plan.window) == 1.0 and not plan.detail
+    assert _retained(faces[2].box, plan.window) == 1.0          # the child kept whole: the window goes as low as it may
+    assert plan.faces_kept == "5/6"                             # only the elderly man, who cannot fit with Christ
+
+
+def test_a_tie_at_the_top_goes_to_the_subject_the_focal_point_falls_on():
+    from neural_canvas.crop import main_subject
+    # Bloch, Christ at Gethsemane: Christ and the angel both read as importance 5; the eye goes to Christ
+    subs = [Subject("Christ", (0.012, 0.2, 0.62, 0.998), 5, True, "figure"), Subject("angel", (0.44, 0.015, 1.0, 0.96), 5, True, "figure")]
+    faces = [Subject("Christ", (0.45, 0.22, 0.58, 0.42), 5, True, "head"), Subject("angel", (0.45, 0.035, 0.6, 0.22), 5, True, "head")]
+    assert main_subject(_interp(subs, "religious-historical", faces, focal=(0.48, 0.34))).label == "Christ"
+
+
+def test_the_main_head_is_found_inside_the_main_subject_when_no_face_bears_its_label():
+    from neural_canvas.crop import main_heads, main_subject
+    subs = [Subject("saint", (0.2, 0.0, 0.6, 1.0), 5, True, "figure"), Subject("donor", (0.7, 0.4, 0.9, 1.0), 3, False, "figure")]
+    faces = [Subject("haloed face", (0.35, 0.05, 0.45, 0.2), 5, True, "head"), Subject("donor", (0.75, 0.45, 0.85, 0.6), 3, False, "head")]
+    it = _interp(subs, faces=faces)
+    assert main_subject(it).label == "saint" and [f.label for f in main_heads(it)] == ["haloed face"]
 
 
 def test_a_crowd_marked_essential_still_keeps_the_principal_face():
