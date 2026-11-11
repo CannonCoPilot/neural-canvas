@@ -28,6 +28,7 @@ from .crop import Composer, CropPlan
 from .dedup import ArtworkRegistry, phash
 from .deliver import AuthRequired, GooglePhotos
 from .identify import Identifier
+from .larger import LargerSource, needed_scale
 from .interpret import Interpretation, Subject, interpret
 from .catalogue import Catalogue, catalogue_stage
 from .colour import rebalance
@@ -119,6 +120,7 @@ class Docent:
         self.composer = Composer(W, H, cfg.thresholds["essential_retained_min"],
                                  card=((W - m - cw) / W, (H - m - ch) / H, (W - m) / W, (H - m) / H),
                                  detail_min=cfg.thresholds["detail_min_retained"])
+        self.larger = LargerSource(self.wiki, self.identifier.web, self.embedder, cfg.thresholds)
         self._upscaler = None
         self.photos = GooglePhotos(cfg["google_photos"], cfg.path("state_dir"))
         self.registry = ArtworkRegistry(cfg.path("state_dir"))
@@ -166,12 +168,18 @@ class Docent:
         return out
 
     def run(self, run_id: str, source: Path, resume: bool = True, deliver: bool = True,
-            on_stage=None, redeliver: bool = False) -> RunResult:
+            on_stage=None, redeliver: bool = False, redo: tuple[str, ...] = ()) -> RunResult:
         work = source.parent
         rec_path = work / "record.json"
         rec = json.loads(rec_path.read_text()) if (resume and rec_path.exists()) else {}
         rec.setdefault("run_id", run_id)
         rec.setdefault("stages", {})
+        for s in redo:                    # run these again; delivery keeps its record, so a redelivery replaces
+            if s == "deliver":
+                raise ValueError("redo cannot drop the delivery record; use redeliver")
+            rec["stages"].pop(s, None)
+            if s == "source":
+                (source.parent / "source-large.jpg").unlink(missing_ok=True)
         rec["source"] = source.name
         rec["started"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         self.vlm.calls = []
@@ -231,6 +239,27 @@ class Docent:
             self.registry.record(run_id, phash=phash(raw), artist=facts["artist"], title=facts["title"],
                                  status="identified")
 
+            # a source too small for the display is replaced by a larger verified copy, when one is found
+            # (Sir, 2026-11-10); the reading below is then redone on it, since its trimmed box changes
+            stage = "source"
+            large = work / "source-large.jpg"
+            disp = (self.cfg["display"]["width"], self.cfg["display"]["height"])
+            max_up = self.cfg.thresholds["max_upscale"]
+            if not large.exists() and needed_scale(img.size, disp) > max_up:
+                if on_stage:
+                    on_stage(stage)
+                t0 = time.time()
+                found, search = self.larger.find(img, st, facts["artist"], facts["title"], disp, max_up)
+                st[stage] = {"passed": True, "seconds": round(time.time() - t0, 1), "replaced": found is not None,
+                             **search.to_dict()}
+                if found is not None:
+                    found.save(large, "JPEG", quality=95)
+                save()
+            if large.exists():
+                img = load_image(large)
+                rec["trim"] = {"cut": {}, "box": [0, 0, *img.size], "source_size": list(img.size),
+                               "larger_copy": str(large)}
+
             stage = "interpret"
             if on_stage:
                 on_stage(stage)
@@ -241,7 +270,9 @@ class Docent:
                     or tuple(prev.get("image_box", ())) != tuple(rec["trim"]["box"]):
                 t0 = time.time()
                 it = interpret(self.vlm, img, facts)
-                fails = [] if any(s.essential for s in it.subjects) else ["no essential subject marked"]
+                # an abstract with nothing located is whole as a field of colour and form: there is no subject to mark
+                field_only = it.genre == "abstract" and not it.subjects
+                fails = [] if field_only or any(s.essential for s in it.subjects) else ["no essential subject marked"]
                 fails += [] if it.label_text and len(it.label_text.split()) >= 25 else ["label paragraph too short"]
                 st[stage] = {"passed": not fails, "failures": fails, "seconds": round(time.time() - t0, 1),
                              "image_box": list(rec["trim"]["box"]), **it.to_dict()}

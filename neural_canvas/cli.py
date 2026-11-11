@@ -37,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--fresh", action="store_true", help="ignore stage results from earlier runs")
     p.add_argument("--redeliver", action="store_true",
                    help="deliver again even if delivered before; the new frame replaces the old one in the album")
+    p.add_argument("--redo", default="", help="comma-separated stages to run again though they passed (e.g. "
+                   "catalogue, interpret, source); the others resume")
     p = sub.add_parser("retry")
     p.add_argument("--stage", help="only tasks blocked at this stage (e.g. deliver)")
     sub.add_parser("auth-photos")
@@ -94,7 +96,8 @@ def main(argv: list[str] | None = None) -> int:
         bad = 0
         for i in a.images:
             rid, src = ingest(cfg, Path(i))
-            r = d.run(rid, src, resume=not a.fresh, deliver=not a.no_deliver, redeliver=a.redeliver)
+            r = d.run(rid, src, resume=not a.fresh, deliver=not a.no_deliver, redeliver=a.redeliver,
+                      redo=tuple(s.strip() for s in a.redo.split(",") if s.strip()))
             print(json.dumps({"input": Path(i).name, **r.__dict__}), flush=True)
             bad += r.status not in ("complete", "rendered")
         return 1 if bad else 0

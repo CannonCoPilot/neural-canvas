@@ -168,7 +168,8 @@ def test_a_coloured_edge_is_part_of_the_art():
 def test_a_detail_is_named_on_the_card():
     from neural_canvas.placard import _layout
     lines, fails = _layout({"artist": "Emile Claus", "title": "Summer Morning", "date": "c. 1891", "detail": True}, 0.3, 221)
-    assert "Summer Morning, c. 1891 (detail)" in [t for t, _, _ in lines] and not fails
+    text = [t for t, _, _ in lines]
+    assert "Summer Morning (detail)" in text and "c. 1891" in text and not fails
 
 
 def test_box_normalisation_and_rejects():
@@ -242,9 +243,10 @@ def test_placard_is_facts_only_fixed_half_size_and_bottom_right():
     assert pl.position == "bottom-right" and pl.passed, pl.failures
     text = [s for s in pl.lines if s]
     assert text[-2:] == ["Impressionism", "Los Angeles County Museum of Art"]   # movement right above it
-    assert len(text) == 6 and "The Field of Derout-Lollichon, 1886" in text   # no paragraph; title one line
+    assert text == ["Paul Gauguin", "France", "1848–1903", "The Field of Derout-Lollichon", "1886",
+                    "Oil paint on canvas", "Impressionism", "Los Angeles County Museum of Art"]   # one fact a line
     x0, y0, x1, y1 = pl.box
-    assert (x1, y1) == (3840 - 40, 2160 - 40) and (x1 - x0, y1 - y0) == card_size(0.5) == (411, 190)   # fixed, half of 822
+    assert (x1, y1) == (3840 - 40, 2160 - 40) and (x1 - x0, y1 - y0) == card_size(0.5) == (411, 228)   # fixed, half of 822
 
 
 def test_wikidata_movement_labels_print_as_names():
@@ -412,7 +414,7 @@ def _card(ident, **kw):
     return compose(_img(3840, 2160), plan, (3840, 2160), ident, [(0.0, 0.0, 0.3, 0.3)], 7.0, scale=0.5, **kw)[1]
 
 
-def test_every_card_is_the_same_size_and_keeps_title_and_date_on_one_line():
+def test_every_card_is_the_same_size_and_gives_title_and_date_their_own_lines():
     short = _card({"artist": "Jim Musil", "title": "Towering Storm", "date": "2025"})
     full = _card({"artist": "James Tissot", "artist_nationality": "France", "artist_born": "1836",
                   "artist_died": "1902", "title": "The Miracle of the Loaves and Fishes", "date": "1886–1894",
@@ -420,16 +422,16 @@ def test_every_card_is_the_same_size_and_keeps_title_and_date_on_one_line():
                   "collection": "Brooklyn Museum"})
     for pl in (short, full):
         x0, y0, x1, y1 = pl.box
-        assert (x1 - x0, y1 - y0) == (411, 190) and pl.passed, pl.failures
-    assert "The Miracle of the Loaves and Fishes, 1886–1894" in full.lines     # one line
+        assert (x1 - x0, y1 - y0) == (411, 228) and pl.passed, pl.failures
+    assert "The Miracle of the Loaves and Fishes" in full.lines and "1886–1894" in full.lines
 
 
 def test_a_long_title_shrinks_then_wraps_and_an_impossible_one_fails():
     mid = _card({"artist": "Alphonse Mucha", "title": "Slav Epic: The Apotheosis of the Slavs", "date": "1926"})
-    assert mid.passed and "Slav Epic: The Apotheosis of the Slavs, 1926" in mid.lines   # set smaller, one line
+    assert mid.passed and "Slav Epic: The Apotheosis of the Slavs" in mid.lines   # set smaller, one line
     long = _card({"artist": "Alfons Mucha", "title": "Slavs in their Original Homeland: Between the Turanian Whip "
                   "and the Sword of the Goths", "date": "1912"})
-    assert long.passed and sum(1 for s in long.lines if "Slavs" in s or "Goths" in s) == 2 and long.box[3] - long.box[1] == 190
+    assert long.passed and sum(1 for s in long.lines if "Slavs" in s or "Goths" in s) == 2 and long.box[3] - long.box[1] == 228
     huge = _card({"artist": "A", "title": "word " * 60, "date": "1900"})
     assert not huge.passed and any("too long" in f for f in huge.failures)
 
@@ -679,7 +681,7 @@ def test_an_inscribed_title_that_differs_is_shown_beside_the_ruled_one():
     ru = cat.rule([a, b], {"artist": "Paul Klee", "inscribed_title": "Giftbeeren"})
     assert ru["facts"]["title"] == "Poisonous Berries" and ru["facts"]["inscribed_title"] == "Giftbeeren"
     lines, _ = _layout({"artist": "Paul Klee", **ru["facts"]}, 0.3, 221)
-    assert "Poisonous Berries 'Giftbeeren', 1920" in [t for t, _, _ in lines]
+    assert "Poisonous Berries 'Giftbeeren'" in [t for t, _, _ in lines] and "1920" in [t for t, _, _ in lines]
 
 
 def test_leads_keep_search_text_and_drop_furniture():
@@ -1245,3 +1247,182 @@ def test_a_commons_file_name_is_never_printed_as_a_title():
              "László Moholy-Nagy") == "croce rossa e palle bianche"
     assert d("File:Château de Chillon by Courbet.jpg", "Gustave Courbet") == "Château de Chillon"
     assert d("Three Worlds", "M. C. Escher") == "Three Worlds"
+
+
+# ── 2026-11-10: abstracts with nothing to locate, the text-search backfill, the larger source ──
+
+class _FakeVLM:
+    def __init__(self, d):
+        self.d = d
+
+    def ask_json(self, *a, **k):
+        return self.d
+
+
+def test_an_abstract_with_nothing_to_locate_is_a_valid_reading_and_other_genres_are_not():
+    from neural_canvas.interpret import interpret
+    d = {"genre": "abstract", "scene": "", "artistic_intent": "", "focal_point": [500, 500], "horizon_y": None,
+         "subjects": [], "faces": [], "label_text": "word " * 30}
+    it = interpret(_FakeVLM(d), _img(300, 200), {})
+    assert it.genre == "abstract" and it.subjects == []
+    plan = Composer(3840, 2160, 0.97).plan(_img(1800, 1186), it)     # centred on visual weight; nothing to cut
+    assert plan.passed and not plan.detail and _is_16x9_full_bleed(plan)
+    with pytest.raises(ValueError):
+        interpret(_FakeVLM({**d, "genre": "landscape"}), _img(300, 200), {})
+
+
+def _text_pool(tmp_path, providers):
+    from neural_canvas.lens_pool import LensPool, Ledger
+    return LensPool(providers, Ledger(tmp_path / "pool.json"), lambda im: "")
+
+
+def test_text_search_goes_to_the_next_service_with_credits(tmp_path):
+    from neural_canvas.lens_pool import Provider
+    asked = []
+
+    def prov(name, left, renews):
+        def pages(q, n):
+            asked.append(name)
+            return [(f"https://{name}.example/{q}", name)]
+        return Provider(name, lambda w: [], allowance=100, renews=renews, balance=lambda: left, pages=pages)
+    pool = _text_pool(tmp_path, [prov("serpapi", 10, "monthly"), prov("serper", 80, "one-time"), prov("oxylabs", 40, "one-time")])
+    assert pool.pages("q", 5) == [("https://serper.example/q", "serper")]      # SerpAPI at its floor: Serper, most left
+    assert asked == ["serper"]
+
+
+def test_text_search_with_every_service_at_its_floor_raises_and_alerts(tmp_path):
+    from neural_canvas.lens_pool import Provider, TextSearchUnavailable
+    alerts = []
+    pool = _text_pool(tmp_path, [Provider("serpapi", lambda w: [], 100, "monthly", balance=lambda: 10, pages=lambda q, n: [("u", "")])])
+    pool.alert = lambda msg, ctx: alerts.append(msg)
+    with pytest.raises(TextSearchUnavailable):
+        pool.pages("q")
+    assert alerts
+
+
+def test_an_engine_low_on_credits_is_backfilled_in_web_pages():
+    from neural_canvas.websearch import CreditsLow, WebImageSearch
+    web = WebImageSearch()
+    web._keys = {"serper": "k", "brave": ""}
+
+    def low(q, n):
+        raise CreditsLow("Serper credits at the 10% floor")
+    web._serper_pages = low
+    got = []
+    web.backfill = lambda q, n, exclude: got.append(exclude) or [("https://museum.example/work", "the work")]
+    assert web.pages("q", 5) == [("https://museum.example/work", "the work")] and got == [{"serper"}]
+
+
+def test_commons_files_are_traced_from_pages_uploads_and_thumbnails():
+    from neural_canvas.larger import _commons_file
+    assert _commons_file("https://commons.wikimedia.org/wiki/File:Le_pav%C3%A9_de_Chailly_(Monet).jpg") == \
+        "File:Le pavé de Chailly (Monet).jpg"
+    assert _commons_file("https://upload.wikimedia.org/wikipedia/commons/thumb/2/21/Monet_Le_Pave.JPG/960px-Monet_Le_Pave.JPG") == \
+        "File:Monet Le Pave.JPG"
+    assert _commons_file("https://upload.wikimedia.org/wikipedia/commons/2/21/Monet_Le_Pave.JPG") == "File:Monet Le Pave.JPG"
+    assert _commons_file("https://example.com/a.jpg") == ""
+
+
+def test_a_larger_copy_replaces_the_source_only_when_it_is_the_same_work_and_framing():
+    from neural_canvas.larger import Candidate, LargerSource
+
+    class Emb:                      # stands in for CLIP: the same picture scores 1, a different one 0
+        def embed(self, ims):
+            return [np.asarray(im.convert("L").resize((16, 16)), dtype=float).ravel() for im in ims]
+
+        def similarity(self, a, bs):
+            a = a / np.linalg.norm(a)
+            return np.array([float(a @ (b / np.linalg.norm(b))) for b in bs])
+    rng = np.random.default_rng(1)
+    big = Image.fromarray(rng.integers(0, 255, (1200, 1650, 3), dtype=np.uint8)).resize((3300, 2400), Image.NEAREST)
+    src = big.resize((850, 618))
+    wrong_frame = big.crop((0, 0, 2400, 2400))
+    ls = LargerSource(None, None, Emb(), {"id_clip_min": 0.86, "id_inliers_min": 25})
+    ls.known = lambda st: [Candidate("https://a/square.jpg", "known", 2400, 2400), Candidate("https://a/big.jpg", "known")]
+    ls.searched = lambda a, t: []
+    ls._fetch = lambda url: {"https://a/square.jpg": wrong_frame, "https://a/big.jpg": big}[url]
+    im, rep = ls.find(src, {}, "Monet", "Le Pavé de Chailly", (3840, 2160), 4.0)
+    assert im is not None and im.size == (3300, 2400) and rep.chosen["url"] == "https://a/big.jpg"
+    assert rep.tried[0]["verdict"].startswith("framing differs") and rep.needed > 4.0
+
+
+# ── 2026-11-10: complete cards (WikiArt labels, Wikipedia infobox, Commons Artwork template, life, movement) ──
+
+def test_wikiart_labels_no_longer_run_on_into_the_date():
+    from neural_canvas.catalogue import labelled
+    f = labelled("Date: 1905 - 1907 Style: Art Nouveau (Modern) Genre: landscape Media: oil, canvas "
+                 "Location: Private Collection Dimensions: 110 x 110 cm")
+    assert f["Date"] == "1905 - 1907" and f["Media"] == "oil, canvas" and f["Style"] == "Art Nouveau (Modern)"
+    assert f["Location"] == "Private Collection"
+
+
+def test_the_wikipedia_infobox_and_the_commons_artwork_template_are_read():
+    from neural_canvas.catalogue import Catalogue
+    cat = Catalogue.__new__(Catalogue)
+    infobox = ('<table class="infobox vevent"><tr><th class="infobox-label">Year</th><td class="infobox-data">1948'
+               '<sup class="reference">[1]</sup></td></tr><tr><th class="infobox-label">Medium</th><td>Egg tempera on '
+               'gessoed panel</td></tr><tr><th class="infobox-label">Location</th><td><style>.x{}</style><a>Museum of '
+               'Modern Art</a>, New York City</td></tr></table>')
+    commons = ('<td id="fileinfotpl&#95;art&#95;medium" class="fileinfo-paramfield">Medium</td> <td> <a>oil on canvas</a>'
+               '<div style="display: none;">medium QS:P186,Q296955</div></td> <td id="fileinfotpl&#95;art&#95;gallery">'
+               'Current location</td> <td>Musée d&#39;Orsay</td> <td id="fileinfotpl&#95;art&#95;authority">Authority</td>'
+               '<td>: Q17493132 Joconde</td>')
+    cat._get = lambda url, **p: {"parse": {"text": infobox if "wikipedia" in url else commons}}
+    box = cat._infobox("Christina's World")
+    assert box == {"year": "1948", "medium": "Egg tempera on gessoed panel", "location": "Museum of Modern Art, New York City"}
+    art = cat._commons_artwork("Le pavé de Chailly (Monet).jpg")
+    assert art["art_medium"] == "oil on canvas" and art["art_gallery"] == "Musée d'Orsay" and art["item"] == "Q17493132"
+
+
+def test_a_commons_template_filled_from_the_runs_wikidata_item_is_not_a_second_witness():
+    from neural_canvas.catalogue import record_items
+    from neural_canvas.evidence import Ledger
+    wd = _rec("wikidata", "Le Pavé de Chailly", medium="oil on canvas", collection="Musée d'Orsay")
+    wd.url = "https://www.wikidata.org/wiki/Q17493132"
+    echo = _rec("commons.wikimedia.org", "Le Pavé de Chailly", medium="oil on canvas", collection="Musée d'Orsay",
+                wikidata="Q17493132")
+    own = _rec("commons.wikimedia.org", "Le Pavé de Chailly", medium="oil on canvas", wikidata="Q999")
+    led = Ledger([])
+    record_items(led, [wd, echo])
+    assert not led.items[1].claims.get("medium") and not led.items[1].claims.get("collection")
+    led2 = Ledger([])
+    record_items(led2, [own])
+    assert led2.items[0].claims["medium"] == "oil on canvas"
+
+
+def test_the_artists_life_is_ruled_from_their_own_wikidata_item_when_the_works_is_not_found():
+    from neural_canvas.catalogue import Catalogue, Record
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    artist = Record("wikidata", "https://www.wikidata.org/wiki/Q547055", "", [], "Carl Bloch", authority=True,
+                    artist_born="1834", artist_died="1890", artist_nationality="Denmark", artist_nationalities=["Denmark"])
+    rkd = Record("rkd.nl", "https://rkd.nl/artists/1", "", [], "Carl Bloch", "Danish, 1834–1890", authority=True,
+                 artist_born="1834", artist_died="1890", artist_nationality="Danish")
+    page = _rec("artvee.com", "Christus Consolator", artist="Carl Bloch", artist_bio="Danish, 1834-1890")
+    ru = cat.rule([artist, rkd, page], {"artist": "Carl Bloch"})
+    assert ru["facts"]["artist_born"] == "1834" and ru["facts"]["artist_died"] == "1890"
+    assert ru["facts"].get("artist_nationality") == "Danish"
+
+
+def test_a_movement_stated_by_two_sources_in_different_words_is_ruled():
+    from neural_canvas.catalogue import Catalogue
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    a = _rec("wikidata", "Bauerngarten", artist="Gustav Klimt", movement="Art Nouveau")
+    b = _rec("wikiart.org", "Bauerngarten", artist="Gustav Klimt", movement="Art Nouveau (Modern)")
+    ru = cat.rule([a, b], {"artist": "Gustav Klimt"})
+    assert ru["facts"]["movement"] == "Art Nouveau"
+
+
+def test_page_furniture_and_unknown_values_are_not_read_as_fields():
+    from neural_canvas.catalogue import labelled
+    f = labelled("Media: oil, canvas Location: unknown SHOP FOR POSTERS AND MORE FROM JUST $24 Share: Tags: flowers")
+    assert f["Media"] == "oil, canvas" and "Location" not in f
+    g = labelled("Location: Private collection SHOP FOR HANDMADE OIL PAINTING REPRODUCTIONS")
+    assert g["Location"] == "Private collection"
+
+
+def test_a_medium_that_names_no_material_never_reaches_the_card():
+    from neural_canvas.catalogue import record_items
+    from neural_canvas.evidence import Ledger
+    led = Ledger([])
+    record_items(led, [_rec("commons.wikimedia.org", "Christus Consolator", medium="painting")])
+    assert not led.items[0].claims.get("medium")

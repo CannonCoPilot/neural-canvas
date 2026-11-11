@@ -16,6 +16,10 @@ Sir's rules (2026-11-06):
 
 Providers register a search function and a balance function. Adding one (BrightData, Apify, ...) is one
 ``Provider`` entry in ``LensPool.default_providers``.
+
+The same accounts also answer ordinary Google text searches (``pages``): when a follow-up search fails because
+its own service is low on credits, it is backfilled by the next service that has some, on the same ledger and
+the same 10% floor (Sir, 2026-11-10). Monthly pools go first, then the one-time reserve by share left.
 """
 from __future__ import annotations
 
@@ -48,6 +52,10 @@ class LensSlotUnavailable(RuntimeError):
     """Every provider is below the floor or failed: the slot is unavailable, which alerts."""
 
 
+class TextSearchUnavailable(RuntimeError):
+    """No service with text search has credits above the floor, or every one failed: alerts."""
+
+
 @dataclass
 class Provider:
     name: str
@@ -59,6 +67,8 @@ class Provider:
     enabled: Callable[[], bool] = lambda: True
     charges_itself: bool = False         # the provider's client keeps the ledger (Vision: cached replies are free)
     texts: bool = False                  # returns web results / knowledge panel beside the image matches
+    pages: Callable[[str, int], list[tuple[str, str]]] | None = None   # Google text search: (url, title)
+    page_cost: int = 1                   # credits one text search spends
 
     @property
     def floor(self) -> int:
@@ -142,20 +152,21 @@ class Ledger:
             return max(0, p.allowance - (e.get("used_month", 0) if e.get("month") == time.strftime("%Y-%m") else 0))
         return int(e.get("remaining", 0))
 
-    def reserve(self, p: "Provider") -> bool:
+    def reserve(self, p: "Provider", cost: int | None = None) -> bool:
         """Charge one search if it keeps the provider at or above its floor; the check and the charge are one
         locked step, so two workers can never both take the last credit above the floor."""
+        cost = p.cost if cost is None else cost
         with self._locked():
             d = self._load()
             e = d.setdefault(p.name, {})
-            if self._left(p, e) - p.cost < p.floor:
+            if self._left(p, e) - cost < p.floor:
                 return False
             month = time.strftime("%Y-%m")
             if e.get("month") != month:                     # a new month: local counts restart
                 e["month"], e["used_month"] = month, 0
-            e["used_month"] = e.get("used_month", 0) + p.cost
+            e["used_month"] = e.get("used_month", 0) + cost
             if "remaining" in e:
-                e["remaining"] = max(0, e["remaining"] - p.cost)
+                e["remaining"] = max(0, e["remaining"] - cost)
             e["last_used"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             self._save(d)
             return True
@@ -176,7 +187,7 @@ class LensPool:
         p = next(p for p in self.providers if p.name == prov_name)
         if not p.enabled():
             raise RuntimeError(f"{name}: no {prov_name} key")
-        self.refresh(p)
+        self.refresh(p, force=True)
         if not self.ledger.reserve(p):
             raise RuntimeError(f"{name}: {prov_name} is at its 10% floor")
         refs = fn(work or Work(img, self.url_fn))
@@ -201,8 +212,8 @@ class LensPool:
             log.warning("lens pool: %s balance unreadable: %s", p.name, _scrub(str(ex)))
             self.ledger.update(p.name, remaining=0, checked=time.time(), balance_error=_scrub(str(ex))[:200])
 
-    def above_floor(self, p: Provider) -> bool:
-        return self.remaining(p) - p.cost >= p.floor
+    def above_floor(self, p: Provider, cost: int | None = None) -> bool:
+        return self.remaining(p) - (p.cost if cost is None else cost) >= p.floor
 
     def status(self) -> list[dict]:
         return [{"provider": p.name, "remaining": self.remaining(p), "allowance": p.allowance, "floor": p.floor,
@@ -224,6 +235,48 @@ class LensPool:
         # largest share, returns none and took every work of bench pass 8. Then monthly pools before the one-time
         # reserve, whose credits do not come back, then the largest share left.
         return max(ok, key=lambda p: (p.texts, p.renews == "monthly", self.remaining(p) / p.allowance, p.name))
+
+    def pages(self, query: str, limit: int = 20, exclude: set[str] | frozenset[str] = frozenset()
+              ) -> list[tuple[str, str]]:
+        """Google's text results for ``query`` from the first service with credits above its floor that answers:
+        monthly pools first (unused credits are lost at the reset), then the one-time reserve by share left.
+        Raises TextSearchUnavailable (and alerts) when none can; it never pays and never returns a silent []."""
+        errors: list[str] = []
+        live = [p for p in self.providers if p.pages and p.enabled() and p.name not in exclude]
+        for p in live:
+            self.refresh(p)
+        ok = [p for p in live if self.above_floor(p, p.page_cost)]
+        if len(ok) <= 1:      # only one left above the floor: real balances first (Sir)
+            for p in live:
+                self.refresh(p, force=True)
+            ok = [p for p in live if self.above_floor(p, p.page_cost)]
+        for p in sorted(ok, key=lambda p: (p.renews == "monthly", self.remaining(p) / p.allowance, p.name), reverse=True):
+            self.refresh(p, force=True)      # other paths spend the same accounts: the live balance, before charging
+            if not self.ledger.reserve(p, p.page_cost):
+                errors.append(f"{p.name}: reached its 10% floor")
+                continue
+            t = time.time()
+            try:
+                hits = p.pages(query, limit)
+            except Exception as e:
+                errors.append(f"{p.name}: {_scrub(str(e))[:160]}")
+                log.warning("text pool: %s failed for %r: %s", p.name, query, _scrub(str(e))[:200])
+                continue
+            if not hits:                     # an empty reply is a failure of that service, never "no results"
+                errors.append(f"{p.name}: empty reply")
+                continue
+            log.info("text pool: %s answered %r with %d pages in %.1f s (%d left)", p.name, query, len(hits),
+                     time.time() - t, self.remaining(p))
+            return hits[:limit]
+        why = "; ".join(errors) or "every text-search service is below its 10% floor"
+        msg = f"text search unavailable for {query!r}: {why}"
+        log.error(msg)
+        if self.alert:
+            try:
+                self.alert(msg, {"pool": self.status()})
+            except Exception as e:
+                log.warning("text pool alert failed: %s", e)
+        raise TextSearchUnavailable(msg)
 
     def search(self, img: Image.Image, exclude: set[str] | frozenset[str] = frozenset(), work: Work | None = None
                ) -> tuple[str, list[WebReference], list[str]]:
@@ -248,7 +301,9 @@ class LensPool:
             work.tried.append(p.name)
             t = time.time()
             try:
-                # counted before the call (a timeout may still have been billed), in one step with the floor check
+                # counted before the call (a timeout may still have been billed), in one step with the floor check;
+                # the live balance first, since other paths (confirm's Google Images, text search) spend it too
+                self.refresh(p, force=True)
                 if not p.charges_itself and not self.ledger.reserve(p):
                     errors.append(f"{p.name}: reached its 10% floor")
                     continue
@@ -362,8 +417,13 @@ def serpapi_provider(key: Callable[[], str]) -> Provider:
         k = key()
         d = _http_json(_req("GET", "https://serpapi.com/account.json", params={"api_key": k}, timeout=20), k, "serpapi account")
         return int(d.get("total_searches_left") or 0)
+    def pages(q: str, limit: int) -> list[tuple[str, str]]:
+        k = key()
+        d = _http_json(_req("GET", "https://serpapi.com/search.json", timeout=60,
+                            params={"engine": "google", "q": q, "num": min(limit, 20), "api_key": k}), k, "serpapi google")
+        return [(x["link"], x.get("title", "")) for x in d.get("organic_results") or [] if str(x.get("link", "")).startswith("http")]
     return Provider("serpapi", search, allowance=250, renews="monthly", balance=balance, enabled=lambda: bool(key()),
-                    texts=True)
+                    texts=True, pages=pages)
 
 
 def searchapi_provider(key: Callable[[], str]) -> Provider:
@@ -388,8 +448,13 @@ def searchapi_provider(key: Callable[[], str]) -> Provider:
                                     timeout=20), k, "searchapi account")
         return int((d.get("account") or {}).get("remaining_credits") or 0)
     # a 100-search grant with no monthly allowance on the account (2026-11-05): one-time until a reset is seen
+    def pages(q: str, limit: int) -> list[tuple[str, str]]:
+        k = key()
+        d = _http_json(_req("GET", "https://www.searchapi.io/api/v1/search", timeout=60, params={
+            "engine": "google", "q": q, "num": min(limit, 20)}, headers={"Authorization": "Bearer " + k}), k, "searchapi google")
+        return [(x["link"], x.get("title", "")) for x in d.get("organic_results") or [] if str(x.get("link", "")).startswith("http")]
     return Provider("searchapi", search, allowance=100, renews="one-time", balance=balance, enabled=lambda: bool(key()),
-                    texts=True)
+                    texts=True, pages=pages)
 
 
 def serper_provider(key: Callable[[], str]) -> Provider:
@@ -414,8 +479,13 @@ def serper_provider(key: Callable[[], str]) -> Provider:
                        "serper account")
         return int(d.get("balance") or 0)
     # 2,500 one-time credits, 3 per Lens search; the same credits pay confirm's text image searches
+    def pages(q: str, limit: int) -> list[tuple[str, str]]:
+        k = key()
+        d = _http_json(_req("POST", "https://google.serper.dev/search", json={"q": q, "num": min(limit, 20)},
+                            headers={"X-API-KEY": k}, timeout=30), k, "serper search")
+        return [(x["link"], x.get("title", "")) for x in d.get("organic") or [] if str(x.get("link", "")).startswith("http")]
     return Provider("serper", search, allowance=2500, renews="one-time", cost=3, balance=balance,
-                    enabled=lambda: bool(key()))
+                    enabled=lambda: bool(key()), pages=pages)
 
 
 _BROWSER = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -465,8 +535,15 @@ def oxylabs_provider(key: Callable[[], str]) -> Provider:
                                     headers={"Authorization": "Bearer " + k}), k, "oxylabs stats")
         used = sum(p.get("all_count", 0) for row in d.get("data") or [] for p in row.get("products") or [])
         return max(0, int(5.0 / OXY_PRICE) - used)
+    def pages(q: str, limit: int) -> list[tuple[str, str]]:
+        k = key()
+        d = _http_json(_req("POST", "https://webapi.oxylabs.io/v1/scrape/google/search", timeout=180,
+                            json={"query": q, "output": ["json"]}, headers={"Authorization": "Bearer " + k}), k, "oxylabs google")
+        return [(x["url"], x.get("title", "")) for res in d.get("results") or []
+                for x in (((res.get("json") or {}).get("results") or {}).get("organic") or [])
+                if str(x.get("url", "")).startswith("http")][:limit]
     return Provider("oxylabs", search, allowance=int(5.0 / OXY_PRICE), renews="one-time", balance=balance,
-                    enabled=lambda: bool(key()))
+                    enabled=lambda: bool(key()), pages=pages)
 
 
 APIFY_PER_IMAGE = 0.0035  # $ measured on 10 works (2026-11-06): $0.00005 start + $0.0025 item + platform

@@ -73,7 +73,10 @@ CATALOGUE_SITES = {
     "klee": ["zpk.org"],
 }
 LABELS = ("Artist", "Date", "Collection", "Accession Number", "Medium", "Support", "Size", "Signature", "Inscription",
-          "Dimensions", "Credit Line", "Catalogue Number", "Provenance")
+          "Dimensions", "Credit Line", "Catalogue Number", "Provenance",
+          # WikiArt and art references print these (2026-11-10: "Date: 1905 - 1907 Style: Art Nouveau Genre: ...
+          # Media: oil, canvas Location: ..." ran on as one date, and its medium and location were never read)
+          "Style", "Genre", "Media", "Location", "Current location", "Movement", "Period", "Technique", "Materials")
 # Getty AAT ids the Rijksmuseum's Linked Art uses in place of labels
 AAT_ENGLISH, AAT_PREFERRED, AAT_MATERIALS = "300388277", "300404670", "300435429"
 RKD_ARTISTS = "https://api.rkd.triply.cc/datasets/rkd/RKD-SDO-Knowledge-Graph/services/Virtuoso/sparql"
@@ -362,6 +365,7 @@ class Catalogue:
         self.s.headers["AIC-User-Agent"] = UA       # the Art Institute asks callers to name themselves
         self.consulted: list[str] = []
         self._unchecked: list[str] | None = None     # inside a @source adapter: candidates never compared
+        self._named_items: set[str] = set()          # Wikidata items taken by creator + unique title
 
     # ── is this record's picture the input? ───────────────────────────────
     def _verify(self, img: Image.Image, img_vec, url: str, what: str = "") -> tuple[bool, float, int]:
@@ -510,9 +514,29 @@ class Catalogue:
             ok, clip, inl = self._verify(img, img_vec, image)
             if not ok:
                 return None
+        box = self._infobox(page["title"], lang)
         return Record("wikipedia.org", f"https://{lang}.wikipedia.org/wiki/{quote(page['title'].replace(' ', '_'))}",
-                      page["title"], [], image_url=image, verified_by=verified_by, clip=clip, inliers=inl,
-                      text=fold(page["extract"][:60000]))
+                      page["title"], [], box.get("artist", ""), "", box.get("year", ""), box.get("medium", ""),
+                      box.get("location", ""), box.get("movement", ""), image_url=image, verified_by=verified_by,
+                      clip=clip, inliers=inl, text=fold(page["extract"][:60000]))
+
+    def _infobox(self, page_title: str, lang: str = "en") -> dict:
+        """An article's artwork infobox as {label: value} (lower-case labels: year, medium, location, movement);
+        the extract alone drops it, so medium and location were never read from Wikipedia (2026-11-10)."""
+        d = self._get(f"https://{lang}.wikipedia.org/w/api.php", action="parse", page=page_title, prop="text",
+                      section=0, redirects=1, format="json", formatversion=2)
+        t = ((d.get("parse") or {}).get("text")) or ""
+        m = re.search(r'<table class="infobox.*?</table>', t, re.S)
+        if not m:
+            return {}
+        box = re.sub(r"<style[^>]*>.*?</style>|<sup[^>]*>.*?</sup>", " ", m.group(0), flags=re.S)
+        out = {}
+        for th, td in re.findall(r'<th[^>]*class="infobox-label"[^>]*>(.*?)</th>\s*<td[^>]*>(.*?)</td>', box, re.S):
+            k = re.sub(r"<[^>]+>", "", th).strip().lower()
+            v = re.sub(r"\s+", " ", html.unescape(re.sub(r"<br\s*/?>|</li>", ", ", re.sub(r"<(?!br|/li)[^>]+>", "", td)))).strip(" ,")
+            if k and v:
+                out.setdefault(k, v[:200])
+        return out
 
     def _commons(self, file: str, verified_by: str) -> Record | None:
         d = self._get("https://commons.wikimedia.org/w/api.php", action="query", titles="File:" + file, prop="imageinfo",
@@ -527,9 +551,28 @@ class Catalogue:
         if not (title or meta):
             return None
         text = fold(" ".join(val(k) for k in meta))
+        art = self._commons_artwork(file)
         return Record("commons.wikimedia.org", f"https://commons.wikimedia.org/wiki/File:{quote(file)}",
                       "" if non_title(title) else title, [], re.sub(r"\s+", " ", val("Artist"))[:120], "",
-                      val("DateTimeOriginal")[:40], "", "", "", info.get("thumburl", ""), verified_by, text=text)
+                      art.get("date") or val("DateTimeOriginal")[:40], art.get("art_medium", ""),
+                      art.get("art_gallery", ""), "", info.get("thumburl", ""), verified_by, text=text,
+                      wikidata=art.get("item", ""))
+
+    def _commons_artwork(self, file: str) -> dict:
+        """The file page's Artwork template as {field: value} (date, art_medium, art_gallery, ...), plus ``item``:
+        the Wikidata item it names. extmetadata carries no medium or location (2026-11-10)."""
+        d = self._get("https://commons.wikimedia.org/w/api.php", action="parse", page="File:" + file, prop="text",
+                      format="json", formatversion=2)
+        t = (((d.get("parse") or {}).get("text")) or "").replace("&#95;", "_")
+        t = re.sub(r'<div style="display: ?none;?">.*?</div>|<style[^>]*>.*?</style>', " ", t, flags=re.S)
+        out = {}
+        for k, v in re.findall(r'<td id="fileinfotpl_([a-z_]+)"[^>]*>.*?</td>\s*<td[^>]*>(.*?)</td>', t, re.S):
+            v = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", v))).strip()
+            if v:
+                out.setdefault(k, v[:200])
+        m = re.search(r"\bQ\d{2,}\b", out.get("art_authority", ""))
+        out["item"] = m.group(0) if m else ""
+        return out
 
     @source("Europeana")
     def _europeana(self, img, img_vec, queries: list[str], surname: str, titles: list[str] = ()) -> list[Record]:
@@ -787,11 +830,30 @@ class Catalogue:
             ok, sim, inl = self._verify(img, img_vec, file_thumb(w["file"], 500), f"Wikidata {w['qid']}")
             if ok:
                 out.append(w["qid"])
+        if not out and titles:
+            # a work with no Commons picture (in copyright) is never in the listing above: its item is taken when the
+            # creator and the title pick out exactly one work and that item has no picture that could be compared
+            byname = {w["qid"]: w for w in self.wiki.works_by(qid)
+                      if any(same_title(t, l) for t in titles[:4] if t for l in w["labels"])}
+            if len(byname) == 1 and not next(iter(byname.values()))["file"]:
+                q1 = next(iter(byname))
+                self._named_items.add(q1)
+                out.append(q1)
         cached = {w["qid"] for w in works} | {w["qid"] for w in named}
         if len({w["qid"] for w in listing} - cached):
             self._unchecked.append(f"{len({w['qid'] for w in listing} - cached)} of {artist}'s {len(listing)} Wikidata "
                                    f"works not embedded yet ({qid}; the background indexer embeds them)")
         return out
+
+    def _wikidata_artist(self, qid: str, surname: str) -> Record | None:
+        """The artist's own Wikidata item as an authority (life and citizenships only, never the work)."""
+        f = self.wiki.artist_facts(qid)
+        if not f.get("artist_born") or (surname and surname not in fold(f.get("artist", ""))):
+            return None
+        return Record("wikidata", f"https://www.wikidata.org/wiki/{qid}", "", [], f["artist"], "",
+                      verified_by="the artist's Wikidata item", authority=True, artist_born=f["artist_born"],
+                      artist_died=f.get("artist_died", ""), artist_nationality=f.get("artist_nationality", ""),
+                      artist_nationalities=f.get("artist_nationalities") or [])
 
     def _wikidata_record(self, qid: str) -> tuple[Record, dict]:
         d = self.wiki._get(self.wiki.wikidata_api, {"action": "wbgetentities", "ids": qid,
@@ -1023,8 +1085,11 @@ class Catalogue:
         if m:
             title = m.group(1).strip()
         title = re.sub(r"\s+by\s+[A-Z][\w.'’ -]{2,60}$", "", title).strip()                # "Airborne by Andrew Wyeth"
+        medium = f.get("Medium") or f.get("Media") or f.get("Technique") or f.get("Materials") or ""
+        collection = f.get("Collection") or f.get("Current location") or f.get("Location") or ""
+        movement = f.get("Movement") or f.get("Style") or f.get("Period") or ""
         rec = Record(institution(url), url, "" if non_title(title) else title, [], f.get("Artist", ""), "",
-                     f.get("Date", ""), f.get("Medium", ""), f.get("Collection", ""), "", image_url, verified_by,
+                     f.get("Date", ""), medium, collection, movement, image_url, verified_by,
                      text=text, images=imgs)
         return rec
 
@@ -1168,10 +1233,14 @@ class Catalogue:
         return out
 
     def fallback(self, img: Image.Image, ident: dict, recs: list[Record], leads_: list[str]) -> list[Record]:
-        """For a work the ruling could not settle, and only then: Google's results through SerpAPI (a free
-        plan of 250 searches a month), at most 3 searches, read and image-verified like any other page."""
+        """For a work the ruling could not settle, and only then: Google's results, at most 3 searches, read and
+        image-verified like any other page. SerpAPI's monthly plan goes first; when it is low on credits the
+        next service with credits answers instead (Serper, Oxylabs, SearchAPI: the Lens pool's text search,
+        same ledger and floor; Sir, 2026-11-10)."""
         web = getattr(self.idf, "web", None)
-        if web is None or not hasattr(web, "serpapi_pages"):
+        pool = getattr(self.idf, "lens", None)
+        search = pool.pages if pool is not None and hasattr(pool, "pages") else getattr(web, "serpapi_pages", None)
+        if search is None:
             return []
         artist = ident.get("artist", "")
         titles = [t for t in leads_ if t][:2]
@@ -1179,8 +1248,8 @@ class Catalogue:
         img_vec = self.emb.embed([img])[0]
         have = {institution(r.source) for r in recs}
         self._artist = artist
-        return self._safe("serpapi", lambda: self._web_text(img, img_vec, queries, have, web.serpapi_pages,
-                                                            "Google via SerpAPI (fallback for an unresolved work)"))
+        return self._safe("google text", lambda: self._web_text(img, img_vec, queries, have, search,
+                                                                "Google results (fallback for an unresolved work)"))
 
     def _verify_page(self, img, img_vec, rec: Record) -> bool:
         """A page shows the work when any of its pictures matches on both instruments (its preview image is
@@ -1358,6 +1427,8 @@ class Catalogue:
             rec, ids = self._wikidata_record(qid)
             if via:
                 rec.verified_by = f"link from {via}"
+            elif qid in self._named_items:
+                rec.verified_by = "creator and unique title (the item has no picture)"
             recs.append(rec)
             artist_qid = ids.get("artist_qid") or artist_qid
             for v in ids.get("P350", [])[:1]:
@@ -1431,6 +1502,8 @@ class Catalogue:
         recs += over(self._safe("catalogue_sites", lambda: self._registry(img, img_vec, artist, titles,
                                                                   {institution(r.source) for r in recs})))
         recs += over(self._safe("walled_catalogues", lambda: self._walled(img, img_vec, artist, titles)))
+        if artist_qid and not any(r.source == "wikidata" and r.artist_born for r in recs):
+            recs += self._safe("wikidata_artist", lambda: [r for r in [self._wikidata_artist(artist_qid, surname)] if r])
         recs += self._safe("artvee", lambda: self._artvee(img, img_vec, titles, artist, surname))
         recs += self._safe("curated_web", lambda: self._curated_web(img, img_vec, queries, {r.source for r in recs}))
         recs += self._safe("web_text", lambda: self._web_text(img, img_vec, queries, {institution(r.source) for r in recs}))
@@ -1545,9 +1618,11 @@ class Catalogue:
         pick("date", [(r, r.date) for r in pref if _years(r.date)], same_date)
         pick("medium", [(r, r.medium) for r in pref if _materials(r.medium)], same_medium)
         pick("collection", [(r, r.collection) for r in pref if r.collection], same_collection)
-        pick("movement", [(r, r.movement) for r in pref if r.movement], lambda a, b: fold(a) == fold(b))
-        # the artist's life: Wikidata's years against a museum's printed biography
-        wd = next((r for r in recs if r.source == "wikidata" and r.artist_born), None)
+        # "Art Nouveau" and WikiArt's "Art Nouveau (Modern)" are one movement: one name contains the other
+        pick("movement", [(r, r.movement) for r in pref if r.movement],
+             lambda a, b: bool(fold(a)) and bool(fold(b)) and (fold(a) in fold(b) or fold(b) in fold(a)))
+        # the artist's life: Wikidata's years (the work's item, else the artist's own) against a printed biography
+        wd = next((r for r in recs + authorities if r.source == "wikidata" and r.artist_born), None)
         bios = [r for r in recs + authorities if r.artist_bio and r.source != "wikidata"]
         if wd:
             agree = [r.source for r in bios if wd.artist_born in r.artist_bio and (not wd.artist_died or wd.artist_died in r.artist_bio)]
@@ -1584,8 +1659,13 @@ class Catalogue:
 def labelled(text: str) -> dict:
     """"Label: value" fields as catalogue pages print them (Date: 1880 Collection: Yale ... Medium: ...)."""
     alt = "|".join(re.escape(l) for l in LABELS)
-    return {m.group(1): m.group(2).strip(" ;,.")[:200]
-            for m in re.finditer(rf"\b({alt}):\s*(.+?)(?=\s+(?:{alt}):|$)", text[:20000])}
+    out = {}
+    for m in re.finditer(rf"\b({alt}):\s*(.+?)(?=\s+(?:{alt}):|$)", text[:20000]):
+        # a value ends where the page's furniture begins: a run of capitals ("SHOP FOR POSTERS ..."), "Share:"
+        v = re.split(r"\s+(?:[A-Z]{2,}\s+){2,}[A-Z]{2,}|\s+(?:Share|Tags|Buy|Order)\b", m.group(2))[0].strip(" ;,.")
+        if v and fold(v) not in ("unknown", "n a", "na", "none", "?"):
+            out.setdefault(m.group(1), v[:200])
+    return out
 
 
 def inscription_is_title(text: str, artist: str) -> bool:
@@ -1628,10 +1708,15 @@ def record_items(ledger, recs: list[Record]) -> int:
     agents, no longer a vote. Artist authority records rule the artist's life only and stay out; auction and
     press pages corroborate as captions."""
     n0 = len(ledger.items)
+    items = {r.url.rsplit("/", 1)[-1] for r in recs if r.source == "wikidata" and not r.authority}
     for r in recs:
         if r.authority:
             continue
-        claims = {"title": r.title, "artist": r.artist, "date": r.date, "medium": r.medium, "collection": r.collection}
+        claims = {"title": r.title, "artist": r.artist, "date": r.date,
+                  "medium": r.medium if _materials(r.medium) else "", "collection": r.collection}
+        if r.source == "commons.wikimedia.org" and r.wikidata and r.wikidata in items:
+            # its Artwork template is filled from that same item: an echo, not a second witness (2026-11-10)
+            claims.update(date="", medium="", collection="")
         also = [t for t in r.titles if t and t != r.title][:3]
         stated = "; ".join(f"{k} {v!r}" for k, v in claims.items() if v) or "no fields read"
         text = (f"{r.source} {'page' if r.support else 'catalogue record'} ({r.verified_by or 'found by text'}): {stated}"
@@ -1681,16 +1766,21 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
             verdict = {"facts": {}, "support": {}, "unruled": {}, "rounds": [],
                        "failures": [f"catalogue adjudication failed: {type(e).__name__}: {str(e)[:200]}"]}
     facts = dict(verdict["facts"])
+    if facts.get("medium") and not _materials(facts["medium"]):
+        # "painting" is an object type, not a medium (Bloch, Christus Consolator, 2026-11-10): it never prints
+        verdict.setdefault("unruled", {})["medium"] = f"{facts.pop('medium')!r}: names no material"
     if facts.get("title"):
         facts["title"] = display_title(facts["title"], facts.get("artist", ""))
     life = cat.rule(found, {**ident, "artist": facts.get("artist") or ident.get("artist", "")})
-    for k in ("artist_born", "artist_died", "artist_nationality", "inscribed_title"):
+    # the life, nationality and movement are ruled by ``rule``: the agents rule only the work's own five facts, and
+    # the movement had been left off every card since the ledger redesign (2026-11-10)
+    for k in ("artist_born", "artist_died", "artist_nationality", "inscribed_title", "movement"):
         if life["facts"].get(k):
             facts[k] = life["facts"][k]
-    support = {**verdict["support"], **{k: v for k, v in life["support"].items() if k.startswith("artist_")
-                                        and k not in ("artist",)}}
+    support = {**verdict["support"], **{k: v for k, v in life["support"].items() if (k.startswith("artist_")
+                                        and k not in ("artist",)) or k == "movement"}}
     unruled = {**verdict["unruled"], **{k: v for k, v in life["unruled"].items() if k.startswith("artist_l")
-                                        or k == "artist_nationality"}}
+                                        or k in ("artist_nationality", "movement")}}
     return {"facts": facts, "support": support, "unruled": unruled, "failures": verdict["failures"],
             "contradicted": verdict.get("contradicted", {}), "adjudication": verdict.get("rounds", []),
             "sources": life["sources"], "consulted": life["consulted"], "unavailable": life["unavailable"],

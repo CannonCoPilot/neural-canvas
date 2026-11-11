@@ -85,7 +85,9 @@ def interpret(vlm: VLM, img: Image.Image, facts: dict) -> Interpretation:
             kind = str(s.get("kind", "")).strip().lower()
             subjects.append(Subject(str(s.get("label", "")), b, int(s.get("importance") or 1),
                                     bool(s.get("essential")), kind if kind in KINDS else "object"))
-    if not subjects:
+    # a non-objective abstract has nothing to locate (Bruce, Composition IV: "no recognizable figures or objects");
+    # the crop then centres on its visual weight. Any other genre with nothing located is a failed reading.
+    if not subjects and str(d.get("genre", "")).strip().lower() != "abstract":
         raise ValueError("interpretation located no subjects")
     if not isinstance(d.get("faces"), list):
         raise ValueError("interpretation gave no faces list (an empty list is a valid answer)")

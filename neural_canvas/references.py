@@ -184,6 +184,38 @@ class Wikimedia:
             out.append({"qid": qid, "label": b.get("wLabel", {}).get("value", ""), "file": unquote(fname)})
         return out
 
+    def artist_facts(self, qid: str) -> dict:
+        """The artist item's own facts (life, citizenships), for a work whose own item is not found."""
+        ent = self.entities([qid]).get(qid, {})
+        nat_ids = self.claim_ids(ent, "P27")
+        nats = self.entities(nat_ids[:4]) if nat_ids else {}
+        return {"artist": self.label(ent), "artist_wikidata": qid,
+                "artist_born": self.claim_year(ent, "P569"), "artist_died": self.claim_year(ent, "P570"),
+                "artist_nationality": self.label(nats.get(nat_ids[0], {})) if nat_ids else "",
+                "artist_nationalities": [self.label(nats[n]) for n in nat_ids[:4] if n in nats and self.label(nats[n])]}
+
+    def works_by(self, artist_qid: str) -> list[dict]:
+        """Every work the artist created, with or without a picture: [{qid, labels, file}]. ``oeuvre`` lists only
+        works with a Commons image, so a work still in copyright (Wyeth's Christina's World) never shows there."""
+        q = (f"SELECT ?w ?l ?img WHERE {{ ?w wdt:P170 wd:{artist_qid} . ?w rdfs:label|skos:altLabel ?l . "
+             f'FILTER(LANG(?l) IN ("en","fr","de","nl","it","es","da","sv","no")) OPTIONAL {{ ?w wdt:P18 ?img }} }}')
+        for attempt in range(3):
+            r = self.s.get(SPARQL, params={"query": q, "format": "json"}, timeout=90)
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(5 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            break
+        from urllib.parse import unquote
+        works: dict[str, dict] = {}
+        for b in r.json()["results"]["bindings"]:
+            qid = b["w"]["value"].rsplit("/", 1)[-1]
+            w = works.setdefault(qid, {"qid": qid, "labels": [], "file": ""})
+            w["labels"].append(b["l"]["value"])
+            if "img" in b and not w["file"]:
+                w["file"] = unquote(b["img"]["value"].rsplit("/", 1)[-1])
+        return list(works.values())
+
     def artwork_facts(self, qid: str) -> dict:
         """Catalogue facts for a painting item and its creator. Empty dict if not an artwork."""
         ent = self.entities([qid]).get(qid, {})

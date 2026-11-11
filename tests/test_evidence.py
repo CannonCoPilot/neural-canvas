@@ -238,3 +238,17 @@ def test_the_lens_picker_prefers_providers_that_return_text():
     pool.remaining = lambda p: {"vision": 990, "serpapi": 60}[p.name]     # vision has the larger share
     assert pool.pick().name == "serpapi"
     assert pool.pick({"serpapi"}).name == "vision"                     # the image-only provider is the next witness
+
+
+def test_uncited_catalogue_records_whose_own_field_states_a_date_support_it():
+    # Wyeth, Christina's World (2026-11-10): three records read 1948; the adjudicator cited none of them
+    led = Ledger()
+    led.add("copy", "bing", "Christina's World, 1948", "https://www.moma.org/a", verified=True, clip=0.95, inliers=90)   # E1
+    led.add("record", "wikidata", "wikidata catalogue record: date '1948'", "https://www.wikidata.org/wiki/Q2465911",
+            claims={"date": "1948", "medium": "Egg tempera on gesso"}, overrule=True)                                 # E2
+    led.add("record", "wikipedia.org", "wikipedia catalogue record: date '1948'", "https://en.wikipedia.org/wiki/C",
+            claims={"date": "1948"})                                                                                   # E3
+    led.add("record", "wikiart", "wikiart catalogue record", "https://www.wikiart.org/x", claims={"date": "1950"})   # E4
+    ruling = {**_ruling(["E1"], ["E1"], "Andrew Wyeth", "Christina's World"), "date": {"value": "1948", "cites": ["E1"]}}
+    v = rule_facts(led, ruling, _check(["E1"]), record_facts=("date", "medium", "collection"))
+    assert v["facts"]["date"] == "1948" and set(v["support"]["date"]) == {"E1", "E2", "E3"}     # not E4: another year

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from types import SimpleNamespace
 import unicodedata
 from typing import Callable
 
@@ -183,6 +184,13 @@ def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] 
         items = [i for x in _ids(cites) if (i := ledger.get(x)) and i.kind in EVIDENCE
                  and (i.kind != "caption" or i.clip >= CAPTION_CLIP)
                  and ((lex := states(i, f, value)) is True or (lex is None and x in confirmed and x not in rejected))]
+        if f in record_facts:
+            # a catalogue record whose OWN field for this fact states the value supports it, cited or not: the
+            # adjudicator often cites pages and leaves the records out (Wyeth's date, 2026-11-10: Wikidata,
+            # Wikipedia and WikiArt all read 1948, none was cited, and the date stayed off the card)
+            cited = {i.id for i in items}
+            items += [i for i in ledger.items if i.kind == "record" and i.id not in cited and i.claims.get(f)
+                      and states(SimpleNamespace(text=str(i.claims[f]), claims={}), f, value) is True]
         origins = {i.origin for i in items}
         anchors = [i for i in items if i.kind in ANCHORS]
         why = ""

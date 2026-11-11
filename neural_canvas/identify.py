@@ -129,6 +129,8 @@ class Identifier:
         self.index = GlobalIndex(cfg.path("state_dir"))
         # the Lens slot (Sir, 2026-11-06): one Google Lens-type search per work from a rotating free-credit pool
         self.lens = build_pool(cfg, web, vision) if web is not None and hasattr(web, "temp_public_url") else None
+        if self.lens is not None and hasattr(web, "backfill"):
+            web.backfill = lambda q, n, low: self.lens.pages(q, n, exclude=low)
         m = cfg["models"]
         self.agents = Agents(vlm, VLM(m["ollama_url"], m.get("checker", "qwen3:8b"), m.get("vlm_timeout_s", 900)))
         self.rounds_max = int(m.get("rounds_max", 3))

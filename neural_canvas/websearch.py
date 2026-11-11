@@ -26,6 +26,10 @@ import requests
 log = logging.getLogger(__name__)
 
 
+class CreditsLow(RuntimeError):
+    """A keyed engine refused a search to keep its credits at the 10% floor: a gap to backfill, not "no results"."""
+
+
 @dataclass
 class WebReference:
     file_title: str          # page title / caption
@@ -47,6 +51,8 @@ class WebImageSearch:
         self._last = 0.0
         self.text_search = text_search or {}      # {"credentials_path": ..., "providers": {name: key path}}
         self._keys: dict[str, str] = {}
+        # set by the identifier to its pool's text search: fills the place of an engine that is low on credits
+        self.backfill = None                      # (query, limit, exclude) -> [(url, title)]
 
     def _key(self, provider: str) -> str:
         """A keyed provider's key from the credentials store, read once; "" when absent."""
@@ -107,7 +113,7 @@ class WebImageSearch:
             return []
         with ThreadPoolExecutor(len(engines)) as ex:
             futs = {name: ex.submit(fn, query, limit) for name, fn in engines.items()}
-        lists = []
+        lists, low = [], set()
         for name, f in futs.items():
             try:
                 lists.append(f.result())
@@ -116,6 +122,14 @@ class WebImageSearch:
                 for k in self._keys.values():
                     msg = msg.replace(k, "***") if k else msg
                 log.warning("text search %s failed for %r: %s", name, query, msg[:200])
+                if isinstance(e, CreditsLow):
+                    low.add(name)
+        if low and self.backfill is not None:       # an engine low on credits: the next service with some takes its place
+            try:
+                lists.append(self.backfill(query, limit, low))
+                log.info("text search %r: %s low on credits, backfilled", query, ", ".join(sorted(low)))
+            except Exception as e:
+                log.warning("text search backfill for %r failed: %s", query, str(e)[:200])
         out, seen = [], set()
         for row in zip(*[l + [None] * (limit - len(l)) for l in lists]) if lists else []:
             for hit in row:
@@ -145,7 +159,7 @@ class WebImageSearch:
     def _serpapi(self, params: dict) -> dict:
         left = self.serpapi_left()
         if left <= self.SERPAPI_RESERVE:
-            raise RuntimeError(f"SerpAPI monthly searches spent ({left} left, {self.SERPAPI_RESERVE} kept in reserve)")
+            raise CreditsLow(f"SerpAPI monthly searches spent ({left} left, {self.SERPAPI_RESERVE} kept in reserve)")
         key = self._key("serpapi")
         try:
             r = requests.get("https://serpapi.com/search.json", params={**params, "api_key": key}, timeout=60)
@@ -159,7 +173,13 @@ class WebImageSearch:
         return [(x["link"], x.get("title", "")) for x in d.get("organic_results", []) if x.get("link", "").startswith("http")]
 
     def serpapi_images(self, query: str, limit: int = 30) -> list[WebReference]:
-        d = self._serpapi({"engine": "google_images", "q": query})
+        try:
+            d = self._serpapi({"engine": "google_images", "q": query})
+        except CreditsLow as e:     # Google's image index through Serper takes its place (Sir, 2026-11-10)
+            if not self._key("serper"):
+                raise
+            log.info("google images %r: %s; backfilled from Serper's image index", query, e)
+            return self.index_images(query, min(limit, 20))
         out = []
         for x in d.get("images_results", [])[:limit]:
             img = x.get("original") or ""
@@ -238,7 +258,7 @@ class WebImageSearch:
     def _serper_guard(self):
         left = self.serper_left()
         if left - 1 < self.SERPER_RESERVE:
-            raise RuntimeError(f"Serper credits at the 10% floor ({left} left, {self.SERPER_RESERVE} kept)")
+            raise CreditsLow(f"Serper credits at the 10% floor ({left} left, {self.SERPER_RESERVE} kept)")
 
     def _serper_pages(self, query: str, limit: int) -> list[tuple[str, str]]:
         self._serper_guard()
@@ -262,7 +282,8 @@ class WebImageSearch:
             if th.startswith("http"):
                 out.append(WebReference(x.get("title", ""), hash(x.get("imageUrl") or th) & 0x7FFFFFFFFFFF, th,
                                         x.get("link", ""), th, {"source": "google_index", "site": x.get("domain", ""),
-                                                                "original": x.get("imageUrl", "")}))
+                                                                "original": x.get("imageUrl", ""),
+                                                                "width": x.get("imageWidth", 0), "height": x.get("imageHeight", 0)}))
         return out
 
     def _brave_pages(self, query: str, limit: int) -> list[tuple[str, str]]:
