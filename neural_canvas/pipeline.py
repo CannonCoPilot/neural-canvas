@@ -121,6 +121,8 @@ class Docent:
                                  card=((W - m - cw) / W, (H - m - ch) / H, (W - m) / W, (H - m) / H),
                                  detail_min=cfg.thresholds["detail_min_retained"])
         self.larger = LargerSource(self.wiki, self.identifier.web, self.embedder, cfg.thresholds)
+        from .indexer import ArtistIndexer
+        self.first_sight = ArtistIndexer(cfg.path("state_dir"), lambda: None)   # queue only; the service indexes
         self._upscaler = None
         self.photos = GooglePhotos(cfg["google_photos"], cfg.path("state_dir"))
         self.registry = ArtworkRegistry(cfg.path("state_dir"))
@@ -215,6 +217,12 @@ class Docent:
                 save()
                 if ident.status != "confirmed":
                     return block(stage, [ident.evidence.get("reason", "unconfirmed")])
+            # first sight (Sir, 2026-11-05): the artist is queued for the background index as soon as the work is
+            # identified, so a run that blocks later, or one started from the command line, still fills it
+            try:
+                self.first_sight.enqueue(st["identify"].get("artist", ""))
+            except Exception as e:
+                log.warning("first-sight queue failed: %s", e)
             # identification's facts are LEADS only; the card prints what curated sources rule (Sir, 2026-11-05)
             stage = "catalogue"
             if on_stage:

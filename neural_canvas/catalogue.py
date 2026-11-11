@@ -44,7 +44,7 @@ from .sources import classify, institutional, non_title, rulable, supporting
 
 log = logging.getLogger(__name__)
 UA = "neural-canvas/1.0 (+https://github.com/CannonCoPilot/neural-canvas)"
-LANGS = "en|de|fr|nl|it|es|ja|da|sv|no|nb|fi|cs|ru|pl|pt"
+LANGS = "en|mul|de|fr|nl|it|es|ja|da|sv|no|nb|fi|cs|ru|pl|pt"
 UNAVAILABLE = {
     "Getty ULAN": "server-side TLS failure on vocab.getty.edu (2026-11-05)",
     "Norman Rockwell Museum": "collection.nrm.org answers every automated request with a bot challenge (2026-11-05)",
@@ -72,6 +72,26 @@ CATALOGUE_SITES = {
     "wyeth": ["crystalbridges.org", "wyethfoundation.org", "brandywine.org", "farnsworthmuseum.org"],
     "klee": ["zpk.org"],
 }
+KID = "https://samlinger.slks.dk"
+_KID_NATION = {"dansk": "Danish", "norsk": "Norwegian", "svensk": "Swedish", "tysk": "German", "fransk": "French",
+               "hollandsk": "Dutch", "nederlandsk": "Dutch", "engelsk": "British", "britisk": "British", "italiensk": "Italian",
+               "amerikansk": "American", "russisk": "Russian", "finsk": "Finnish", "islandsk": "Icelandic", "belgisk": "Belgian",
+               "østrigsk": "Austrian", "schweizisk": "Swiss", "spansk": "Spanish", "polsk": "Polish"}
+# KID records techniques and materials in Danish; the card prints English ("Olie på lærred" -> "Oil on canvas")
+_KID_WORDS = {"olie": "oil", "lærred": "canvas", "træ": "wood", "egetræ": "oak", "papir": "paper", "karton": "cardboard",
+              "pap": "board", "kobber": "copper", "akvarel": "watercolour", "gouache": "gouache", "tempera": "tempera",
+              "pastel": "pastel", "kul": "charcoal", "blyant": "pencil", "tusch": "ink", "blæk": "ink", "radering": "etching",
+              "kobberstik": "engraving", "træsnit": "woodcut", "litografi": "lithograph", "tørnål": "drypoint",
+              "fresko": "fresco", "plade": "panel", "på": "on", "og": "and", "med": "with", "lærred,": "canvas,"}
+
+
+def kid_medium(s: str) -> str:
+    """Kunstindeks Danmark's Danish technique in English, word by word; English entries pass through."""
+    words = s.strip().split()
+    out = " ".join(_KID_WORDS.get(w.lower(), w) for w in words)
+    return out[:1].upper() + out[1:] if out else ""
+
+
 LABELS = ("Artist", "Date", "Collection", "Accession Number", "Medium", "Support", "Size", "Signature", "Inscription",
           "Dimensions", "Credit Line", "Catalogue Number", "Provenance",
           # WikiArt and art references print these (2026-11-10: "Date: 1905 - 1907 Style: Art Nouveau Genre: ...
@@ -342,6 +362,7 @@ class Record:
     images: list = field(default_factory=list)       # the page's other pictures, tried when image_url is not the work
     overrule: bool = False       # Wikidata and what it links, a museum's own API, a catalogue raisonné (Sir, 2026-11-05)
     wikidata: str = ""           # the source's own link to the work's Wikidata item (a join key)
+    echo: list = field(default_factory=list)          # fields this record only repeats from that item (Commons)
 
     def states(self, value: str) -> bool:
         """An institution page supports a fact its text states (all of the value's significant words)."""
@@ -552,11 +573,24 @@ class Catalogue:
             return None
         text = fold(" ".join(val(k) for k in meta))
         art = self._commons_artwork(file)
+        local = self._commons_local(file)
+        # a field the file page leaves blank is filled from the Wikidata item it names: an echo, not a witness
+        echo = [k for k, params in (("date", ("date",)), ("medium", ("medium", "technique")),
+                                    ("collection", ("institution", "object location", "collection")))
+                if art.get("item") and not any(p in local for p in params)]
         return Record("commons.wikimedia.org", f"https://commons.wikimedia.org/wiki/File:{quote(file)}",
                       "" if non_title(title) else title, [], re.sub(r"\s+", " ", val("Artist"))[:120], "",
                       art.get("date") or val("DateTimeOriginal")[:40], art.get("art_medium", ""),
                       art.get("art_gallery", ""), "", info.get("thumburl", ""), verified_by, text=text,
-                      wikidata=art.get("item", ""))
+                      wikidata=art.get("item", ""), echo=echo)
+
+    def _commons_local(self, file: str) -> set[str]:
+        """The Artwork template's parameters the file page sets itself (non-empty in its wikitext)."""
+        d = self._get("https://commons.wikimedia.org/w/api.php", action="query", prop="revisions", rvprop="content",
+                      rvslots="main", titles="File:" + file, format="json", formatversion=2)
+        pages = (d.get("query") or {}).get("pages") or [{}]
+        t = (((pages[0].get("revisions") or [{}])[0].get("slots") or {}).get("main") or {}).get("content", "")
+        return {m.group(1).strip().lower() for m in re.finditer(r"\|\s*([A-Za-z ]+?)\s*=\s*(\S[^\n|]*)", t)}
 
     def _commons_artwork(self, file: str) -> dict:
         """The file page's Artwork template as {field: value} (date, art_medium, art_gallery, ...), plus ``item``:
@@ -707,6 +741,88 @@ class Catalogue:
         return Record("yale", x["id"], title, others, artist, bio.rstrip(")"), date, medium, owner, "", image, "image",
                       text=text)
 
+    @source("Kunstindeks Danmark")
+    def _kid(self, img, img_vec, artist: str, titles: list[str] = ()) -> list[Record]:
+        """Kunstindeks Danmark (samlinger.slks.dk): the national register of the works in Danish state and
+        state-subsidised museums (Sir, 2026-11-10: Bloch's paintings at Frederiksborg, the Glyptotek, St. Hans).
+        Its JSON API serves the search the site itself runs; works are filtered by the creator as KID writes the
+        name ("Bloch, Carl"), searched by title, and each candidate's reproduction is verified on both instruments."""
+        self.consulted.append("Kunstindeks Danmark")
+        name = self._kid_name(artist)
+        if not name:
+            return []
+        seen: set[str] = set()
+        cands: list[dict] = []
+        for q in list(dict.fromkeys([t for t in titles[:6] if t] + [""])):
+            for page in ((1,) if q else (1, 2, 3)):
+                d = self._kid_get("es_artworks", creatorsNames=name, hasReproductions="true", q=q, page=page)
+                for m in d.get("hydra:member") or []:
+                    if m.get("id") not in seen and m.get("reproductions"):
+                        seen.add(m["id"])
+                        cands.append(m)
+            if len(cands) >= 40:
+                break
+        # the titles' own matches first, then paintings, then the rest
+        cands.sort(key=lambda m: (not any(same_title(t, m.get("title", "")) for t in titles if t),
+                                  "Maleri" not in (m.get("objectNames") or []), m.get("objectTemplate") != "ART"))
+        for m in cands[:14]:
+            url = KID + m["reproductions"][0]
+            ok, sim, inl = self._verify(img, img_vec, url, f"Kunstindeks Danmark {m['id']} '{m.get('title', '')}'")
+            if ok:
+                rec = self._kid_rec(self._kid_get(f"es_artworks/{m['id']}") or m)
+                rec.image_url, rec.clip, rec.inliers = url, sim, inl
+                return [rec]
+        return []
+
+    def _kid_get(self, path: str, **params) -> dict:
+        try:
+            r = self.s.get(f"{KID}/api/{path}", params={k: v for k, v in params.items() if v not in ("", None)}, timeout=30)
+            if r.status_code != 200:
+                log.warning("Kunstindeks Danmark %s -> HTTP %s", path[:60], r.status_code)
+                return {}
+            return r.json()
+        except Exception as e:
+            log.warning("Kunstindeks Danmark %s failed: %s", path[:60], e)
+            return {}
+
+    def _kid_name(self, artist: str) -> str:
+        """The creator as KID files them, "Surname, Given names", tried from the fullest form down; '' if absent."""
+        parts = artist.split()
+        if len(parts) < 2:
+            return ""
+        forms = []
+        for i in range(len(parts) - 1, 0, -1):         # "Rembrandt van Rijn": "Rijn, Rembrandt van", "van Rijn, Rembrandt"
+            last, given = " ".join(parts[i:]), " ".join(parts[:i])
+            forms += [f"{last}, {given}", f"{last}, {parts[0]}"]
+        forms += [f"{parts[-1]}, {' '.join(parts[:-1])}", f"{parts[-1]}, {parts[0]}"]
+        for f in dict.fromkeys(forms):
+            if (self._kid_get("es_artworks", creatorsNames=f).get("hydra:totalItems") or 0) > 0:
+                return f
+        # filed some other way ("Rembrandt Harmensz. van Rijn"): the creator names a plain search returns
+        from collections import Counter
+        sur, first = fold(parts[-1]), fold(parts[0])
+        names = Counter(n for m in (self._kid_get("es_artworks", q=artist).get("hydra:member") or [])
+                        for n in m.get("creatorsNames") or [] if sur in fold(n) and first in fold(n))
+        return names.most_common(1)[0][0] if names else ""
+
+    @staticmethod
+    def _kid_rec(m: dict) -> Record:
+        start, end = m.get("productionStartString") or "", m.get("productionEndString") or ""
+        date = start if not end or end == start else f"{start}–{end}"
+        tech = [t for t in (m.get("techniquePosition") or []) if t] or [t for t in (m.get("materialPosition") or []) if t]
+        nat = next((_KID_NATION.get(n.lower(), n) for n in (m.get("creatorsNationalities") or []) if n), "")
+        born = (m.get("creatorsBirthDates") or [""])[0][:4]
+        died = (m.get("creatorsDeathDates") or [""])[0][:4]
+        artist = (m.get("creatorsNamesExact") or [""])[0]
+        if not artist and m.get("creatorsNames"):
+            last, _, given = m["creatorsNames"][0].partition(", ")
+            artist = f"{given} {last}".strip()
+        return Record("kunstindeks.dk", f"{KID}/samlinger/{m.get('id', '')}", m.get("title", ""), [], artist,
+                      ", ".join(x for x in (nat, "–".join(y for y in (born, died) if y)) if x), date,
+                      kid_medium(tech[0]) if tech else "", m.get("museum", "").strip(), "", "", "image",
+                      artist_born=born, artist_died=died, artist_nationality=nat, overrule=True,
+                      text=fold(" ".join([m.get("title", ""), m.get("description", "") or "", m.get("museum", ""), date])))
+
     @source("Yale University (LUX)")
     def _yale(self, img, img_vec, queries: list[str], surname: str, titles: list[str] = ()) -> list[Record]:
         """Yale (LUX): the Art Gallery, the Center for British Art and the libraries. Yale-provided metadata is
@@ -833,7 +949,10 @@ class Catalogue:
         if not out and titles:
             # a work with no Commons picture (in copyright) is never in the listing above: its item is taken when the
             # creator and the title pick out exactly one work and that item has no picture that could be compared
-            byname = {w["qid"]: w for w in self.wiki.works_by(qid)
+            from .indexer import works_listing
+            state = self.cfg.path("state_dir") if self.cfg is not None else None
+            listing_all = works_listing(state, self.wiki, qid) if state is not None else self.wiki.works_by(qid)
+            byname = {w["qid"]: w for w in listing_all
                       if any(same_title(t, l) for t in titles[:4] if t for l in w["labels"])}
             if len(byname) == 1 and not next(iter(byname.values()))["file"]:
                 q1 = next(iter(byname))
@@ -850,18 +969,25 @@ class Catalogue:
         f = self.wiki.artist_facts(qid)
         if not f.get("artist_born") or (surname and surname not in fold(f.get("artist", ""))):
             return None
+        movs = f.get("movements") or []
+        # the artist's movement on their Wikipedia article: a second, independent statement of it
+        box = self._safe("wikipedia_artist", lambda: [self._infobox(f["enwiki"])] if f.get("enwiki") else [])
+        wp_mov = ((box[0] if box else {}) or {}).get("movement", "")
         return Record("wikidata", f"https://www.wikidata.org/wiki/{qid}", "", [], f["artist"], "",
-                      verified_by="the artist's Wikidata item", authority=True, artist_born=f["artist_born"],
-                      artist_died=f.get("artist_died", ""), artist_nationality=f.get("artist_nationality", ""),
-                      artist_nationalities=f.get("artist_nationalities") or [])
+                      movement="|".join(movs), verified_by="the artist's Wikidata item",
+                      authority=True, artist_born=f["artist_born"], artist_died=f.get("artist_died", ""),
+                      artist_nationality=f.get("artist_nationality", ""),
+                      artist_nationalities=f.get("artist_nationalities") or [],
+                      text=fold(f"movement {wp_mov}") if wp_mov else "",
+                      images=[f"https://en.wikipedia.org/wiki/{quote(f['enwiki'].replace(' ', '_'))}"] if f.get("enwiki") else [])
 
     def _wikidata_record(self, qid: str) -> tuple[Record, dict]:
         d = self.wiki._get(self.wiki.wikidata_api, {"action": "wbgetentities", "ids": qid,
                                                     "props": "labels|aliases|claims|sitelinks", "languages": LANGS})
         ent = (d.get("entities") or {}).get(qid, {})
         labels = ent.get("labels") or {}
-        en = (labels.get("en") or {}).get("value", "")
-        others = [v["value"] for k, v in labels.items() if k != "en"]
+        en = (labels.get("en") or {}).get("value", "") or (labels.get("mul") or {}).get("value", "")
+        others = [v["value"] for k, v in labels.items() if k not in ("en", "mul")]
         others += [a["value"] for lst in (ent.get("aliases") or {}).values() for a in lst]
         f = self.wiki.artwork_facts(qid)
         from .references import Wikimedia
@@ -1478,6 +1604,8 @@ class Catalogue:
             recs += over(self._safe("smithsonian", lambda: self._smithsonian(img, img_vec, queries, surname, titles)))
         if "yale" not in {institution(r.source) for r in recs}:
             recs += over(self._safe("yale", lambda: self._yale(img, img_vec, queries, surname, titles)))
+        if "kunstindeks" not in {institution(r.source) for r in recs}:
+            recs += over(self._safe("kunstindeks", lambda: self._kid(img, img_vec, artist, titles)))
         if "rijksmuseum" not in {institution(r.source) for r in recs}:
             recs += over(self._safe("rijksmuseum", lambda: self._rijksmuseum(img, img_vec, titles, artist, surname)))
         if "wikipedia.org" not in {r.source for r in recs}:
@@ -1502,7 +1630,7 @@ class Catalogue:
         recs += over(self._safe("catalogue_sites", lambda: self._registry(img, img_vec, artist, titles,
                                                                   {institution(r.source) for r in recs})))
         recs += over(self._safe("walled_catalogues", lambda: self._walled(img, img_vec, artist, titles)))
-        if artist_qid and not any(r.source == "wikidata" and r.artist_born for r in recs):
+        if artist_qid:
             recs += self._safe("wikidata_artist", lambda: [r for r in [self._wikidata_artist(artist_qid, surname)] if r])
         recs += self._safe("artvee", lambda: self._artvee(img, img_vec, titles, artist, surname))
         recs += self._safe("curated_web", lambda: self._curated_web(img, img_vec, queries, {r.source for r in recs}))
@@ -1619,8 +1747,17 @@ class Catalogue:
         pick("medium", [(r, r.medium) for r in pref if _materials(r.medium)], same_medium)
         pick("collection", [(r, r.collection) for r in pref if r.collection], same_collection)
         # "Art Nouveau" and WikiArt's "Art Nouveau (Modern)" are one movement: one name contains the other
-        pick("movement", [(r, r.movement) for r in pref if r.movement],
-             lambda a, b: bool(fold(a)) and bool(fold(b)) and (fold(a) in fold(b) or fold(b) in fold(a)))
+        same_mov = lambda a, b: bool(fold(a)) and bool(fold(b)) and (fold(a) in fold(b) or fold(b) in fold(a))  # noqa: E731
+        if not pick("movement", [(r, r.movement) for r in pref if r.movement], same_mov):
+            # the artist's movement (Sir's card lists "movement/period"): Wikidata's single movement for the artist,
+            # confirmed by the movement on the artist's Wikipedia article, a separate source
+            who = next((r for r in authorities if r.source == "wikidata" and r.movement), None)
+            stated = who.text.replace("movement ", "", 1) if who and who.text else ""
+            both = [m for m in (who.movement.split("|") if who else []) if stated and fold(m) and fold(m) in stated]
+            if both:      # Wikidata's first movement for the artist that the article also names (Klimt: Symbolism)
+                out["facts"]["movement"] = both[0][:1].upper() + both[0][1:]
+                out["support"]["movement"] = ["wikidata (artist)", "wikipedia (artist)"]
+                out["unruled"].pop("movement", None)
         # the artist's life: Wikidata's years (the work's item, else the artist's own) against a printed biography
         wd = next((r for r in recs + authorities if r.source == "wikidata" and r.artist_born), None)
         bios = [r for r in recs + authorities if r.artist_bio and r.source != "wikidata"]
@@ -1715,8 +1852,9 @@ def record_items(ledger, recs: list[Record]) -> int:
         claims = {"title": r.title, "artist": r.artist, "date": r.date,
                   "medium": r.medium if _materials(r.medium) else "", "collection": r.collection}
         if r.source == "commons.wikimedia.org" and r.wikidata and r.wikidata in items:
-            # its Artwork template is filled from that same item: an echo, not a second witness (2026-11-10)
-            claims.update(date="", medium="", collection="")
+            # the fields its Artwork template fills from that same item are an echo, not a second witness; the ones
+            # the file page sets itself are its own (2026-11-10)
+            claims.update({k: "" for k in r.echo})
         also = [t for t in r.titles if t and t != r.title][:3]
         stated = "; ".join(f"{k} {v!r}" for k, v in claims.items() if v) or "no fields read"
         text = (f"{r.source} {'page' if r.support else 'catalogue record'} ({r.verified_by or 'found by text'}): {stated}"
@@ -1729,6 +1867,19 @@ def record_items(ledger, recs: list[Record]) -> int:
     return len(ledger.items) - n0
 
 
+def identification_ledger(ev: dict):
+    """The identification's evidence ledger. One made before the ledger existed (2026-11-07) kept only its verified
+    match: that match, checked on both instruments, becomes the ledger's verified copy, or a rerun of the catalogue
+    blocks for want of one (af Klint, 2026-11-10)."""
+    from .evidence import Ledger
+    ledger = Ledger(ev.get("ledger") or [])
+    if not ledger.items and ev.get("confirmed") and ev.get("inliers"):
+        ledger.add("copy", str(ev.get("tier") or "identify"), f"identification's verified match: {ev.get('reference', '')}",
+                   ev.get("page_url") or ev.get("thumb_url") or "", verified=True, clip=float(ev.get("clip") or 0),
+                   inliers=int(ev.get("inliers") or 0))
+    return ledger
+
+
 def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
     """The catalogue stage as the pipeline runs it: gather curated records by the identification's leads, add
     them to the work's ledger, and let the agents rule the card's facts under the same rules as identification,
@@ -1739,7 +1890,7 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
     idf = cat.idf
     lead_list = leads(ident)
     found = cat.gather(img, ident, lead_list)
-    ledger = Ledger((ident.get("evidence") or {}).get("ledger") or [])
+    ledger = identification_ledger(ident.get("evidence") or {})
     added = record_items(ledger, found)
     spent = []
 

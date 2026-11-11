@@ -1380,8 +1380,13 @@ def test_a_commons_template_filled_from_the_runs_wikidata_item_is_not_a_second_w
     wd = _rec("wikidata", "Le Pavé de Chailly", medium="oil on canvas", collection="Musée d'Orsay")
     wd.url = "https://www.wikidata.org/wiki/Q17493132"
     echo = _rec("commons.wikimedia.org", "Le Pavé de Chailly", medium="oil on canvas", collection="Musée d'Orsay",
-                wikidata="Q17493132")
+                wikidata="Q17493132", echo=["date", "medium", "collection"])
     own = _rec("commons.wikimedia.org", "Le Pavé de Chailly", medium="oil on canvas", wikidata="Q999")
+    local = _rec("commons.wikimedia.org", "Le Pavé de Chailly", medium="oil on canvas", date="1860s",
+                 wikidata="Q17493132", echo=["date"])       # its medium is typed on the file page: its own
+    led3 = Ledger([])
+    record_items(led3, [wd, local])
+    assert led3.items[1].claims.get("medium") == "oil on canvas" and not led3.items[1].claims.get("date")
     led = Ledger([])
     record_items(led, [wd, echo])
     assert not led.items[1].claims.get("medium") and not led.items[1].claims.get("collection")
@@ -1426,3 +1431,70 @@ def test_a_medium_that_names_no_material_never_reaches_the_card():
     led = Ledger([])
     record_items(led, [_rec("commons.wikimedia.org", "Christus Consolator", medium="painting")])
     assert not led.items[0].claims.get("medium")
+
+
+def test_an_identification_made_before_the_ledger_still_gives_the_catalogue_its_verified_copy():
+    from neural_canvas.catalogue import identification_ledger
+    old = {"tier": "oeuvre", "reference": "File:Hilma af Klint - Group IV No 2.jpg", "confirmed": True, "clip": 0.9135,
+           "inliers": 796, "page_url": "https://commons.wikimedia.org/wiki/File:Hilma.jpg"}
+    led = identification_ledger(old)
+    assert led.verified() and led.items[0].inliers == 796
+    assert not identification_ledger({**old, "confirmed": False}).items         # an unconfirmed match is no copy
+
+
+def test_kunstindeks_danmark_records_print_in_english():
+    from neural_canvas.catalogue import Catalogue, kid_medium
+    assert kid_medium("Olie på lærred") == "Oil on canvas" and kid_medium("Radering") == "Etching"
+    rec = Catalogue._kid_rec({"id": "fab8", "title": "Kristus i Gethsemane have", "creatorsNamesExact": ["Carl Bloch"],
+                              "creatorsNationalities": ["Dansk"], "creatorsBirthDates": ["1834-05-23"],
+                              "creatorsDeathDates": ["1890-02-22"], "productionStartString": "1879",
+                              "productionEndString": "1879", "techniquePosition": ["Olie på lærred"],
+                              "museum": "Ny Carlsberg Glyptotek"})
+    assert (rec.artist, rec.artist_bio, rec.date, rec.medium, rec.collection) == \
+        ("Carl Bloch", "Danish, 1834–1890", "1879", "Oil on canvas", "Ny Carlsberg Glyptotek")
+    assert rec.url.endswith("/samlinger/fab8") and rec.overrule
+
+
+def test_first_sight_backfills_and_an_alias_is_not_indexed_twice(tmp_path):
+    import threading
+    from types import SimpleNamespace
+    from neural_canvas.indexer import ArtistIndexer
+    ix = ArtistIndexer(tmp_path, lambda: None)
+    ix.mark("Carl Heinrich Bloch", {"qid": "Q547055", "wikidata": 69})
+    assert ix.backfill(["Carl Bloch", "Carl Heinrich Bloch", "", "Carl Bloch"]) == 1       # queued once; the indexed one not
+    stop = threading.Event()
+    ix._docent = SimpleNamespace(identifier=SimpleNamespace(wiki=SimpleNamespace(find_artist=lambda a: "Q547055")))
+    ix.index_artist = lambda *a, **k: (_ for _ in ()).throw(AssertionError("an alias must not be re-indexed"))
+    orig = ix._finish
+    ix._finish = lambda a, r: (orig(a, r), stop.set())
+    ix.run(stop, idle_s=0)
+    done = ix._load(ix.done_path, {})
+    assert done["carl bloch"]["alias_of"] == "Carl Heinrich Bloch" and ix._load(ix.queue_path, []) == []
+
+
+def test_the_whole_works_listing_is_cached(tmp_path):
+    from types import SimpleNamespace
+    from neural_canvas.indexer import works_listing
+    calls = []
+    wiki = SimpleNamespace(works_by=lambda q: calls.append(q) or [{"qid": "Q2465911", "labels": ["Christina's World"], "file": ""}])
+    assert works_listing(tmp_path, wiki, "Q316325")[0]["qid"] == "Q2465911"
+    assert works_listing(tmp_path, wiki, "Q316325")[0]["qid"] == "Q2465911" and calls == ["Q316325"]   # second read: disk
+
+
+def test_a_wikidata_name_kept_only_under_mul_is_still_read():
+    from neural_canvas.references import Wikimedia
+    assert Wikimedia.label({"labels": {"mul": {"value": "Félix Vallotton"}}}) == "Félix Vallotton"
+    assert Wikimedia.label({"labels": {"en": {"value": "A"}, "mul": {"value": "B"}}}) == "A"
+
+
+def test_the_artists_movement_is_ruled_when_wikidata_and_their_wikipedia_article_agree():
+    from neural_canvas.catalogue import Catalogue, Record
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    who = Record("wikidata", "https://www.wikidata.org/wiki/Q34661", "", [], "Gustav Klimt", authority=True,
+                 movement="Symbolism|Art Nouveau|Vienna Secession", artist_born="1862", artist_died="1918",
+                 text="movement symbolism art nouveau vienna secession")
+    ru = \
+        cat.rule([who, _rec("artvee.com", "Bauerngarten", artist="Gustav Klimt")], {"artist": "Gustav Klimt"})
+    assert ru["facts"]["movement"] == "Symbolism"
+    alone = Record("wikidata", "u", "", [], "Gustav Klimt", authority=True, movement="Symbolism", artist_born="1862")
+    assert "movement" not in cat.rule([alone], {"artist": "Gustav Klimt"})["facts"]     # no second statement: off

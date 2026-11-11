@@ -367,6 +367,19 @@ class Service:
         except requests.RequestException as e:
             log.error("Pulse unreachable, stranded tasks not checked: %s", e)
         if not once:
+            try:            # every identified artist not yet indexed (first sight was missed before 2026-11-10)
+                arts = []
+                for rp in Path(self.cfg.path("work_dir")).glob("*/record.json"):
+                    try:
+                        st = json.loads(rp.read_text()).get("stages", {})
+                    except ValueError:
+                        continue
+                    arts.append((st.get("catalogue", {}).get("facts") or {}).get("artist") or st.get("identify", {}).get("artist", ""))
+                n = self.indexer.backfill(arts)
+                if n:
+                    log.info("first sight backfill: %d identified artist(s) queued for indexing", n)
+            except Exception as e:
+                log.warning("first sight backfill failed: %s", e)
             threading.Thread(target=self.indexer.run, args=(self._stop,), name="indexer", daemon=True).start()
         while True:
             try:

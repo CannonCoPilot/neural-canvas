@@ -117,12 +117,18 @@ class Wikimedia:
         if not ids:
             return {}
         data = self._get(self.wikidata_api, {"action": "wbgetentities", "ids": "|".join(ids[:50]),
-                                             "props": "labels|claims|descriptions", "languages": "en"})
+                                             "props": "labels|claims|descriptions", "languages": "en|mul"})
         return data.get("entities") or {}
 
     @staticmethod
     def label(ent: dict) -> str:
-        return ((ent.get("labels") or {}).get("en") or {}).get("value", "")
+        """English, else the language-neutral "mul" label Wikidata now keeps names under (Félix Vallotton's item
+        has no "en" label: his record went blank, 2026-11-10), else any."""
+        labels = ent.get("labels") or {}
+        for lang in ("en", "mul"):
+            if (labels.get(lang) or {}).get("value"):
+                return labels[lang]["value"]
+        return next((v.get("value", "") for v in labels.values() if v.get("value")), "")
 
     @staticmethod
     def claim_ids(ent: dict, prop: str) -> list[str]:
@@ -189,7 +195,12 @@ class Wikimedia:
         ent = self.entities([qid]).get(qid, {})
         nat_ids = self.claim_ids(ent, "P27")
         nats = self.entities(nat_ids[:4]) if nat_ids else {}
-        return {"artist": self.label(ent), "artist_wikidata": qid,
+        mov_ids = self.claim_ids(ent, "P135")
+        movs = self.entities(mov_ids[:4]) if mov_ids else {}
+        sl = self._get(self.wikidata_api, {"action": "wbgetentities", "ids": qid, "props": "sitelinks", "sitefilter": "enwiki"})
+        enwiki = ((((sl.get("entities") or {}).get(qid) or {}).get("sitelinks") or {}).get("enwiki") or {}).get("title", "")
+        return {"artist": self.label(ent), "artist_wikidata": qid, "enwiki": enwiki,
+                "movements": [self.label(movs[m]) for m in mov_ids[:4] if m in movs and self.label(movs[m])],
                 "artist_born": self.claim_year(ent, "P569"), "artist_died": self.claim_year(ent, "P570"),
                 "artist_nationality": self.label(nats.get(nat_ids[0], {})) if nat_ids else "",
                 "artist_nationalities": [self.label(nats[n]) for n in nat_ids[:4] if n in nats and self.label(nats[n])]}

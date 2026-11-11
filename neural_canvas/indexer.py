@@ -69,6 +69,11 @@ class ArtistIndexer:
         log.info("first sight of %s: queued for indexing (%d waiting)", a, len(q))
         return True
 
+    def backfill(self, artists) -> int:
+        """Queue every identified artist not yet indexed (a service start: works identified by the command line,
+        or blocked after identification, never reached the first-sight hook before 2026-11-10)."""
+        return sum(self.enqueue(a) for a in dict.fromkeys(a for a in artists if a))
+
     def _pop(self) -> str | None:
         with self._lock():
             q = self._load(self.queue_path, [])
@@ -96,8 +101,11 @@ class ArtistIndexer:
         t0 = time.time()
         try:
             qid = qid or idf.wiki.find_artist(artist)
+            out["qid"] = qid or ""
             works = idf._oeuvre_vectors(qid, cold=True)[0] if qid else []
             out["wikidata"] = len(works)
+            # every catalogued work, with a picture or not (in copyright: Wyeth's had 0 above), for name matching
+            out["wikidata_all"] = len(works_listing(Path(docent.cfg.path("state_dir")), idf.wiki, qid, refresh=True)) if qid else 0
         except Exception as e:
             out["wikidata_error"] = f"{type(e).__name__}: {e}"[:200]
         try:
@@ -127,8 +135,15 @@ class ArtistIndexer:
             try:
                 if self._docent is None:
                     self._docent = self._docent_factory()
+                qid = self._docent.identifier.wiki.find_artist(artist) or ""
+                twin = next((v for v in self._load(self.done_path, {}).values()
+                             if qid and v.get("qid") == qid and "error" not in v), None)
+                if twin:       # "Carl Bloch" after "Carl Heinrich Bloch": the same artist, already indexed
+                    log.info("%s is %s (%s), already indexed", artist, twin["artist"], qid)
+                    self._finish(artist, {"qid": qid, "alias_of": twin["artist"]})
+                    continue
                 log.info("indexing %s", artist)
-                result = self.index_artist(self._docent, artist)
+                result = self.index_artist(self._docent, artist, qid)
                 log.info("indexed %s: %s", artist, result)
             except Exception as e:                       # the artist is dropped from the queue, with the reason
                 log.exception("indexing %s failed", artist)
@@ -137,6 +152,21 @@ class ArtistIndexer:
             if "error" not in result:        # first look searches the grown index (Sir, 2026-11-06)
                 from .global_index import maybe_rebuild
                 maybe_rebuild(self.state_dir, self._docent.identifier.wiki)
+
+
+def works_listing(state_dir: Path, wiki, qid: str, refresh: bool = False, max_age_days: int = 30) -> list[dict]:
+    """The artist's whole Wikidata catalogue [{qid, labels, file}], cached on disk (var/state/oeuvre/<qid>.works.json):
+    filled by the indexer, read by the catalogue's name match, refreshed when a month old."""
+    path = Path(state_dir) / "oeuvre" / f"{qid}.works.json"
+    if not refresh and path.exists() and time.time() - path.stat().st_mtime < max_age_days * 86400:
+        try:
+            return json.loads(path.read_text())
+        except ValueError:
+            pass
+    works = wiki.works_by(qid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(works, ensure_ascii=False))
+    return works
 
 
 TOP_PAINTERS_QUERY = """PREFIX wdt: <http://www.wikidata.org/prop/direct/> PREFIX wd: <http://www.wikidata.org/entity/>
