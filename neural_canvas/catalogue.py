@@ -91,6 +91,14 @@ KID_VERSION = re.compile(r"\b(forarbejde|skitse|studie|kopi|efter|replik|replika
                          re.I)
 
 
+def clean_movement(v: str) -> str:
+    """One movement, as a card prints it: WikiArt lists several ("Art Nouveau (Modern) , Symbolism") and adds its own
+    parenthetical; the first, without it (Mucha, 2026-11-10)."""
+    first = re.split(r"\s*[,;/]\s*", (v or "").strip())[0]
+    first = re.sub(r"\s*\([^)]*\)", "", first).strip(" .")
+    return first[:1].upper() + first[1:] if first else ""
+
+
 def kid_medium(s: str) -> str:
     """Kunstindeks Danmark's Danish technique in English, word by word; English entries pass through."""
     words = s.strip().split()
@@ -1949,7 +1957,7 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
     # the movement had been left off every card since the ledger redesign (2026-11-10)
     for k in ("artist_born", "artist_died", "artist_nationality", "inscribed_title", "movement"):
         if life["facts"].get(k):
-            facts[k] = life["facts"][k]
+            facts[k] = clean_movement(life["facts"][k]) if k == "movement" else life["facts"][k]
     support = {**verdict["support"], **{k: v for k, v in life["support"].items() if (k.startswith("artist_")
                                         and k not in ("artist",)) or k == "movement"}}
     unruled = {**verdict["unruled"], **{k: v for k, v in life["unruled"].items() if k.startswith("artist_l")

@@ -1522,3 +1522,9 @@ def test_a_google_photos_write_waits_out_a_429_and_retries(monkeypatch):
     s = SimpleNamespace(post=lambda url, **kw: calls.append(url) or replies.pop(0))
     gp = deliver.GooglePhotos.__new__(deliver.GooglePhotos)
     assert gp._post(s, "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate").text == "ok" and len(calls) == 2
+
+
+def test_a_card_prints_one_clean_movement():
+    from neural_canvas.catalogue import clean_movement
+    assert clean_movement("Art Nouveau (Modern) , Symbolism") == "Art Nouveau"
+    assert clean_movement("pointillism") == "Pointillism" and clean_movement("") == ""

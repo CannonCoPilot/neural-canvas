@@ -319,7 +319,8 @@ class Docent:
             stage = "label"
             if on_stage:
                 on_stage(stage)
-            facts["movement"] = ruled.get("movement", "")   # printed only when curated sources rule it
+            from .catalogue import clean_movement
+            facts["movement"] = clean_movement(ruled.get("movement", ""))   # one movement, as the card prints it
             win = plan.window
 
             def in_window(b):
