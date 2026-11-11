@@ -168,8 +168,7 @@ def test_a_coloured_edge_is_part_of_the_art():
 def test_a_detail_is_named_on_the_card():
     from neural_canvas.placard import _layout
     lines, fails = _layout({"artist": "Emile Claus", "title": "Summer Morning", "date": "c. 1891", "detail": True}, 0.3, 221)
-    text = [t for t, _, _ in lines]
-    assert "Summer Morning (detail)" in text and "c. 1891" in text and not fails
+    assert "Summer Morning (c. 1891) (detail)" in [t for t, _, _ in lines] and not fails
 
 
 def test_box_normalisation_and_rejects():
@@ -242,11 +241,11 @@ def test_placard_is_facts_only_fixed_half_size_and_bottom_right():
     _, pl = compose(art, plan, (3840, 2160), ident, [(0.0, 0.0, 0.3, 0.3)], 7.0, scale=0.5)
     assert pl.position == "bottom-right" and pl.passed, pl.failures
     text = [s for s in pl.lines if s]
-    assert text[-2:] == ["Impressionism", "Los Angeles County Museum of Art"]   # movement right above it
-    assert text == ["Paul Gauguin", "France", "1848–1903", "The Field of Derout-Lollichon", "1886",
-                    "Oil paint on canvas", "Impressionism", "Los Angeles County Museum of Art"]   # one fact a line
+    assert text[-2:] == ["Oil paint on canvas – Impressionism", "Los Angeles County Museum of Art"]
+    assert text == ["Paul Gauguin", "France, 1848–1903", "The Field of Derout-Lollichon (1886)",
+                    "Oil paint on canvas – Impressionism", "Los Angeles County Museum of Art"]   # Sir's five lines
     x0, y0, x1, y1 = pl.box
-    assert (x1, y1) == (3840 - 40, 2160 - 40) and (x1 - x0, y1 - y0) == card_size(0.5) == (411, 228)   # fixed, half of 822
+    assert (x1, y1) == (3840 - 40, 2160 - 40) and (x1 - x0, y1 - y0) == card_size(0.5) == (411, 171)   # fixed, half of 822
 
 
 def test_wikidata_movement_labels_print_as_names():
@@ -414,7 +413,7 @@ def _card(ident, **kw):
     return compose(_img(3840, 2160), plan, (3840, 2160), ident, [(0.0, 0.0, 0.3, 0.3)], 7.0, scale=0.5, **kw)[1]
 
 
-def test_every_card_is_the_same_size_and_gives_title_and_date_their_own_lines():
+def test_every_card_is_the_same_size_and_prints_title_with_its_date():
     short = _card({"artist": "Jim Musil", "title": "Towering Storm", "date": "2025"})
     full = _card({"artist": "James Tissot", "artist_nationality": "France", "artist_born": "1836",
                   "artist_died": "1902", "title": "The Miracle of the Loaves and Fishes", "date": "1886–1894",
@@ -422,16 +421,16 @@ def test_every_card_is_the_same_size_and_gives_title_and_date_their_own_lines():
                   "collection": "Brooklyn Museum"})
     for pl in (short, full):
         x0, y0, x1, y1 = pl.box
-        assert (x1 - x0, y1 - y0) == (411, 228) and pl.passed, pl.failures
-    assert "The Miracle of the Loaves and Fishes" in full.lines and "1886–1894" in full.lines
+        assert (x1 - x0, y1 - y0) == (411, 171) and pl.passed, pl.failures
+    assert "The Miracle of the Loaves and Fishes (1886–1894)" in full.lines
 
 
 def test_a_long_title_shrinks_then_wraps_and_an_impossible_one_fails():
     mid = _card({"artist": "Alphonse Mucha", "title": "Slav Epic: The Apotheosis of the Slavs", "date": "1926"})
-    assert mid.passed and "Slav Epic: The Apotheosis of the Slavs" in mid.lines   # set smaller, one line
+    assert mid.passed and "Slav Epic: The Apotheosis of the Slavs (1926)" in mid.lines   # set smaller, one line
     long = _card({"artist": "Alfons Mucha", "title": "Slavs in their Original Homeland: Between the Turanian Whip "
                   "and the Sword of the Goths", "date": "1912"})
-    assert long.passed and sum(1 for s in long.lines if "Slavs" in s or "Goths" in s) == 2 and long.box[3] - long.box[1] == 228
+    assert long.passed and sum(1 for s in long.lines if "Slavs" in s or "Goths" in s) == 2 and long.box[3] - long.box[1] == 171
     huge = _card({"artist": "A", "title": "word " * 60, "date": "1900"})
     assert not huge.passed and any("too long" in f for f in huge.failures)
 
@@ -681,7 +680,7 @@ def test_an_inscribed_title_that_differs_is_shown_beside_the_ruled_one():
     ru = cat.rule([a, b], {"artist": "Paul Klee", "inscribed_title": "Giftbeeren"})
     assert ru["facts"]["title"] == "Poisonous Berries" and ru["facts"]["inscribed_title"] == "Giftbeeren"
     lines, _ = _layout({"artist": "Paul Klee", **ru["facts"]}, 0.3, 221)
-    assert "Poisonous Berries 'Giftbeeren'" in [t for t, _, _ in lines] and "1920" in [t for t, _, _ in lines]
+    assert "Poisonous Berries 'Giftbeeren' (1920)" in [t for t, _, _ in lines]
 
 
 def test_leads_keep_search_text_and_drop_furniture():

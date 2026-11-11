@@ -1,13 +1,18 @@
 """Stage 5 — compose the display frame: matte, artwork, and a museum wall label.
 
-The card carries facts only, each on its own line (Sir, 2026-11-10): artist, nationality, life, title,
-date, medium, movement, collection. Facts come from the verified identification; the movement line is the catalogue's or, where
+The card carries facts only, in five lines (Sir, 2026-11-10, consolidated):
+
+    Patrick Henry Bruce
+    American, 1881–1936
+    Composition IV (1916)
+    Oil on canvas – Cubism
+    Yale University Art Gallery Facts come from the verified identification; the movement line is the catalogue's or, where
 the catalogue is silent, the interpreter's (see ``movement``). The interpreter's paragraph is not
 printed: it travels as the photo's description instead.
 
 Every card is identical in size, layout, type and stock; only the facts change. At ``scale`` 0.6 it
-is 494 px wide on a 3840 x 2160 frame: artist, nationality, life, a gap, then title, date, medium,
-movement, collection, one fact to a line. Rows with nothing to say close up; the card does not shrink. A
+is 494 px wide on a 3840 x 2160 frame: artist; nationality and life; a gap; title (date); medium – movement;
+collection. Rows with nothing to say close up; the card does not shrink. A
 line too long for the card is set smaller (to 60% for the title, 70% otherwise); a title still too
 long takes two lines at 60%, in the same height. Past that the label FAILS rather than spill.
 
@@ -83,7 +88,7 @@ def matte_colour(art: Image.Image) -> tuple[int, int, int]:
 
 
 _FACE = {"artist": SERIF_BOLD, "meta": SERIF, "title": SERIF_ITALIC}
-_ROWS = ("artist", "meta", "meta", "gap", "title", "meta", "meta", "meta", "meta")   # the fixed template
+_ROWS = ("artist", "meta", "gap", "title", "meta", "meta")   # the fixed template
 
 
 def _font(kind: str, px: int) -> ImageFont.FreeTypeFont:
@@ -114,13 +119,12 @@ def _layout(ident: dict, scale: float, inner_w: int) -> tuple[list[tuple[str, Im
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
     life = "–".join(v for v in (ident.get("artist_born"), ident.get("artist_died")) if v)
     rows = [("artist", ident["artist"]),
-            ("meta", ident.get("artist_nationality", "")),
-            ("meta", life),
+            ("meta", ", ".join(v for v in (ident.get("artist_nationality"), life) if v)),
             ("gap", ""),
             ("title", ident["title"] + (f" '{ident['inscribed_title']}'" if ident.get("inscribed_title") else "")
-             + (" (detail)" if ident.get("detail") else "")),
-            ("meta", ident.get("date", "")),
-            ("meta", ident.get("medium", "")), ("meta", ident.get("movement", "")), ("meta", ident.get("collection", ""))]
+             + (f" ({ident['date']})" if ident.get("date") else "") + (" (detail)" if ident.get("detail") else "")),
+            ("meta", " – ".join(v for v in (ident.get("medium"), ident.get("movement")) if v)),
+            ("meta", ident.get("collection", ""))]
     out, failures = [], []
     for kind, text in rows:
         if kind == "gap":
