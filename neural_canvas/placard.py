@@ -31,6 +31,7 @@ Gates: zero overlap with essential subjects, text contrast ≥ threshold, all te
 """
 from __future__ import annotations
 
+import re
 import textwrap
 from dataclasses import asdict, dataclass
 from functools import lru_cache
@@ -113,6 +114,11 @@ def viewer_grid(frame_h: int, viewer_h: int) -> int:
     return max(1, frame_h // viewer_h) if viewer_h else 1
 
 
+def date_range(d: str) -> str:
+    """A range of years as a card prints it: "1895 - 1917" -> "1895–1917" (an en dash, no spaces)."""
+    return re.sub(r"(\d{2,4})\s*[-–—]\s*(\d{2,4})", "\\1–\\2", (d or "").strip())
+
+
 def _layout(ident: dict, scale: float, inner_w: int) -> tuple[list[tuple[str, ImageFont.FreeTypeFont, int]], list[str]]:
     """Rows of (text, font, advance). Facts that are missing close up; a row that will not fit is set
     smaller, then (title only) on two lines; past that it is reported, never cut."""
@@ -122,7 +128,7 @@ def _layout(ident: dict, scale: float, inner_w: int) -> tuple[list[tuple[str, Im
             ("meta", ", ".join(v for v in (ident.get("artist_nationality"), life) if v)),
             ("gap", ""),
             ("title", ident["title"] + (f" '{ident['inscribed_title']}'" if ident.get("inscribed_title") else "")
-             + (f" ({ident['date']})" if ident.get("date") else "") + (" (detail)" if ident.get("detail") else "")),
+             + (f" ({date_range(ident['date'])})" if ident.get("date") else "") + (" (detail)" if ident.get("detail") else "")),
             ("meta", " – ".join(v for v in (ident.get("medium"), ident.get("movement")) if v)),
             ("meta", ident.get("collection", ""))]
     out, failures = [], []
@@ -143,9 +149,13 @@ def _layout(ident: dict, scale: float, inner_w: int) -> tuple[list[tuple[str, Im
             out.append((text, f, slot))
             continue
         if kind == "title":
-            lines = textwrap.wrap(text, max(8, int(len(text) * inner_w / probe.textlength(text, font=f))))
-            if len(lines) == 2 and all(probe.textlength(ln, font=f) <= inner_w for ln in lines):
-                out += [(lines[0], f, slot // 2), (lines[1], f, slot - slot // 2)]
+            # two lines, split at the word boundary that balances them best, so no word ("(detail)") sits alone
+            words = text.split()
+            splits = [(" ".join(words[:i]), " ".join(words[i:])) for i in range(1, len(words))]
+            fits = [(a, b) for a, b in splits if max(probe.textlength(a, font=f), probe.textlength(b, font=f)) <= inner_w]
+            if fits:
+                a, b = min(fits, key=lambda ab: abs(probe.textlength(ab[0], font=f) - probe.textlength(ab[1], font=f)))
+                out += [(a, f, slot // 2), (b, f, slot - slot // 2)]
                 continue
         failures.append(f"{kind} line too long for the card: {text[:60]!r}")
         out.append((text, f, slot))

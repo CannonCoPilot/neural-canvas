@@ -1528,3 +1528,12 @@ def test_a_card_prints_one_clean_movement():
     from neural_canvas.catalogue import clean_movement
     assert clean_movement("Art Nouveau (Modern) , Symbolism") == "Art Nouveau"
     assert clean_movement("pointillism") == "Pointillism" and clean_movement("") == ""
+
+
+def test_a_date_range_prints_with_an_en_dash_and_a_long_title_wraps_evenly():
+    from neural_canvas.placard import _layout, date_range
+    assert date_range("1895 - 1917") == "1895–1917" and date_range("c. 1891") == "c. 1891"
+    lines, fails = _layout({"artist": "Alphonse Mucha", "title": "Whitman's chocolates and confections. Philadelphia",
+                            "date": "1895 - 1917", "detail": True}, 0.3, 221)
+    text = [t for t, _, _ in lines if t]
+    assert not fails and "(detail)" not in text and any("1895–1917" in t for t in text)
