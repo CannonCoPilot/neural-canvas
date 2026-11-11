@@ -277,3 +277,21 @@ def test_a_date_a_medium_or_a_collection_is_contradicted_only_by_a_different_one
     assert not contradicts(rec(medium="oil on panel"), "medium", "Oil on oak panel")
     assert contradicts(rec(medium="tempera on panel"), "medium", "Oil on panel")
     assert not contradicts(rec(collection="Kathedrale St. Bavo"), "collection", "St Bavo's Cathedral")
+
+
+def test_a_fact_other_than_title_and_artist_needs_one_record_and_a_conflict_is_chosen():
+    # Sir, 2026-11-10: one reliable witness for the other facts; the holder's own record rules its collection;
+    # true but conflicting records: choose and fill
+    led = Ledger()
+    led.add("copy", "bing", "Cowry Shells", "https://example.org/a", verified=True, clip=0.95, inliers=90)          # E1
+    led.add("record", "rijksmuseum", "Rijksmuseum record", "https://www.rijksmuseum.nl/en/collection/RP-T-1",
+            claims={"collection": "Rijksmuseum"}, overrule=True)                                                    # E2
+    led.add("record", "met", "Met record", "https://www.metmuseum.org/art/collection/1",
+            claims={"collection": "The Metropolitan Museum of Art"}, overrule=True)                                # E3
+    ruling = {**_ruling(["E1"], ["E1"], "Johann Gustav Hoch", "Cowry Shells"),
+              "collection": {"value": "Rijksmuseum", "cites": ["E2"]}}
+    chk = {**_check(["E1"]), "collection": {"supports": ["E2"], "contradicts": ["E3"]}}
+    v = rule_facts(led, ruling, chk, record_facts=("collection",))
+    assert v["facts"]["collection"] == "Rijksmuseum" and v["contradicted"]["collection"] == ["E3"]
+    caption_only = {**ruling, "date": {"value": "1750", "cites": ["E1"]}}
+    assert "date" not in rule_facts(led, caption_only, chk, record_facts=("date", "collection"))["facts"]   # no record

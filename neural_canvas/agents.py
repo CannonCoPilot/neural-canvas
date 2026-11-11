@@ -7,10 +7,11 @@
   compared, the deterministic check ``states`` decides instead: measured on the withheld bench, the 8b checker
   missed true support and vetoed verified copies that named the artist outright. It rules items in another
   script, and its contradictions are recorded (a curated record's contradiction vetoes).
-* The RULES are code, not models (Sir, 2026-11-07): a printed fact needs at least two supporting items from
-  two independent origins, at least one of them a verified copy or a catalogue record (an engine's answer
-  supports but never anchors: engines name look-alikes); the card's date, medium and collection need a
-  catalogue record among them. Every cited item must carry the value in its own words (``states``). Leads
+* The RULES are code, not models (Sir, 2026-11-07): the artist and the title need at least two supporting items
+  from two independent origins, at least one of them a verified copy or a catalogue record (an engine's answer
+  supports but never anchors: engines name look-alikes). Every other fact needs one reliable witness: the card's
+  date, medium and collection need a catalogue record, and a true conflict among records is chosen, not left
+  blank (Sir, 2026-11-10). Every cited item must carry the value in its own words (``states``). Leads
   (model guesses, the signature reading) never count.
 
 Rounds are capped (``rounds_max``). The cap is a circuit-breaker, never an acceptance: a fact that fails
@@ -153,8 +154,8 @@ class Agents:
             rounds[-1]["new_items"] = search(ruling, queries)
             anchors = [i.line() for i in ledger.items if i.kind == "record" or (i.kind == "copy" and i.verified)][:30]
             feedback = ("\nYOUR PREVIOUS RULING FAILED THE EVIDENCE RULES: " + "; ".join(verdict["failures"])
-                        + ". A fact needs two independent sites that state it, at least one of them a VERIFIED COPY "
-                        "or a catalogue record. These are the ONLY items that can anchor a ruling; each verified copy "
+                        + ". The artist and the title need two independent sites that state them, at least one of them "
+                        "a VERIFIED COPY or a catalogue record; the date, medium and collection need one catalogue record. These are the ONLY items that can anchor a ruling; each verified copy "
                         "is proven to be this very picture:\n" + "\n".join(anchors)
                         + "\nThe photograph's style can suggest a famous look-alike artist; the anchors decide. Which "
                         "artist and title do these anchors themselves name? Rule that, citing them and every other item "
@@ -193,19 +194,24 @@ def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] 
                       and states(SimpleNamespace(text=str(i.claims[f]), claims={}), f, value) is True]
         origins = {i.origin for i in items}
         anchors = [i for i in items if i.kind in ANCHORS]
+        # Sir, 2026-11-10: the title and the artist need two independent witnesses; every other fact needs one
+        # reliable witness (a catalogue record: record_facts), and a true conflict there is chosen, not left blank
+        floor = 2 if f in need or f in ("artist", "title") else 1
         why = ""
         if f == "title" and re.search(r"(\.\.\.|\u2026)\s*$", value):
             why = "cut off mid-title (a page caption's ellipsis)"
-        elif len(origins) < 2:
-            why = f"{len(origins)} independent item(s) state it (2 needed)"
+        elif len(origins) < floor:
+            why = f"{len(origins)} independent item(s) state it ({floor} needed)"
         elif not anchors:
             why = "no verified copy or catalogue record states it"
         elif f in record_facts and not any(i.kind == "record" for i in items):
             why = "no catalogue record states it"
         against = [x for x in c.get("contradicts") or [] if (i := ledger.get(str(x))) and i.kind == "record" and i.overrule
                    and contradicts(i, f, value)]
-        if not why and against:
+        if not why and against and floor == 2:
             why = f"curated record(s) {', '.join(map(str, against))} state otherwise"
+        elif not why and against:          # chosen: the ruling stands; the disagreement is kept on the record
+            out["contradicted"][f] = [str(x) for x in against]
         if why:
             out["unruled"][f] = f"{value!r}: {why}"
             continue

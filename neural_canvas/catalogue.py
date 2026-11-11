@@ -1291,7 +1291,7 @@ class Catalogue:
         parts = [p.strip() for p in re.split(r"[-–/]", label) if p.strip()]
         said = {a for s in stated.values() for d in s for a in _alias(d)}
         sup = sorted(src for src, s in stated.items() if {a for d in s for a in _alias(d)} & {p.lower() for p in parts})
-        if parts and all(p.lower() in said for p in parts) and len(sup) >= 2:
+        if parts and all(p.lower() in said for p in parts) and len(sup) >= 1:      # one reliable witness (Sir, 2026-11-10)
             return "-".join(p.capitalize() for p in parts), sup, stated
         return "", sup, stated
 
@@ -1696,7 +1696,7 @@ class Catalogue:
                "discarded": {}}
         over = {r.source for r in recs if r.overrule}
 
-        def choose(name, values, support_of, agrees=None):
+        def choose(name, values, support_of, agrees=None, floor=2):
             """Sir, 2026-11-05: the overrule tier (Wikidata and its links, museum APIs, catalogues raisonnés)
             votes among itself. When it states a fact, only its values can be ruled; lower-tier sources may
             add support by agreeing, and their disagreeing values are discarded. Most overrule support wins."""
@@ -1705,7 +1705,7 @@ class Catalogue:
             for r, v in top or values:
                 sup = support_of(r, v)
                 key = (len(over & set(sup)), len(sup))
-                if len(sup) >= 2 and (best is None or key > best[0]):
+                if len(sup) >= floor and (best is None or key > best[0]):
                     best = (key, v, sup)
             if not best:
                 return None
@@ -1716,10 +1716,10 @@ class Catalogue:
                     out["discarded"][name] = gone
             return best[1], best[2]
 
-        def pick(name, values, agree):
+        def pick(name, values, agree, floor=2):
             got = choose(name, values, lambda r, v: sorted({r2.source for r2, v2 in values if agree(v, v2)} |
                                                            {r2.source for r2 in recs if r2.text and r2.states(v)}),
-                         lambda v, won, sup: agree(v, won))
+                         lambda v, won, sup: agree(v, won), floor)
             if got:
                 out["facts"][name], out["support"][name] = got
                 return got[0]
@@ -1759,35 +1759,44 @@ class Catalogue:
         pick("collection", [(r, r.collection) for r in pref if r.collection], same_collection)
         # "Art Nouveau" and WikiArt's "Art Nouveau (Modern)" are one movement: one name contains the other
         same_mov = lambda a, b: bool(fold(a)) and bool(fold(b)) and (fold(a) in fold(b) or fold(b) in fold(a))  # noqa: E731
-        if not pick("movement", [(r, r.movement) for r in pref if r.movement], same_mov):
+        # one reliable witness rules everything but the title and the artist (Sir, 2026-11-10)
+        if not pick("movement", [(r, r.movement) for r in pref if r.movement], same_mov, floor=1):
             # the artist's movement (Sir's card lists "movement/period"): Wikidata's single movement for the artist,
             # confirmed by the movement on the artist's Wikipedia article, a separate source
             who = next((r for r in authorities if r.source == "wikidata" and r.movement), None)
             stated = who.text.replace("movement ", "", 1) if who and who.text else ""
             both = [m for m in (who.movement.split("|") if who else []) if stated and fold(m) and fold(m) in stated]
-            if both:      # Wikidata's first movement for the artist that the article also names (Klimt: Symbolism)
-                out["facts"]["movement"] = both[0][:1].upper() + both[0][1:]
-                out["support"]["movement"] = ["wikidata (artist)", "wikipedia (artist)"]
+            # Wikidata's first movement for the artist that the article also names (Klimt: Symbolism), else its first
+            mine = both or [m for m in (who.movement.split("|") if who else []) if m]
+            if mine:
+                out["facts"]["movement"] = mine[0][:1].upper() + mine[0][1:]
+                out["support"]["movement"] = ["wikidata (artist)"] + (["wikipedia (artist)"] if both else [])
                 out["unruled"].pop("movement", None)
         # the artist's life: Wikidata's years (the work's item, else the artist's own) against a printed biography
         wd = next((r for r in recs + authorities if r.source == "wikidata" and r.artist_born), None)
         bios = [r for r in recs + authorities if r.artist_bio and r.source != "wikidata"]
+        if not wd:        # no Wikidata: the first printed biography with the years (an authority's first: RKD, KID)
+            first = next((r for r in sorted(bios, key=lambda r: not r.authority) if r.artist_born or
+                          re.search(r"\d{4}", r.artist_bio)), None)
+            if first:
+                yrs = re.findall(r"\d{4}", first.artist_bio)
+                first.artist_born = first.artist_born or (yrs[0] if yrs else "")
+                first.artist_died = first.artist_died or (yrs[1] if len(yrs) > 1 else "")
+                wd = first
         if wd:
             agree = [r.source for r in bios if wd.artist_born in r.artist_bio and (not wd.artist_died or wd.artist_died in r.artist_bio)]
             agree += [r.source for r in recs if r.text and wd.artist_born and wd.artist_born in r.text
                       and (not wd.artist_died or wd.artist_died in r.text) and r.source not in agree]
-            if agree:
-                out["facts"]["artist_born"], out["facts"]["artist_died"] = wd.artist_born, wd.artist_died
-                out["support"]["artist_life"] = ["wikidata", *agree]
-                label, sup, stated = self._nationality(ident.get("artist", "") or wd.artist, wd, bios)
-                if label:
-                    out["facts"]["artist_nationality"] = label
-                    out["support"]["artist_nationality"] = sup
-                else:
-                    out["unruled"]["artist_nationality"] = [f"{k}: {', '.join(sorted(v))}" for k, v in stated.items()] or \
-                        ["no source states a nationality"]
+            # one reliable witness rules the life (Sir, 2026-11-10); the sources that agree are its support
+            out["facts"]["artist_born"], out["facts"]["artist_died"] = wd.artist_born, wd.artist_died
+            out["support"]["artist_life"] = [wd.source, *[a for a in agree if a != wd.source]]
+            label, sup, stated = self._nationality(ident.get("artist", "") or wd.artist, wd, bios)
+            if label:
+                out["facts"]["artist_nationality"] = label
+                out["support"]["artist_nationality"] = sup
             else:
-                out["unruled"]["artist_life"] = [f"wikidata: {wd.artist_born}-{wd.artist_died}"] + [f"{r.source}: {r.artist_bio}" for r in bios]
+                out["unruled"]["artist_nationality"] = [f"{k}: {', '.join(sorted(v))}" for k, v in stated.items()] or \
+                    ["no source states a nationality"]
         else:
             out["unruled"]["artist_life"] = [f"{r.source}: {r.artist_bio}" for r in bios] or ["no curated source"]
         # a title written legibly on the work, when it differs from the ruled one, is shown beside it

@@ -656,7 +656,7 @@ def _rec(source, title, **kw):
     return Record(source, f"https://{source}/x", title, **kw)
 
 
-def test_a_fact_is_ruled_only_when_two_curated_sources_state_it():
+def test_title_and_artist_need_two_sources_and_other_facts_one_reliable_witness():
     from neural_canvas.catalogue import Catalogue
     cat = Catalogue.__new__(Catalogue); cat.consulted = []
     ident = {"artist": "Frederic Remington", "inscribed_title": ""}
@@ -666,7 +666,7 @@ def test_a_fact_is_ruled_only_when_two_curated_sources_state_it():
     ru = cat.rule([wd, page], ident)
     assert ru["facts"]["title"] == "A Dash for the Timber" and ru["facts"]["artist"] == "Frederic Remington"
     assert ru["facts"]["date"] == "1889" and not ru["failures"]
-    assert "artist_nationality" not in ru["facts"]           # only Wikidata says it: not printed
+    assert ru["facts"]["artist_nationality"] == "American"    # one reliable witness (Wikidata) prints it (Sir, 2026-11-10)
     ru1 = cat.rule([wd], ident)
     assert ru1["failures"] and "title not ruled" in ru1["failures"][0]
 
@@ -1185,7 +1185,7 @@ def test_nationality_prints_demonyms_and_a_compound_only_when_the_sources_state_
     assert cat._nationality("x", us, [Record("artic", "u", "t", artist_bio="American, 1849-1921")])[0] == ""
     answers["label"] = "American"
     assert cat._nationality("x", us, [Record("artic", "u", "t", artist_bio="American, 1849-1921")])[0] == "American"
-    assert cat._nationality("x", us, [])[0] == ""          # one source is not two
+    assert cat._nationality("x", us, [])[0] == "American"  # one reliable witness rules it (Sir, 2026-11-10)
 
 
 def test_commons_thumbnails_use_the_widths_wikimedia_serves():
@@ -1496,7 +1496,7 @@ def test_the_artists_movement_is_ruled_when_wikidata_and_their_wikipedia_article
         cat.rule([who, _rec("artvee.com", "Bauerngarten", artist="Gustav Klimt")], {"artist": "Gustav Klimt"})
     assert ru["facts"]["movement"] == "Symbolism"
     alone = Record("wikidata", "u", "", [], "Gustav Klimt", authority=True, movement="Symbolism", artist_born="1862")
-    assert "movement" not in cat.rule([alone], {"artist": "Gustav Klimt"})["facts"]     # no second statement: off
+    assert cat.rule([alone], {"artist": "Gustav Klimt"})["facts"]["movement"] == "Symbolism"   # one witness (Sir, 2026-11-10)
 
 
 def test_an_unlisted_label_ends_a_field():
