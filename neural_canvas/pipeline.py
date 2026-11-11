@@ -368,8 +368,12 @@ class Docent:
                     if not dr.passed:
                         return block(stage, dr.failures)
                     if old and old != dr.media_item_id:   # the new frame replaces the old one in the album
-                        self.photos.remove_from_album(old)
-                        st[stage]["replaced"] = old
+                        try:
+                            self.photos.remove_from_album(old)
+                            st[stage]["replaced"] = old
+                        except Exception as e:     # never a silent duplicate: kept, and retried at the next start
+                            st[stage]["pending_remove"] = old
+                            log.error("old frame %s still in the album beside its replacement: %s", old[:12], e)
                         save()
                     self.registry.record(run_id, status="delivered", frame=str(out))
             elif not deliver:

@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -142,24 +143,44 @@ class GooglePhotos:
         log.info("created Google Photos album %r", self.album_name)
         return aid
 
+    WRITE_GAP_S = 2.0           # between write calls, across this process's workers
+    _WRITE = threading.Lock()
+    _last_write = 0.0
+
+    def _post(self, s: requests.Session, url: str, attempts: int = 6, **kw) -> requests.Response:
+        """A Library API write, paced and retried: a 429 or a 5xx waits (Retry-After when given, else 4, 8, 16 ... s)
+        and tries again. Redelivering the album's 29 works two at a time hit 429 on batchCreate and
+        batchRemoveMediaItems (2026-11-10): four frames failed and one old frame stayed beside its replacement."""
+        for k in range(attempts):
+            with GooglePhotos._WRITE:
+                wait = GooglePhotos.WRITE_GAP_S - (time.time() - GooglePhotos._last_write)
+                if wait > 0:
+                    time.sleep(wait)
+                r = s.post(url, **kw)
+                GooglePhotos._last_write = time.time()
+            if r.status_code != 429 and r.status_code < 500:
+                break
+            delay = min(120.0, float(r.headers.get("Retry-After") or 4 * 2 ** k))
+            log.warning("Google Photos %s -> HTTP %s; retrying in %.0f s", url.rsplit("/", 1)[-1][:40], r.status_code, delay)
+            time.sleep(delay)
+        r.raise_for_status()
+        return r
+
     def remove_from_album(self, media_item_id: str) -> None:
         """Take an app-created item out of the album (it stays in the library: the API cannot delete)."""
         s = self._session()
-        r = s.post(f"{API}/albums/{self._album_id(s)}:batchRemoveMediaItems",
+        self._post(s, f"{API}/albums/{self._album_id(s)}:batchRemoveMediaItems",
                    json={"mediaItemIds": [media_item_id]}, timeout=30)
-        r.raise_for_status()
 
     def deliver(self, image_path: Path, description: str) -> DeliveryResult:
         s = self._session()
         album = self._album_id(s)
-        r = s.post(f"{API}/uploads", data=image_path.read_bytes(), timeout=180, headers={
+        r = self._post(s, f"{API}/uploads", data=image_path.read_bytes(), timeout=180, headers={
             "Content-type": "application/octet-stream", "X-Goog-Upload-Content-Type": "image/jpeg",
             "X-Goog-Upload-Protocol": "raw", "X-Goog-Upload-File-Name": image_path.name})
-        r.raise_for_status()
         token = r.text
-        r = s.post(f"{API}/mediaItems:batchCreate", timeout=120, json={"albumId": album, "newMediaItems": [
+        r = self._post(s, f"{API}/mediaItems:batchCreate", timeout=120, json={"albumId": album, "newMediaItems": [
             {"description": description[:1000], "simpleMediaItem": {"uploadToken": token, "fileName": image_path.name}}]})
-        r.raise_for_status()
         res = (r.json().get("newMediaItemResults") or [{}])[0]
         item = res.get("mediaItem") or {}
         failures = [] if item.get("id") else [f"batchCreate status {res.get('status')}"]

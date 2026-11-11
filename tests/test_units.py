@@ -1510,3 +1510,15 @@ def test_a_kid_study_or_copy_is_not_the_work():
     assert KID_VERSION.search("Kristus i Gethsemane have Forarbejde til alterbilledet i St. Hans Kirke")
     assert KID_VERSION.search("Prometheus' ørn. Skitse")
     assert not KID_VERSION.search("Christus i Gethsemane")
+
+
+def test_a_google_photos_write_waits_out_a_429_and_retries(monkeypatch):
+    from types import SimpleNamespace
+    from neural_canvas import deliver
+    monkeypatch.setattr(deliver.time, "sleep", lambda s: None)
+    replies = [SimpleNamespace(status_code=429, headers={"Retry-After": "3"}, raise_for_status=lambda: None),
+               SimpleNamespace(status_code=200, headers={}, raise_for_status=lambda: None, text="ok")]
+    calls = []
+    s = SimpleNamespace(post=lambda url, **kw: calls.append(url) or replies.pop(0))
+    gp = deliver.GooglePhotos.__new__(deliver.GooglePhotos)
+    assert gp._post(s, "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate").text == "ok" and len(calls) == 2

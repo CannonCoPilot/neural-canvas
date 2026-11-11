@@ -234,6 +234,30 @@ class Service:
         return t["id"]
 
     # ── runner: tasks → runs ──────────────────────────────────────────────
+    def sweep_pending_removals(self) -> int:
+        """Old frames a redelivery could not take out of the album (a 429 on removal) are taken out now."""
+        n = 0
+        for rp in Path(self.cfg.path("work_dir")).glob("*/record.json"):
+            try:
+                rec = json.loads(rp.read_text())
+            except ValueError:
+                continue
+            d = rec.get("stages", {}).get("deliver", {})
+            old = d.get("pending_remove")
+            if not old:
+                continue
+            try:
+                self.docent.photos.remove_from_album(old)
+            except Exception as e:
+                log.error("old frame %s of %s is still in the album: %s", old[:12], rp.parent.name[:8], e)
+                continue
+            d["replaced"] = d.pop("pending_remove")
+            rp.write_text(json.dumps(rec, indent=2, default=str))
+            n += 1
+        if n:
+            log.info("took %d replaced frame(s) out of the album", n)
+        return n
+
     def requeue_stranded(self) -> list[str]:
         """Tasks left active:running by a service that stopped mid-run go back to the queue. Only one
         service runs at a time (service.lock), so at startup no run of ours is really in progress."""
@@ -366,6 +390,7 @@ class Service:
             self.requeue_stranded()
         except requests.RequestException as e:
             log.error("Pulse unreachable, stranded tasks not checked: %s", e)
+        self.sweep_pending_removals()
         if not once:
             try:            # every identified artist not yet indexed (first sight was missed before 2026-11-10)
                 arts = []
