@@ -85,6 +85,12 @@ _KID_WORDS = {"olie": "oil", "lærred": "canvas", "træ": "wood", "egetræ": "oa
               "fresko": "fresco", "plade": "panel", "på": "on", "og": "and", "med": "with", "lærred,": "canvas,"}
 
 
+# a study, sketch, copy or replica of the work is another object, though its picture matches: Bloch's Gethsemane at
+# the Glyptotek is "Forarbejde til alterbilledet i St. Hans Kirke", 1879; the altarpiece is 1880 (2026-11-10)
+KID_VERSION = re.compile(r"\b(forarbejde|skitse|studie|kopi|efter|replik|replika|udkast|variant|sketch|study|copy after|replica)\b",
+                         re.I)
+
+
 def kid_medium(s: str) -> str:
     """Kunstindeks Danmark's Danish technique in English, word by word; English entries pass through."""
     words = s.strip().split()
@@ -766,10 +772,15 @@ class Catalogue:
         cands.sort(key=lambda m: (not any(same_title(t, m.get("title", "")) for t in titles if t),
                                   "Maleri" not in (m.get("objectNames") or []), m.get("objectTemplate") != "ART"))
         for m in cands[:14]:
+            if KID_VERSION.search(f"{m.get('title', '')} {m.get('description', '')}"):
+                continue
             url = KID + m["reproductions"][0]
             ok, sim, inl = self._verify(img, img_vec, url, f"Kunstindeks Danmark {m['id']} '{m.get('title', '')}'")
             if ok:
-                rec = self._kid_rec(self._kid_get(f"es_artworks/{m['id']}") or m)
+                full = self._kid_get(f"es_artworks/{m['id']}") or m
+                if KID_VERSION.search(f"{full.get('title', '')} {full.get('description', '')}"):
+                    continue          # the search hit carries no description; the record does
+                rec = self._kid_rec(full)
                 rec.image_url, rec.clip, rec.inliers = url, sim, inl
                 return [rec]
         return []
@@ -1799,7 +1810,9 @@ def labelled(text: str) -> dict:
     out = {}
     for m in re.finditer(rf"\b({alt}):\s*(.+?)(?=\s+(?:{alt}):|$)", text[:20000]):
         # a value ends where the page's furniture begins: a run of capitals ("SHOP FOR POSTERS ..."), "Share:"
-        v = re.split(r"\s+(?:[A-Z]{2,}\s+){2,}[A-Z]{2,}|\s+(?:Share|Tags|Buy|Order)\b", m.group(2))[0].strip(" ;,.")
+        # ... or where an unlisted label starts ("Style: Northern Renaissance Series: The Ghent Altarpiece")
+        v = re.split(r"\s+(?:[A-Z]{2,}\s+){2,}[A-Z]{2,}|\s+(?:Share|Tags|Buy|Order)\b|\s+[A-Z][a-z]+(?:\s[a-z]+)?:\s",
+                     m.group(2))[0].strip(" ;,.")
         if v and fold(v) not in ("unknown", "n a", "na", "none", "?"):
             out.setdefault(m.group(1), v[:200])
     return out

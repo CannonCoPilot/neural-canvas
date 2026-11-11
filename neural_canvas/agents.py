@@ -202,7 +202,8 @@ def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] 
             why = "no verified copy or catalogue record states it"
         elif f in record_facts and not any(i.kind == "record" for i in items):
             why = "no catalogue record states it"
-        against = [x for x in c.get("contradicts") or [] if (i := ledger.get(str(x))) and i.kind == "record" and i.overrule]
+        against = [x for x in c.get("contradicts") or [] if (i := ledger.get(str(x))) and i.kind == "record" and i.overrule
+                   and contradicts(i, f, value)]
         if not why and against:
             why = f"curated record(s) {', '.join(map(str, against))} state otherwise"
         if why:
@@ -224,6 +225,34 @@ _STOP = {"the", "and", "with", "of", "on", "in", "a", "an", "de", "la", "le", "h
 def _fold(s: str) -> str:
     s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower()
     return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+_ENGLISH = {"the", "of", "and", "in", "on", "at", "with", "from", "a", "an", "by", "to", "for"}
+
+
+def contradicts(item, fact: str, value: str) -> bool:
+    """A curated record's contradiction stands only when its own words can contradict: the checker flagged the
+    Ghent Altarpiece's co-author ("Hubert van Eyck") and its German and Dutch titles as contradicting "Jan van
+    Eyck" and the English title, and the work blocked (2026-11-10). An artist is contradicted only by another
+    surname; a title only by a record that states one in the same language (English titles carry English words)."""
+    claim = str(item.claims.get(fact) or "").strip()
+    if not claim:
+        return False
+    if fact == "artist":
+        a, b = _fold(claim).split(), _fold(value).split()
+        return bool(a and b) and a[-1] != b[-1] and b[-1] not in a
+    if fact == "title":
+        eng = lambda t: bool(set(_fold(t).split()) & _ENGLISH)   # noqa: E731
+        return eng(claim) == eng(value) and states(SimpleNamespace(text=claim, claims={}), fact, value) is False
+    from .catalogue import medium_clash, same_collection
+    if fact == "date":          # "before 1426-1432" does not contradict 1432: only a record sharing no year does
+        a, b = set(re.findall(r"\d{4}", claim)), set(re.findall(r"\d{4}", value))
+        return bool(a and b) and not a & b
+    if fact == "medium":        # only another paint contradicts (oil against tempera), not other words for the same
+        return medium_clash(claim, value)
+    if fact == "collection":
+        return not same_collection(claim, value) and states(SimpleNamespace(text=claim, claims={}), fact, value) is False
+    return True
 
 
 def states(item, fact: str, value: str) -> bool | None:

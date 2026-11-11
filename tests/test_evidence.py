@@ -96,7 +96,8 @@ def test_no_verified_copy_means_no_identification_whatever_the_text_says():
 
 def test_card_facts_need_a_record_and_a_curated_record_can_veto():
     led = _visser_ledger()
-    led.add("record", "wikidata", "Wikidata item Q1: date 1890", "https://www.wikidata.org/wiki/Q1", overrule=True)  # E5
+    led.add("record", "wikidata", "Wikidata item Q1: date 1890", "https://www.wikidata.org/wiki/Q1", overrule=True,
+            claims={"artist": "Sandra Younes", "date": "1890"})                                                    # E5
     led.add("copy", "bing", "Suzan Visser, Hummingbird and Fish (2019)", "https://www.saatchiart.com/art/1", verified=True,
             clip=0.95, inliers=70)                                                                                 # E6
     ruling = {**_ruling(["E1", "E3"], ["E1", "E3"]), "date": {"value": "2019", "cites": ["E3", "E6"]}}
@@ -252,3 +253,27 @@ def test_uncited_catalogue_records_whose_own_field_states_a_date_support_it():
     ruling = {**_ruling(["E1"], ["E1"], "Andrew Wyeth", "Christina's World"), "date": {"value": "1948", "cites": ["E1"]}}
     v = rule_facts(led, ruling, _check(["E1"]), record_facts=("date", "medium", "collection"))
     assert v["facts"]["date"] == "1948" and set(v["support"]["date"]) == {"E1", "E2", "E3"}     # not E4: another year
+
+
+def test_a_co_author_or_a_title_in_another_language_is_no_contradiction():
+    # the Ghent Altarpiece (2026-11-10): Commons credits Hubert van Eyck; Commons and KIK-IRPA title it in German and Dutch
+    from types import SimpleNamespace as NS
+    from neural_canvas.agents import contradicts
+    rec = lambda **c: NS(claims=c, text="")                                                          # noqa: E731
+    assert not contradicts(rec(artist="Hubert van Eyck"), "artist", "Jan van Eyck")
+    assert contradicts(rec(artist="Hans Memling"), "artist", "Jan van Eyck")
+    assert not contradicts(rec(title="Lam Gods: Aanbidding van het Lam"), "title", "Adoration of the Lamb from the Ghent Altarpiece")
+    assert not contradicts(rec(title="LUX: Yale Collections Discovery"), "title", "Adoration of the Lamb from the Ghent Altarpiece")
+    assert contradicts(rec(title="The Arnolfini Portrait"), "title", "Adoration of the Lamb from the Ghent Altarpiece")
+    assert not contradicts(rec(), "title", "Adoration of the Lamb")                                   # states nothing
+
+
+def test_a_date_a_medium_or_a_collection_is_contradicted_only_by_a_different_one():
+    from types import SimpleNamespace as NS
+    from neural_canvas.agents import contradicts
+    rec = lambda **c: NS(claims=c, text="")                                                          # noqa: E731
+    assert not contradicts(rec(date="before 1426-1432"), "date", "1432")
+    assert contradicts(rec(date="1890"), "date", "1432")
+    assert not contradicts(rec(medium="oil on panel"), "medium", "Oil on oak panel")
+    assert contradicts(rec(medium="tempera on panel"), "medium", "Oil on panel")
+    assert not contradicts(rec(collection="Kathedrale St. Bavo"), "collection", "St Bavo's Cathedral")

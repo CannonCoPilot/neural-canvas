@@ -1498,3 +1498,16 @@ def test_the_artists_movement_is_ruled_when_wikidata_and_their_wikipedia_article
     assert ru["facts"]["movement"] == "Symbolism"
     alone = Record("wikidata", "u", "", [], "Gustav Klimt", authority=True, movement="Symbolism", artist_born="1862")
     assert "movement" not in cat.rule([alone], {"artist": "Gustav Klimt"})["facts"]     # no second statement: off
+
+
+def test_an_unlisted_label_ends_a_field():
+    from neural_canvas.catalogue import labelled
+    assert labelled("Style: Northern Renaissance Series: The Ghent Altarpiece")["Style"] == "Northern Renaissance"
+    assert labelled("Style: Realism Theme: Angel Genre: religious")["Style"] == "Realism"
+
+
+def test_a_kid_study_or_copy_is_not_the_work():
+    from neural_canvas.catalogue import KID_VERSION
+    assert KID_VERSION.search("Kristus i Gethsemane have Forarbejde til alterbilledet i St. Hans Kirke")
+    assert KID_VERSION.search("Prometheus' ørn. Skitse")
+    assert not KID_VERSION.search("Christus i Gethsemane")
