@@ -112,6 +112,8 @@ def clean_movement(v: str) -> str:
     # an infobox may describe a role, not name a movement: Whistler's reads "Founder of Tonalism" (2026-11-12)
     first = re.sub(r"^(?:co-?)?(?:founder|leader|member|pioneer|exponent|proponent)s?\s+of\s+(?:the\s+)?", "", first,
                    flags=re.I)
+    # "Italian Baroque Painting" is the Italian Baroque: the card already says it is a painting (Caravaggio, 2026-11-12)
+    first = re.sub(r"\s+painting$", "", first, flags=re.I) if len(first.split()) > 1 else first
     # a movement is a proper noun: "American realism" and "Hudson River school" print as American Realism and
     # Hudson River School (Wikidata's labels are sentence case, 2026-11-12)
     small = {"of", "and", "the", "de", "des", "la", "le", "les", "du", "in", "der", "die"}

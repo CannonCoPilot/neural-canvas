@@ -1672,6 +1672,7 @@ def test_a_movement_prints_as_a_proper_noun():
     assert clean_movement("post-impressionism") == "Post-Impressionism" and clean_movement("ukiyo-e") == "Ukiyo-e"
     assert clean_movement("Shin-hanga") == "Shin-hanga" and clean_movement("pre-raphaelite") == "Pre-Raphaelite"
     assert clean_movement("Founder of Tonalism") == "Tonalism" and clean_movement("co-founder of the Nabis") == "Nabis"
+    assert clean_movement("Italian Baroque Painting") == "Italian Baroque" and clean_movement("Abstract Art") == "Abstract Art"
     assert clean_movement("Les Nabis") == "Les Nabis" and clean_movement("Art Nouveau (Modern) , Symbolism") == "Art Nouveau"
 
 
