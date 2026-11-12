@@ -2006,6 +2006,13 @@ def decide_life(lives: dict, nats: dict) -> dict:
     return out
 
 
+def card_medium(medium: str) -> str:
+    """"Oil painting" names the object, not its materials: the card prints "Oil" (Mønsted, 2026-11-12)."""
+    m = (medium or "").strip()
+    bare = re.sub(r"\s+paint(?:ing|ings)?\s*$", "", m, flags=re.I)
+    return bare[:1].upper() + bare[1:] if bare != m and _materials(bare) else m
+
+
 def date_from_ledger(items, artist: str, title: str, born: str = "", died: str = "") -> tuple[str, list[str]]:
     """The work's year as pages print it right after its title, on pages naming the artist: "Richard Savoie,
     Canada (1959-) There Was a Time (2015)" (2026-11-12: the model ruled Savoie's birth year). Each site votes
@@ -2130,6 +2137,8 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
             verdict = {"facts": {}, "support": {}, "unruled": {}, "rounds": [],
                        "failures": [f"catalogue adjudication failed: {type(e).__name__}: {str(e)[:200]}"]}
     facts = dict(verdict["facts"])
+    if facts.get("medium"):
+        facts["medium"] = card_medium(facts["medium"])
     if facts.get("medium") and not _materials(facts["medium"]):
         # "painting" is an object type, not a medium (Bloch, Christus Consolator, 2026-11-10): it never prints
         verdict.setdefault("unruled", {})["medium"] = f"{facts.pop('medium')!r}: names no material"

@@ -1629,3 +1629,9 @@ def test_an_artist_described_by_their_movement_or_as_a_naturalist_is_found():
     assert found(("Q2", "American zoologist")) == "Q2"
     assert found(("Q3", "American zoologist"), ("Q4", "American painter")) == "Q4"     # the artist first
     assert found(("Q5", "Surgeon-General of the UK")) is None
+
+
+def test_an_oil_painting_prints_its_material():
+    from neural_canvas.catalogue import card_medium
+    assert card_medium("Oil painting") == "Oil" and card_medium("watercolor painting") == "Watercolor"
+    assert card_medium("painting") == "painting" and card_medium("Oil on canvas") == "Oil on canvas"
