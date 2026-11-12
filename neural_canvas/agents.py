@@ -199,12 +199,15 @@ def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] 
             # (Sir, 2026-11-10). Signac's "Cassis, Cap Lombard, Opus 196": Wikidata's record read "Oil paint on
             # canvas" and "Kunstmuseum Den Haag", and the card printed neither (2026-11-12). Only a record whose
             # own title is the ruled work's: a record of another work (Perry's "By Boat on the Epte") never speaks
-            recs = [i for i in ledger.items if i.kind == "record" and i.claims.get(f) and i.claims.get("title")
-                    and states(SimpleNamespace(text=str(i.claims["title"]), claims={}), "title", work[1]) is True]
+            # a record matched to the picture itself speaks whatever its language ("Hyrdernes tilbedelse"); the
+            # holder's own museum outranks an index (SMK over Kunstindeks Danmark)
+            from .sources import holder
+            recs = [i for i in ledger.items if i.kind == "record" and i.claims.get(f) and (i.inliers > 0 or (
+                i.claims.get("title") and states(SimpleNamespace(text=str(i.claims["title"]), claims={}), "title", work[1]) is True))]
             if recs:
                 agree = lambda i: sum(states(SimpleNamespace(text=str(j.claims[f]), claims={}), f, str(i.claims[f]))  # noqa: E731
                                       is True for j in recs)
-                best = max(recs, key=lambda i: (i.overrule, agree(i)))
+                best = max(recs, key=lambda i: (bool(holder(i.url)), i.overrule, agree(i)))
                 value, cites = str(best.claims[f]), [best.id]
         if not value:
             if f in need:

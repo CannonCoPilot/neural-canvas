@@ -1935,8 +1935,11 @@ def record_items(ledger, recs: list[Record]) -> int:
     for r in recs:
         if r.authority:
             continue
+        from .sources import holder
         claims = {"title": r.title, "artist": r.artist, "date": r.date,
-                  "medium": r.medium if _materials(r.medium) else "", "collection": r.collection}
+                  "medium": r.medium if _materials(r.medium) else "",
+                  # a museum's own record of a picture it matched holds the work (Sir, 2026-11-10)
+                  "collection": r.collection or (holder(r.url) if r.verified_by == "image" and not r.support else "")}
         if r.source == "commons.wikimedia.org" and r.wikidata and r.wikidata in items:
             # the fields its Artwork template fills from that same item are an echo, not a second witness; the ones
             # the file page sets itself are its own (2026-11-10)

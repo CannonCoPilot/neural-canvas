@@ -350,3 +350,22 @@ def test_the_works_own_record_fills_a_card_fact_the_adjudicator_left_blank():
     v = rule_facts(led, ruling, _check(["E1", "E2"]), record_facts=("date", "medium", "collection"))
     assert v["facts"]["medium"] == "Oil paint on canvas" and v["facts"]["collection"] == "Kunstmuseum Den Haag"
     assert "date" not in v["facts"]                   # another work's record never speaks for this one
+
+
+def test_the_holders_own_record_names_the_collection_in_any_language():
+    # Bloch, Hyrdernes tilbedelse (2026-11-12): SMK's own record matched the picture; Kunstindeks Danmark
+    # indexed a related painting at Trapholt
+    from neural_canvas.sources import holder
+    assert holder("https://open.smk.dk/artwork/image/KKS1") == "Statens Museum for Kunst" and holder("https://x.org/a") == ""
+    led = Ledger()
+    led.add("copy", "bing", "The Adoration of the Shepherds by Carl Bloch", "https://www.reddit.com/r/museum/1", verified=True,
+            clip=0.95, inliers=90)                                                                                   # E1
+    led.add("copy", "bing", "Carl Bloch, The Adoration of the Shepherds (1881)", "https://www.wikiart.org/x", verified=True,
+            clip=0.94, inliers=80)                                                                                   # E2
+    led.add("record", "kid", "kunstindeks record", "https://www.kunstindeks.dk/x", overrule=True, clip=0.95, inliers=111,
+            claims={"title": "Christi Fødsel", "collection": "Trapholt"})                                          # E3
+    led.add("record", "smk", "smk record", "https://open.smk.dk/artwork/image/KKS1", clip=0.9, inliers=144,
+            claims={"title": "Hyrdernes tilbedelse, 1881", "collection": "Statens Museum for Kunst"})              # E4
+    ruling = _ruling(["E1", "E2"], ["E1", "E2"], "Carl Bloch", "The Adoration of the Shepherds")
+    v = rule_facts(led, ruling, _check(["E1", "E2"]), record_facts=("collection",))
+    assert v["facts"]["collection"] == "Statens Museum for Kunst"

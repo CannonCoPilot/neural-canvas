@@ -42,6 +42,45 @@ _CURATED = (
     "amoncarter.org", "gilcrease.org", "nationalcowboymuseum.org",
     "whistlerpaintings.gla.ac.uk", "saturdayeveningpost.com",   # catalogue raisonné; the Post's own cover archive
 )
+# a museum's own collection site names the work's holder (Sir, 2026-11-10: "The holding museum's own record counts
+# for collection"). SMK's record of Bloch's "Hyrdernes tilbedelse" carried no collection field, and the card lost
+# "Statens Museum for Kunst" (2026-11-12)
+MUSEUM_NAMES = {
+    "smk.dk": "Statens Museum for Kunst", "metmuseum.org": "The Metropolitan Museum of Art",
+    "artic.edu": "Art Institute of Chicago", "clevelandart.org": "Cleveland Museum of Art",
+    "nga.gov": "National Gallery of Art", "rijksmuseum.nl": "Rijksmuseum", "tate.org.uk": "Tate",
+    "nationalgallery.org.uk": "National Gallery, London", "louvre.fr": "Musée du Louvre",
+    "musee-orsay.fr": "Musée d'Orsay", "moma.org": "Museum of Modern Art", "guggenheim.org": "Solomon R. Guggenheim Museum",
+    "brooklynmuseum.org": "Brooklyn Museum", "mfa.org": "Museum of Fine Arts, Boston",
+    "philamuseum.org": "Philadelphia Museum of Art", "lacma.org": "Los Angeles County Museum of Art",
+    "nationalmuseum.se": "Nationalmuseum", "belvedere.at": "Belvedere", "vangoghmuseum.nl": "Van Gogh Museum",
+    "harvardartmuseums.org": "Harvard Art Museums", "museodelprado.es": "Museo del Prado", "uffizi.it": "Uffizi Gallery",
+    "khm.at": "Kunsthistorisches Museum", "albertina.at": "Albertina", "lenbachhaus.de": "Lenbachhaus",
+    "kunsthaus.ch": "Kunsthaus Zürich", "kunstmuseumbasel.ch": "Kunstmuseum Basel", "munchmuseet.no": "Munch Museum",
+    "nasjonalmuseet.no": "Nasjonalmuseet", "ateneum.fi": "Ateneum", "artmuseum.princeton.edu": "Princeton University Art Museum",
+    "artgallery.yale.edu": "Yale University Art Gallery", "britishart.yale.edu": "Yale Center for British Art",
+    "dia.org": "Detroit Institute of Arts", "saam.si.edu": "Smithsonian American Art Museum",
+    "crystalbridges.org": "Crystal Bridges Museum of American Art", "nrm.org": "Norman Rockwell Museum",
+    "terraamericanart.org": "Terra Foundation for American Art", "denverartmuseum.org": "Denver Art Museum",
+    "nelson-atkins.org": "Nelson-Atkins Museum of Art", "slam.org": "Saint Louis Art Museum",
+    "toledomuseum.org": "Toledo Museum of Art", "high.org": "High Museum of Art", "mfah.org": "Museum of Fine Arts, Houston",
+    "nortonsimon.org": "Norton Simon Museum", "huntington.org": "The Huntington", "famsf.org": "Fine Arts Museums of San Francisco",
+    "sfmoma.org": "San Francisco Museum of Modern Art", "seattleartmuseum.org": "Seattle Art Museum",
+    "gallery.ca": "National Gallery of Canada", "ngv.vic.gov.au": "National Gallery of Victoria",
+    "fitzmuseum.cam.ac.uk": "Fitzwilliam Museum", "ashmolean.org": "Ashmolean Museum", "wallacecollection.org": "The Wallace Collection",
+    "churchhistorymuseum.org": "Church History Museum", "brandywine.org": "Brandywine Museum of Art",
+    "centerofthewest.org": "Buffalo Bill Center of the West", "farnsworthmuseum.org": "Farnsworth Art Museum",
+    "amoncarter.org": "Amon Carter Museum of American Art", "gilcrease.org": "Gilcrease Museum",
+    "mia.org": "Minneapolis Institute of Art", "artsmia.org": "Minneapolis Institute of Art",
+}
+
+
+def holder(url: str) -> str:
+    """The museum whose own collection site this page is on, or ""."""
+    host = urlparse(url or "").netloc.lower().removeprefix("www.")
+    return next((name for dom, name in MUSEUM_NAMES.items() if host == dom or host.endswith("." + dom)), "")
+
+
 _REFERENCE = ("wikipedia.org", "wikimedia.org", "wikiart.org", "britannica.com", "artchive.com", "artcyclopedia.com",
               "wga.hu", "the-athenaeum.org", "jstor.org", "oxfordartonline.com")
 _MARKET = ("christies.com", "sothebys.com", "bonhams.com", "phillips.com", "ha.com", "fineart.ha.com", "invaluable.com",
