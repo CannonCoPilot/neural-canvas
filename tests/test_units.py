@@ -1583,6 +1583,7 @@ def test_a_living_painters_life_and_nationality_are_read_beside_the_name_and_mos
 def test_a_verified_copy_on_a_lot_page_makes_the_collection_private():
     from neural_canvas.catalogue import sale_page
     assert sale_page("https://www.christies.com/en/lot/lot-6293966")
+    assert not sale_page("https://www.christies.com/en/stories/painting-the-french-riviera-at-the-royal-academy-d24a")
     assert sale_page("https://www.kollerauktionen.ch/de/319324-0001-----5039-FINK.htm")
     assert sale_page("https://www.invaluable.com/auction-lot/fink-waldemar-1883-bern-1948")
     assert not sale_page("https://artmuseum.princeton.edu/art/collections/objects/99647")

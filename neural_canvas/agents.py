@@ -192,6 +192,20 @@ def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] 
         value, cites = _fact(ruling, f)
         if value and carry and f in carry and _fold(carry[f][0]) == _fold(value):
             cites = list(dict.fromkeys([*cites, *map(str, carry[f][1])]))
+        card = f in record_facts
+        work = (out["facts"].get("artist", ""), out["facts"].get("title", ""))
+        if not value and card and work[1]:
+            # the adjudicator left it blank, but the work's own catalogue record states it: one reliable witness
+            # (Sir, 2026-11-10). Signac's "Cassis, Cap Lombard, Opus 196": Wikidata's record read "Oil paint on
+            # canvas" and "Kunstmuseum Den Haag", and the card printed neither (2026-11-12). Only a record whose
+            # own title is the ruled work's: a record of another work (Perry's "By Boat on the Epte") never speaks
+            recs = [i for i in ledger.items if i.kind == "record" and i.claims.get(f) and i.claims.get("title")
+                    and states(SimpleNamespace(text=str(i.claims["title"]), claims={}), "title", work[1]) is True]
+            if recs:
+                agree = lambda i: sum(states(SimpleNamespace(text=str(j.claims[f]), claims={}), f, str(i.claims[f]))  # noqa: E731
+                                      is True for j in recs)
+                best = max(recs, key=lambda i: (i.overrule, agree(i)))
+                value, cites = str(best.claims[f]), [best.id]
         if not value:
             if f in need:
                 out["unruled"][f] = "no item states it"
@@ -202,8 +216,6 @@ def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] 
         # needs the checker's confirmation and no rejection. The 8b checker is unreliable both ways where words
         # can be compared: it missed Instagram's "Hummingbird and Fish. Painted by Suzan Visser" (bench pass 5)
         # and rejected verified copies reading "... Different Colours by James Ward" (smoke test, 2026-11-07)
-        card = f in record_facts
-        work = (out["facts"].get("artist", ""), out["facts"].get("title", ""))
         items = [i for x in _ids(cites) if (i := ledger.get(x)) and i.kind in EVIDENCE
                  and (i.kind != "caption" or i.clip >= CAPTION_CLIP or (card and names_work(i, *work)))
                  and not (card and i.site_kind in UNFIT)

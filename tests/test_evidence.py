@@ -332,3 +332,21 @@ def test_a_title_proven_at_identification_keeps_its_witnesses_when_ruled_again()
     assert v["facts"]["title"] == "Hummingbird and Fish" and set(v["support"]["title"]) == {"E1", "E3"}
     other = _ruling(["E1"], ["E1"], title="Fishers of Bluebirds")    # another value keeps nothing
     assert "title" not in rule_facts(led, other, _check(["E1"]), carry=carry)["facts"]
+
+
+def test_the_works_own_record_fills_a_card_fact_the_adjudicator_left_blank():
+    # Signac, Cassis, Cap Lombard (2026-11-12): Wikidata's record stated the medium and the museum; neither printed
+    led = Ledger()
+    led.add("copy", "bing", "Paul Signac - Cassis, Cap Lombard, Opus 196", "https://www.reddit.com/r/museum/1", verified=True,
+            clip=0.95, inliers=90)                                                                                  # E1
+    led.add("copy", "bing", "Cassis, Cap Lombard, Opus 196 by Paul Signac", "https://www.wikiart.org/x", verified=True,
+            clip=0.94, inliers=80)                                                                                  # E2
+    led.add("record", "wikidata", "wikidata record", "https://www.wikidata.org/wiki/Q24046510", overrule=True,
+            claims={"title": "Cassis, Cap Lombard, Opus 196", "medium": "Oil paint on canvas",
+                    "collection": "Kunstmuseum Den Haag"})                                                         # E3
+    led.add("record", "wikidata", "wikidata record of another work", "https://www.wikidata.org/wiki/Q2", overrule=True,
+            claims={"title": "Le Pont des Arts", "date": "1928"})                                                  # E4
+    ruling = _ruling(["E1", "E2"], ["E1", "E2"], "Paul Signac", "Cassis, Cap Lombard, Opus 196")
+    v = rule_facts(led, ruling, _check(["E1", "E2"]), record_facts=("date", "medium", "collection"))
+    assert v["facts"]["medium"] == "Oil paint on canvas" and v["facts"]["collection"] == "Kunstmuseum Den Haag"
+    assert "date" not in v["facts"]                   # another work's record never speaks for this one

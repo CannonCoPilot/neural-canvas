@@ -1935,7 +1935,13 @@ def sale_page(url: str) -> bool:
     (Invaluable's "/auction-lot/", LiveAuctioneers' "/price-result/")."""
     from .evidence import site_of
     u = (url or "").lower()
-    return bool(u) and (site_of(u) in AUCTION_HOUSES or bool(re.search(r"/(auction-lot|price-result|lot)[/-]", u)))
+    # a lot page, never the house's editorial: Christie's "stories" article on the Royal Academy's Riviera show
+    # made Signac's "Cassis, Cap Lombard" (Kunstmuseum Den Haag) a "Private collection" (2026-11-12)
+    lot = re.search(r"/(auction-lot|price-result|lots?|detail|buy/auction)[/-]", u)
+    if site_of(u) in ("kollerauktionen.ch", "koller.ch"):
+        lot = lot or re.search(r"/\d{5,}-\d{4}-", u)            # Koller's lot pages: "/de/319324-0001-----5039-..."
+    return bool(u) and bool(lot) and (site_of(u) in AUCTION_HOUSES or bool(re.search(r"/(auction-lot|price-result)[/-]", u))
+                                      or "/lot" in u)
 
 
 _EDITION = re.compile(r"lithograph|print|woodcut|woodblock|etching|engraving|screen ?print|serigraph|poster|aquatint|"
