@@ -2087,8 +2087,9 @@ def decide_life(lives: dict, nats: dict) -> dict:
 
 
 def card_medium(medium: str) -> str:
-    """"Oil painting" names the object, not its materials: the card prints "Oil" (Mønsted, 2026-11-12)."""
-    m = (medium or "").strip()
+    """"Oil painting" names the object, not its materials: the card prints "Oil" (Mønsted, 2026-11-12). Wikidata's
+    "Oil paint on canvas" prints as museums write it, "Oil on canvas" (Thayer's "Angel")."""
+    m = re.sub(r"\b(oil|acrylic|tempera)\s+paint\s+(?=on\b)", r"\1 ", (medium or "").strip(), flags=re.I)
     bare = re.sub(r"\s+paint(?:ing|ings)?\s*$", "", m, flags=re.I)
     return bare[:1].upper() + bare[1:] if bare != m and _materials(bare) else m
 

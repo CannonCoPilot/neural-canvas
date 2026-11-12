@@ -319,9 +319,10 @@ class Docent:
             stage = "label"
             if on_stage:
                 on_stage(stage)
-            from .catalogue import clean_collection, clean_movement
+            from .catalogue import card_medium, clean_collection, clean_movement
             facts["movement"] = clean_movement(ruled.get("movement", ""))   # one movement, as the card prints it
             facts["collection"] = clean_collection(ruled.get("collection", ""))
+            facts["medium"] = card_medium(ruled.get("medium", ""))
             win = plan.window
 
             def in_window(b):

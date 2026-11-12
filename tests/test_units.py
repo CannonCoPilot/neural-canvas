@@ -1649,6 +1649,7 @@ def test_an_oil_painting_prints_its_material():
     from neural_canvas.catalogue import card_medium
     assert card_medium("Oil painting") == "Oil" and card_medium("watercolor painting") == "Watercolor"
     assert card_medium("painting") == "painting" and card_medium("Oil on canvas") == "Oil on canvas"
+    assert card_medium("Oil paint on canvas") == "Oil on canvas" and card_medium("oil paint on panel") == "oil on panel"
 
 
 def test_a_movement_inside_another_never_confirms_it():
