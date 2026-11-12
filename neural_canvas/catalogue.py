@@ -1962,6 +1962,10 @@ _EDITION = re.compile(r"lithograph|print|woodcut|woodblock|etching|engraving|scr
                       r"mezzotint|linocut|giclee|photograph|chromolitho", re.I)
 
 
+_PRINTMAKER = re.compile(r"\b(lithographer|printmaker|poster artist|poster designer|engraver|etcher|woodblock|woodcut|"
+                         r"serigraph|screenprint)", re.I)
+
+
 def in_editions(medium: str) -> bool:
     """A medium made in editions (a lithograph, a woodblock print): no single collection holds the work."""
     return bool(_EDITION.search(medium or ""))
@@ -2232,8 +2236,13 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
             unruled.pop("date", None)
     # a verified copy on an auction lot page that names this work: it was sold, and no museum's record claims it.
     # Not for a print: an edition has no single holder (Mucha's lithographs)
-    if not facts.get("collection") and not in_editions(facts.get("medium", "")):
-        from .agents import states
+    from .agents import states
+    # with no medium, a painter known for prints may have sold one impression of many: Mucha's "Precious Stones:
+    # Emerald" (colour lithographs) printed "Private collection" from two Invaluable lots (2026-11-12)
+    printmaker = not facts.get("medium") and facts.get("artist") and any(
+        i.site_kind not in ("shop", "music") and _PRINTMAKER.search(i.text) and states(i, "artist", facts["artist"]) is True
+        for i in ledger.items)
+    if not facts.get("collection") and not in_editions(facts.get("medium", "")) and not printmaker:
         lots = [i.id for i in ledger.items if i.kind == "copy" and i.verified and sale_page(i.url)
                 and facts.get("artist") and states(i, "artist", facts["artist"]) is True
                 and (states(i, "title", facts.get("title", "")) is True
