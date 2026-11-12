@@ -1695,3 +1695,10 @@ def test_a_collection_prints_without_acronym_or_address():
     assert clean_collection("Cooper Hewitt, Smithsonian Design Museum") == "Cooper Hewitt, Smithsonian Design Museum"
     assert clean_collection("National History Museum, Frederiksborg Castle, Denmark") == "National History Museum, Frederiksborg Castle, Denmark"
     assert clean_collection("Private collection") == "Private collection"
+
+
+def test_one_painter_one_name_and_never_a_namesake():
+    from neural_canvas.catalogue import same_person
+    assert same_person("Carl Bloch", "Carl Heinrich Bloch") and same_person("N. C. Wyeth", "Newell Convers Wyeth")
+    assert same_person("Edgar Degas", "Hilaire Germain Edgar Degas") and same_person("James Tissot", "James Jacques Joseph Tissot")
+    assert not same_person("Andrew Wyeth", "Newell Convers Wyeth") and not same_person("John Singer Sargent", "Richard Sargent")

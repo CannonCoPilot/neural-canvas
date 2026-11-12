@@ -227,6 +227,20 @@ def same_title(a: str, b: str) -> bool:
     return bool(ta and tb) and len(ta & tb) / len(ta | tb) >= 0.6
 
 
+def same_person(a: str, b: str) -> bool:
+    """Two forms of one painter's name: the same surname and a shared given name or initial ("Carl Bloch" and
+    "Carl Heinrich Bloch", "N. C. Wyeth" and "Newell Convers Wyeth", "Edgar Degas" and "Hilaire Germain Edgar
+    Degas"); "Andrew Wyeth" is not "Newell Convers Wyeth"."""
+    x, y = fold(a).split(), fold(b).split()
+    if not x or not y or x[-1] != y[-1]:
+        return False
+    gx, gy = x[:-1], y[:-1]
+    if not gx or not gy:
+        return True
+    return bool(set(gx) & set(gy)) or bool({w[0] for w in gx if len(w) == 1} & {w[0] for w in gy}) \
+        or bool({w[0] for w in gy if len(w) == 1} & {w[0] for w in gx})
+
+
 def _surname(name: str) -> str:
     w = fold(name).split()
     return w[-1] if w else ""
@@ -2211,6 +2225,12 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
     if facts.get("medium") and not _materials(facts["medium"]):
         # "painting" is an object type, not a medium (Bloch, Christus Consolator, 2026-11-10): it never prints
         verdict.setdefault("unruled", {})["medium"] = f"{facts.pop('medium')!r}: names no material"
+    # one name per painter on every card: the artist's own Wikidata label, their common name, when its surname is
+    # the ruled one ("Carl Heinrich Bloch" on seven cards and "Carl Bloch" on six; "Hilaire Germain Edgar Degas",
+    # 2026-11-12)
+    who = next((r for r in found if r.authority and r.source == "wikidata" and r.artist), None)
+    if who and facts.get("artist") and same_person(who.artist, facts["artist"]):
+        facts["artist"] = who.artist
     if facts.get("title"):
         facts["title"] = display_title(facts["title"], facts.get("artist", ""))
     if fold(facts.get("collection", "")) == "private collection":
