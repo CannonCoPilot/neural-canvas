@@ -2134,7 +2134,8 @@ def decide_life(lives: dict, nats: dict) -> dict:
 def card_medium(medium: str) -> str:
     """"Oil painting" names the object, not its materials: the card prints "Oil" (Mønsted, 2026-11-12). Wikidata's
     "Oil paint on canvas" prints as museums write it, "Oil on canvas" (Thayer's "Angel")."""
-    m = re.sub(r"\b(oil|acrylic|tempera)\s+paint\s+(?=on\b)", r"\1 ", (medium or "").strip(), flags=re.I)
+    m = re.sub(r"\b(oil|acrylic|tempera|watercolou?r|gouache)\s+paint\s+(?=on\b)", r"\1 ", (medium or "").strip(),
+               flags=re.I)
     # WikiArt lists media: "oil, canvas" is "Oil on canvas" (Rockwell's "Girl at the Mirror", 2026-11-12)
     pair = re.fullmatch(r"(oil|acrylic|tempera|gouache|watercolou?r|pastel|ink)\s*,\s*"
                         r"(canvas|panel|paper|board|cardboard|wood|copper|linen|masonite|silk)", m, flags=re.I)

@@ -1651,6 +1651,7 @@ def test_an_oil_painting_prints_its_material():
     assert card_medium("painting") == "painting" and card_medium("Oil on canvas") == "Oil on canvas"
     assert card_medium("Oil paint on canvas") == "Oil on canvas" and card_medium("oil paint on panel") == "oil on panel"
     assert card_medium("oil, canvas") == "Oil on canvas" and card_medium("oil, copper") == "Oil on copper"
+    assert card_medium("Watercolor paint on wove paper") == "Watercolor on wove paper"
     assert card_medium("ink, watercolor, paper") == "ink, watercolor, paper"     # only a simple pair is rewritten
 
 
