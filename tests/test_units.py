@@ -1499,6 +1499,13 @@ def test_the_artists_movement_is_ruled_when_wikidata_and_their_wikipedia_article
     wyeth = Record("wikidata", "u", "", [], "Andrew Wyeth", authority=True, movement="French Realism", artist_born="1917",
                    text="movement realism regionalism")
     ru = cat.rule([wyeth], {"artist": "Andrew Wyeth"})
+    assert ru["facts"]["movement"] == "Realism"                 # the article confirms Realism, not "French" Realism
+    magritte = Record("wikidata", "u", "", [], "René Magritte", authority=True, movement="Belgian surrealism",
+                      artist_born="1898", text="movement surrealism")
+    assert cat.rule([magritte], {"artist": "René Magritte"})["facts"]["movement"] == "Surrealism"
+    wrong = Record("wikidata", "u", "", [], "Andrew Wyeth", authority=True, movement="French Realism", artist_born="1917",
+                   text="movement regionalism")
+    ru = cat.rule([wrong], {"artist": "Andrew Wyeth"})
     assert "movement" not in ru["facts"] and "not named by the artist's Wikipedia" in ru["unruled"]["movement"][0]
 
 

@@ -1773,7 +1773,14 @@ class Catalogue:
             # confirmed by the movement on the artist's Wikipedia article, a separate source
             who = next((r for r in authorities if r.source == "wikidata" and r.movement), None)
             stated = who.text.replace("movement ", "", 1) if who and who.text else ""
-            both = [m for m in (who.movement.split("|") if who else []) if stated and fold(m) and fold(m) in stated]
+            # a movement is named when its own words are, with any nationality left off: Wikidata's "Belgian
+            # surrealism" is the article's "Surrealism" (Magritte), and "French Realism" its "Realism" (Wyeth); the
+            # card prints the movement without the qualifier the article does not carry (2026-11-12)
+            def core(m):
+                return [w for w in fold(m).split() if w not in DEMONYM]
+            both = [" ".join(core(m)) if not fold(m) in stated else m
+                    for m in (who.movement.split("|") if who else [])
+                    if stated and core(m) and (fold(m) in stated or all(w in stated.split() for w in core(m)))]
             # Wikidata's first movement for the artist that the article also names (Klimt: Symbolism). Wikidata alone
             # is not enough: it gives Andrew Wyeth "French Realism" (Q316325, P135), and the card printed it (2026-11-12)
             if both:
