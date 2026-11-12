@@ -92,7 +92,9 @@ KID_VERSION = re.compile(r"\b(forarbejde|skitse|studie|kopi|efter|replik|replika
 
 
 # when a movement began (its first works or manifesto): an artist's movement never labels their earlier work
-MOVEMENT_START = {"impressionism": 1867, "post impressionism": 1886, "neo impressionism": 1886, "pointillism": 1886,
+# a movement named looking back covers the work it was named for: Post-Impressionism takes in Cézanne's early-1880s
+# canvases (his c. 1883 "Houses in Provence" lost it at 1886, 2026-11-12)
+MOVEMENT_START = {"impressionism": 1867, "post impressionism": 1878, "neo impressionism": 1886, "pointillism": 1886,
                   "les nabis": 1888, "nabis": 1888, "symbolism": 1880, "art nouveau": 1890, "vienna secession": 1897,
                   "fauvism": 1905, "expressionism": 1905, "cubism": 1907, "futurism": 1909, "de stijl": 1917,
                   "dada": 1916, "bauhaus": 1919, "art deco": 1920, "surrealism": 1924, "belgian surrealism": 1926,
