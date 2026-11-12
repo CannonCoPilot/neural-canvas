@@ -115,8 +115,10 @@ def viewer_grid(frame_h: int, viewer_h: int) -> int:
 
 
 def date_range(d: str) -> str:
-    """A range of years as a card prints it: "1895 - 1917" -> "1895–1917" (an en dash, no spaces)."""
-    return re.sub(r"(\d{2,4})\s*[-–—]\s*(\d{2,4})", "\\1–\\2", (d or "").strip())
+    """A range of years as a card prints it: "1895 - 1917" -> "1895–1917" (an en dash, no spaces). Wikidata's
+    wordings print the same: "between 1600 and 1620" (Beert) and "from 1873 until 1874" (Moran), 2026-11-12."""
+    d = re.sub(r"^\s*(?:between|from)\s+(\d{3,4})\s+(?:and|until|to)\s+(\d{3,4})\s*$", "\\1–\\2", (d or "").strip(), flags=re.I)
+    return re.sub(r"(\d{2,4})\s*[-–—]\s*(\d{2,4})", "\\1–\\2", d)
 
 
 def _layout(ident: dict, scale: float, inner_w: int) -> tuple[list[tuple[str, ImageFont.FreeTypeFont, int]], list[str]]:
