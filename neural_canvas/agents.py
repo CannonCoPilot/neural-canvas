@@ -142,7 +142,7 @@ class Agents:
                                      required=("verdict",), num_predict=3000)
 
     def settle(self, img: Image.Image | None, ledger: Ledger, need: tuple[str, ...] = ("artist", "title"),
-               record_facts: tuple[str, ...] = (), rounds_max: int = 2, context: str = "",
+               record_facts: tuple[str, ...] = (), rounds_max: int = 2, context: str = "", carry: dict | None = None,
                search: Callable[[dict, list[str]], int] | None = None) -> dict:
         """Adjudicate, check and apply the rules, up to ``rounds_max`` rounds. Between rounds ``search(ruling,
         queries)`` gathers more evidence (it returns how many items it added), and the adjudicator is told which
@@ -158,7 +158,7 @@ class Agents:
             # Albers" with the photograph attached, even with the anchors listed; offline test, 2026-11-07)
             ruling = self.adjudicate(None if feedback else img, ledger, context + feedback)
             check = self.check(ledger, ruling) if any(_fact(ruling, f)[0] for f in FACTS) else {"verdict": "revise"}
-            verdict = rule_facts(ledger, ruling, check, need, record_facts)
+            verdict = rule_facts(ledger, ruling, check, need, record_facts, carry)
             rounds.append({"round": rnd, "ruling": ruling, "check": check, "failures": verdict["failures"]})
             log.info("adjudication round %d: %s", rnd, {f: verdict["facts"].get(f) for f in need} if not verdict["failures"]
                      else verdict["failures"])
@@ -180,13 +180,18 @@ class Agents:
 
 
 def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] = ("artist", "title"),
-               record_facts: tuple[str, ...] = ()) -> dict:
-    """The mechanical rules over one adjudication and its check (see the module docstring)."""
+               record_facts: tuple[str, ...] = (), carry: dict | None = None) -> dict:
+    """The mechanical rules over one adjudication and its check (see the module docstring). ``carry`` maps a fact
+    to an earlier ruling's (value, supporting ids): ruling the same value again keeps that support, which still
+    passes every check here. Identification had proven Dixon's "Cloud World" on Reddit and C&I Magazine; the
+    catalogue's adjudicator cited Reddit and seven unrelated items, and the work blocked (2026-11-12)."""
     out: dict = {"facts": {}, "support": {}, "unruled": {}, "failures": [], "contradicted": {}}
     if not ledger.verified():
         out["failures"].append("no copy of the picture verified on both instruments")
     for f in FACTS:
         value, cites = _fact(ruling, f)
+        if value and carry and f in carry and _fold(carry[f][0]) == _fold(value):
+            cites = list(dict.fromkeys([*cites, *map(str, carry[f][1])]))
         if not value:
             if f in need:
                 out["unruled"][f] = "no item states it"

@@ -321,3 +321,14 @@ def test_a_page_naming_the_work_witnesses_its_card_facts_and_a_shop_never_does()
     assert "collection" not in v["facts"]               # "Collection" alone names no holder, and E6 names no work
     shop = {**ruling, "medium": {"value": "Canvas", "cites": ["E5"]}}
     assert "medium" not in rule_facts(led, shop, chk, record_facts=("medium",))["facts"]
+
+
+def test_a_title_proven_at_identification_keeps_its_witnesses_when_ruled_again():
+    led = _visser_ledger()
+    ruling = _ruling(["E1"], ["E1"])                          # the catalogue's adjudicator cited one site
+    assert "title" not in rule_facts(led, ruling, _check(["E1"]))["facts"]
+    carry = {"artist": ("Suzan Visser", ["E1", "E3"]), "title": ("Hummingbird and Fish", ["E1", "E3"])}
+    v = rule_facts(led, ruling, _check(["E1"]), carry=carry)
+    assert v["facts"]["title"] == "Hummingbird and Fish" and set(v["support"]["title"]) == {"E1", "E3"}
+    other = _ruling(["E1"], ["E1"], title="Fishers of Bluebirds")    # another value keeps nothing
+    assert "title" not in rule_facts(led, other, _check(["E1"]), carry=carry)["facts"]

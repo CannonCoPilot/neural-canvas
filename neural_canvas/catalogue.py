@@ -2137,7 +2137,10 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
 
     prior = (ident.get("evidence") or {}).get("verdict")
     last = ((ident.get("evidence") or {}).get("adjudication") or [{}])[-1]
-    card_rule = dict(need=("artist", "title"), record_facts=("date", "medium", "collection"))
+    # identification's proven artist and title keep their witnesses when the catalogue rules them again
+    carry = {k: (prior["facts"][k], prior.get("support", {}).get(k, [])) for k in ("artist", "title")
+             if prior and prior.get("facts", {}).get(k)}
+    card_rule = dict(need=("artist", "title"), record_facts=("date", "medium", "collection"), carry=carry)
     if not added and prior and not prior.get("failures"):
         # nothing new to weigh (a living painter in no catalogue): identification's last ruling is ruled again
         # under the card's rules, with no model call. Its date, medium and collection had been dropped here
