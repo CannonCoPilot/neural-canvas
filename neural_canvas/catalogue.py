@@ -2013,6 +2013,8 @@ def sale_page(url: str) -> bool:
                                       or "/lot" in u)
 
 
+_REPRODUCTION = re.compile(r"photomechanical|halftone|half-tone|offset|giclee|giclée|inkjet|ink-jet|digital print|"
+                          r"reproduction|facsimile|photo ?print|poster print|collotype", re.I)
 _EDITION = re.compile(r"lithograph|print|woodcut|woodblock|etching|engraving|screen ?print|serigraph|poster|aquatint|"
                       r"mezzotint|linocut|giclee|photograph|chromolitho", re.I)
 
@@ -2274,6 +2276,10 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
     facts = dict(verdict["facts"])
     if facts.get("medium"):
         facts["medium"] = card_medium(facts["medium"])
+    if facts.get("medium") and _REPRODUCTION.search(facts["medium"]):
+        # a copy's process, never the work's: a library's "photomechanical print" of Remington's "Evening on a
+        # Canadian Lake" matched the picture and printed as its medium (2026-11-12)
+        verdict.setdefault("unruled", {})["medium"] = f"{facts.pop('medium')!r}: a reproduction's process"
     if facts.get("medium") and not _materials(facts["medium"]):
         # "painting" is an object type, not a medium (Bloch, Christus Consolator, 2026-11-10): it never prints
         verdict.setdefault("unruled", {})["medium"] = f"{facts.pop('medium')!r}: names no material"

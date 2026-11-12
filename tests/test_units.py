@@ -1718,3 +1718,9 @@ def test_a_file_names_furniture_is_never_a_search_lead():
 def test_movement_start_years_are_keyed_as_folded_names():
     from neural_canvas.catalogue import MOVEMENT_START, fold
     assert MOVEMENT_START[fold("De Stijl")] == 1917 and MOVEMENT_START[fold("Post-Impressionism")] == 1886
+
+
+def test_a_reproductions_process_is_never_the_works_medium():
+    from neural_canvas.catalogue import _REPRODUCTION
+    assert _REPRODUCTION.search("photomechanical print") and _REPRODUCTION.search("Giclée on canvas")
+    assert not _REPRODUCTION.search("chromolithograph") and not _REPRODUCTION.search("Oil on canvas")
