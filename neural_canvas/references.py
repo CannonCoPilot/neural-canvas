@@ -17,7 +17,14 @@ log = logging.getLogger(__name__)
 
 THUMB_WIDTH = 500   # a standard Commons thumbnail step; arbitrary widths are throttled
 SPARQL = "https://query.wikidata.org/sparql"
-ART_OCCUPATION = re.compile(r"paint|artist|illustrat|printmak|engrav|sculpt|draughts|woodcut")
+# an artist's Wikidata description names the trade or the movement: Magritte's reads only "Belgian surrealist
+# (1898–1967)", and his item was never found, so no card of his had a movement (2026-11-12)
+ART_OCCUPATION = re.compile(r"paint|artist|illustrat|printmak|engrav|sculpt|draughts|woodcut|etcher|lithograph|muralist|"
+                            r"watercolo|surreal|impressionis|expressionis|cubis|futuris|fauvis|symbolis|pointillis|"
+                            r"dadais|pre-raphaelite|nabis|art nouveau")
+# the authors of natural-history plates (Kofoid, "American zoologist"; Küster, "malacologist"): taken only when no
+# search result is an artist, so a painter is never given a namesake scientist's life
+NATURALIST = re.compile(r"zoolog|malacolog|entomolog|botanist|naturalist|ornitholog|conchologist|biologist")
 
 
 # Wikimedia serves thumbnails at these widths only; any other width is refused with HTTP 400 ("Use thumbnail
@@ -163,9 +170,11 @@ class Wikimedia:
         """Wikidata QID of the visual artist best matching ``name`` (description must name an art occupation)."""
         data = self._get(self.wikidata_api, {"action": "wbsearchentities", "search": name, "language": "en",
                                              "type": "item", "limit": 7})
-        for e in data.get("search", []):
-            if ART_OCCUPATION.search((e.get("description") or "").lower()):
-                return e["id"]
+        hits = data.get("search", [])
+        for pattern in (ART_OCCUPATION, NATURALIST):
+            for e in hits:
+                if pattern.search((e.get("description") or "").lower()):
+                    return e["id"]
         return None
 
     def oeuvre(self, artist_qid: str) -> list[dict]:

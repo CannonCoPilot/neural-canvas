@@ -1617,3 +1617,15 @@ def test_the_works_year_is_read_after_its_title_and_never_before_the_painter_cou
     led.add("caption", "bing", "Richard Savoie - There Was a Time 1959", "https://www.reddit.com/r/Art/1")   # the life misread
     assert date_from_ledger(led.items, "Richard Savoie", "There Was a Time", "1959") == ("2015", ["E1"])
     assert date_from_ledger(led.items, "Someone Else", "There Was a Time", "1959") == ("", [])
+
+
+def test_an_artist_described_by_their_movement_or_as_a_naturalist_is_found():
+    from neural_canvas.references import Wikimedia
+    w = Wikimedia.__new__(Wikimedia); w.wikidata_api = "x"
+    def found(*hits):
+        w._get = lambda url, params: {"search": [{"id": i, "description": d} for i, d in hits]}
+        return w.find_artist("x")
+    assert found(("Q7836", "Belgian surrealist (1898–1967)"), ("Q1", "1965 exhibition")) == "Q7836"
+    assert found(("Q2", "American zoologist")) == "Q2"
+    assert found(("Q3", "American zoologist"), ("Q4", "American painter")) == "Q4"     # the artist first
+    assert found(("Q5", "Surgeon-General of the UK")) is None
