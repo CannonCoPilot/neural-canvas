@@ -1491,17 +1491,17 @@ def test_the_artists_movement_is_ruled_when_wikidata_and_their_wikipedia_article
     cat = Catalogue.__new__(Catalogue); cat.consulted = []
     who = Record("wikidata", "https://www.wikidata.org/wiki/Q34661", "", [], "Gustav Klimt", authority=True,
                  movement="Symbolism|Art Nouveau|Vienna Secession", artist_born="1862", artist_died="1918",
-                 text="movement symbolism art nouveau vienna secession")
+                 text="movement symbolism art nouveau vienna secession", article_movement="Symbolism, Art Nouveau")
     ru = \
         cat.rule([who, _rec("artvee.com", "Bauerngarten", artist="Gustav Klimt")], {"artist": "Gustav Klimt"})
     assert ru["facts"]["movement"] == "Symbolism"
     # Wikidata alone is no witness for the artist's movement: it gives Andrew Wyeth "French Realism" (2026-11-12)
     wyeth = Record("wikidata", "u", "", [], "Andrew Wyeth", authority=True, movement="French Realism", artist_born="1917",
-                   text="movement realism regionalism")
+                   text="movement realism regionalism", article_movement="Realism, Regionalism")
     ru = cat.rule([wyeth], {"artist": "Andrew Wyeth"})
     assert ru["facts"]["movement"] == "Realism"                 # an article that says Realism confirms the core
     magritte = Record("wikidata", "u", "", [], "René Magritte", authority=True, movement="Belgian surrealism",
-                      artist_born="1898", text="movement surrealism")
+                      artist_born="1898", text="movement surrealism", article_movement="Surrealism")
     assert cat.rule([magritte], {"artist": "René Magritte"})["facts"]["movement"] == "Surrealism"
     wrong = Record("wikidata", "u", "", [], "Andrew Wyeth", authority=True, movement="French Realism", artist_born="1917",
                    text="movement regionalist", article_movement="Regionalist")
@@ -1648,3 +1648,14 @@ def test_an_oil_painting_prints_its_material():
     from neural_canvas.catalogue import card_medium
     assert card_medium("Oil painting") == "Oil" and card_medium("watercolor painting") == "Watercolor"
     assert card_medium("painting") == "painting" and card_medium("Oil on canvas") == "Oil on canvas"
+
+
+def test_a_movement_inside_another_never_confirms_it():
+    # Matisse (2026-11-12): Wikidata's "Impressionism" was confirmed by the article's "Post-Impressionism"
+    from neural_canvas.catalogue import Catalogue, Record
+    cat = Catalogue.__new__(Catalogue); cat.consulted = []
+    matisse = Record("wikidata", "u", "", [], "Henri Matisse", authority=True, artist_born="1869",
+                     movement="Impressionism|Fauvism|Modernism", article_movement="Fauvism, Modernism, Post-Impressionism",
+                     text="movement fauvism modernism post impressionism")
+    ru = cat.rule([matisse], {"artist": "Henri Matisse"})
+    assert ru["facts"]["movement"] == "Fauvism" and ru["support"]["movement"] == ["wikipedia (artist)", "wikidata (artist)"]

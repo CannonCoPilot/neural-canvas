@@ -1770,32 +1770,25 @@ class Catalogue:
         same_mov = lambda a, b: bool(fold(a)) and bool(fold(b)) and (fold(a) in fold(b) or fold(b) in fold(a))  # noqa: E731
         # one reliable witness rules everything but the title and the artist (Sir, 2026-11-10)
         if not pick("movement", [(r, r.movement) for r in pref if r.movement], same_mov, floor=1):
-            # the artist's movement (Sir's card lists "movement/period"): Wikidata's single movement for the artist,
-            # confirmed by the movement on the artist's Wikipedia article, a separate source
-            who = next((r for r in authorities if r.source == "wikidata" and r.movement), None)
-            stated = who.text.replace("movement ", "", 1) if who and who.text else ""
-            # a movement is named when its own words are, with any nationality left off: Wikidata's "Belgian
-            # surrealism" is the article's "Surrealism" (Magritte), and "French Realism" its "Realism" (Wyeth); the
-            # card prints the movement without the qualifier the article does not carry (2026-11-12)
-            def core(m):
-                return [w for w in fold(m).split() if w not in DEMONYM]
-            said = set(_ism(w) for w in stated.split())          # the article's "Surrealist" names Surrealism
-            both = [" ".join(core(m)) if not fold(m) in stated else m
-                    for m in (who.movement.split("|") if who else [])
-                    if stated and core(m) and (fold(m) in stated or all(_ism(w) in said for w in core(m)))]
-            # Wikidata's first movement for the artist that the article also names (Klimt: Symbolism). Wikidata alone
-            # is not enough: it gives Andrew Wyeth "French Realism" (Q316325, P135), and the card printed it (2026-11-12)
-            if both:
-                out["facts"]["movement"] = both[0][:1].upper() + both[0][1:]
-                out["support"]["movement"] = ["wikidata (artist)", "wikipedia (artist)"]
-                out["unruled"].pop("movement", None)
-            elif who and who.article_movement:
-                # Wikidata's movement is unconfirmed: the article's own is one reliable witness (Sir, 2026-11-10).
-                # Wyeth: Wikidata "French Realism", the article "Regionalist" -> Regionalism (2026-11-12)
-                first = re.split(r"\s*[,;/]\s*|\s+and\s+", who.article_movement.strip())[0]
-                name = " ".join(_ism(w) for w in first.split())
-                out["facts"]["movement"] = name[:1].upper() + name[1:]
-                out["support"]["movement"] = ["wikipedia (artist)"]
+            # the artist's movement (Sir's card lists "movement/period"): the movements on the artist's Wikipedia
+            # article, in its order, confirmed by Wikidata's; Wikidata alone never prints (it gives Andrew Wyeth
+            # "French Realism", Q316325 P135). Names are compared whole, nationality and adjective form aside
+            # ("Belgian surrealism" is the article's "Surrealist"), never as a substring: "Impressionism" inside the
+            # article's "Post-Impressionism" printed Matisse an Impressionist (2026-11-12)
+            who = next((r for r in authorities if r.source == "wikidata" and (r.movement or r.article_movement)), None)
+            listed = [x.strip() for x in re.split(r"\s*[,;/]\s*|\s+and\s+", (who.article_movement if who else "") or "")
+                      if fold(x)]
+            def name(m):
+                return " ".join(_ism(w) for w in fold(m).split() if w not in DEMONYM)
+            wd = {name(m) for m in (who.movement.split("|") if who else []) if name(m)}
+            both = [x for x in listed if name(x) in wd]
+            pick_ = both[0] if both else listed[0] if listed else ""
+            if pick_:
+                shown = " ".join(_ism(w) for w in pick_.split())
+                out["facts"]["movement"] = shown[:1].upper() + shown[1:]
+                # the article's own movement is one reliable witness when Wikidata does not confirm it (Sir,
+                # 2026-11-10): Wyeth's article reads "Regionalist" -> Regionalism
+                out["support"]["movement"] = ["wikipedia (artist)"] + (["wikidata (artist)"] if both else [])
                 out["unruled"].pop("movement", None)
             elif who:
                 out["unruled"]["movement"] = [f"wikidata (artist): {who.movement.replace('|', ', ')}, "
