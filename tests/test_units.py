@@ -1699,6 +1699,8 @@ def test_a_collection_prints_without_acronym_or_address():
     assert clean_collection("Cooper Hewitt, Smithsonian Design Museum") == "Cooper Hewitt, Smithsonian Design Museum"
     assert clean_collection("National History Museum, Frederiksborg Castle, Denmark") == "National History Museum, Frederiksborg Castle, Denmark"
     assert clean_collection("Private collection") == "Private collection"
+    assert clean_collection("museum collection of the Prague City Gallery") == "Prague City Gallery"
+    assert clean_collection("The Wallace Collection") == "The Wallace Collection"
 
 
 def test_one_painter_one_name_and_never_a_namesake():
