@@ -377,6 +377,7 @@ class Record:
     overrule: bool = False       # Wikidata and what it links, a museum's own API, a catalogue raisonné (Sir, 2026-11-05)
     wikidata: str = ""           # the source's own link to the work's Wikidata item (a join key)
     echo: list = field(default_factory=list)          # fields this record only repeats from that item (Commons)
+    article_movement: str = ""   # the movement on the artist's Wikipedia infobox, as printed ("Regionalist")
 
     def states(self, value: str) -> bool:
         """An institution page supports a fact its text states (all of the value's significant words)."""
@@ -997,7 +998,7 @@ class Catalogue:
                       authority=True, artist_born=f["artist_born"], artist_died=f.get("artist_died", ""),
                       artist_nationality=f.get("artist_nationality", ""),
                       artist_nationalities=f.get("artist_nationalities") or [],
-                      text=fold(f"movement {wp_mov}") if wp_mov else "",
+                      text=fold(f"movement {wp_mov}") if wp_mov else "", article_movement=wp_mov,
                       images=[f"https://en.wikipedia.org/wiki/{quote(f['enwiki'].replace(' ', '_'))}"] if f.get("enwiki") else [])
 
     def _wikidata_record(self, qid: str) -> tuple[Record, dict]:
@@ -1778,14 +1779,23 @@ class Catalogue:
             # card prints the movement without the qualifier the article does not carry (2026-11-12)
             def core(m):
                 return [w for w in fold(m).split() if w not in DEMONYM]
+            said = set(_ism(w) for w in stated.split())          # the article's "Surrealist" names Surrealism
             both = [" ".join(core(m)) if not fold(m) in stated else m
                     for m in (who.movement.split("|") if who else [])
-                    if stated and core(m) and (fold(m) in stated or all(w in stated.split() for w in core(m)))]
+                    if stated and core(m) and (fold(m) in stated or all(_ism(w) in said for w in core(m)))]
             # Wikidata's first movement for the artist that the article also names (Klimt: Symbolism). Wikidata alone
             # is not enough: it gives Andrew Wyeth "French Realism" (Q316325, P135), and the card printed it (2026-11-12)
             if both:
                 out["facts"]["movement"] = both[0][:1].upper() + both[0][1:]
                 out["support"]["movement"] = ["wikidata (artist)", "wikipedia (artist)"]
+                out["unruled"].pop("movement", None)
+            elif who and who.article_movement:
+                # Wikidata's movement is unconfirmed: the article's own is one reliable witness (Sir, 2026-11-10).
+                # Wyeth: Wikidata "French Realism", the article "Regionalist" -> Regionalism (2026-11-12)
+                first = re.split(r"\s*[,;/]\s*|\s+and\s+", who.article_movement.strip())[0]
+                name = " ".join(_ism(w) for w in first.split())
+                out["facts"]["movement"] = name[:1].upper() + name[1:]
+                out["support"]["movement"] = ["wikipedia (artist)"]
                 out["unruled"].pop("movement", None)
             elif who:
                 out["unruled"]["movement"] = [f"wikidata (artist): {who.movement.replace('|', ', ')}, "
@@ -1829,6 +1839,12 @@ class Catalogue:
             out["failures"].append(f"{len(recs)} curated source(s) matched the picture ({', '.join(r.source for r in recs) or 'none'}); "
                                    "each fact needs 2 that state it. Unavailable: " + "; ".join(f"{k} ({v})" for k, v in UNAVAILABLE.items()))
         return out
+
+
+def _ism(word: str) -> str:
+    """A movement's adjective as its name: "Regionalist" -> "Regionalism", "surrealists" -> "surrealism"."""
+    m = re.match(r"^(.{3,}?)ists?$", word)
+    return m.group(1) + "ism" if m and word.lower() not in ("artist", "artists") else word
 
 
 def labelled(text: str) -> dict:

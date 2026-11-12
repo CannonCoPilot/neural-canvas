@@ -1499,14 +1499,20 @@ def test_the_artists_movement_is_ruled_when_wikidata_and_their_wikipedia_article
     wyeth = Record("wikidata", "u", "", [], "Andrew Wyeth", authority=True, movement="French Realism", artist_born="1917",
                    text="movement realism regionalism")
     ru = cat.rule([wyeth], {"artist": "Andrew Wyeth"})
-    assert ru["facts"]["movement"] == "Realism"                 # the article confirms Realism, not "French" Realism
+    assert ru["facts"]["movement"] == "Realism"                 # an article that says Realism confirms the core
     magritte = Record("wikidata", "u", "", [], "René Magritte", authority=True, movement="Belgian surrealism",
                       artist_born="1898", text="movement surrealism")
     assert cat.rule([magritte], {"artist": "René Magritte"})["facts"]["movement"] == "Surrealism"
     wrong = Record("wikidata", "u", "", [], "Andrew Wyeth", authority=True, movement="French Realism", artist_born="1917",
-                   text="movement regionalism")
-    ru = cat.rule([wrong], {"artist": "Andrew Wyeth"})
-    assert "movement" not in ru["facts"] and "not named by the artist's Wikipedia" in ru["unruled"]["movement"][0]
+                   text="movement regionalist", article_movement="Regionalist")
+    ru = cat.rule([wrong], {"artist": "Andrew Wyeth"})           # Wyeth's real article: the article's own movement
+    assert ru["facts"]["movement"] == "Regionalism" and ru["support"]["movement"] == ["wikipedia (artist)"]
+    surreal = Record("wikidata", "u", "", [], "René Magritte", authority=True, movement="Surrealism", artist_born="1898",
+                     text="movement surrealist", article_movement="Surrealist")
+    assert cat.rule([surreal], {"artist": "René Magritte"})["facts"]["movement"] == "Surrealism"
+    bare = Record("wikidata", "u", "", [], "Andrew Wyeth", authority=True, movement="French Realism", artist_born="1917")
+    ru = cat.rule([bare], {"artist": "Andrew Wyeth"})
+    assert "movement" not in ru["facts"]                         # no article movement: Wikidata alone never prints
 
 
 def test_an_unlisted_label_ends_a_field():
