@@ -1905,6 +1905,10 @@ def labelled(text: str) -> dict:
     return out
 
 
+_FILE_WORDS = {"default", "image", "images", "img", "photo", "picture", "thumbnail", "thumb", "original", "large", "main",
+               "full", "scaled", "larger", "preview", "download", "file", "media", "artwork", "hero", "banner"}
+
+
 def inscription_is_title(text: str, artist: str) -> bool:
     """A legible inscription that names the work: not a signature, initials, a date or a number."""
     t = fold(text)
@@ -1935,7 +1939,9 @@ def leads(ident: dict) -> list[str]:
         t = re.sub(r"\b(?=\w*\d)(?=\w*[a-z])\w{3,}\b", " ", t)   # hash fragments mix letters and digits
         t = re.sub(r"\(\s*\)", " ", t)
         t = re.sub(r"\s+", " ", t).strip(" -|,.")
-        if len(t) >= 4 and not re.fullmatch(r"[\d\s]+", t):
+        # a picture's file name is often furniture ("default", "image", "main"): one of the fallback's three Google
+        # searches was "Carl Heinrich Bloch default" (2026-11-12)
+        if len(t) >= 4 and not re.fullmatch(r"[\d\s]+", t) and fold(t) not in _FILE_WORDS:
             clean.append(t)
     return list(dict.fromkeys(clean))
 
@@ -2221,6 +2227,9 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
             verdict = {"facts": {}, "support": {}, "unruled": {}, "rounds": [],
                        "failures": [f"catalogue adjudication failed: {type(e).__name__}: {str(e)[:200]}"]}
     gaps = [k for k in ("date", "medium", "collection") if not verdict.get("facts", {}).get(k)]
+    ruled_title = verdict.get("facts", {}).get("title", "")
+    if ruled_title and ruled_title not in lead_list:
+        lead_list.insert(0, ruled_title)     # search the title just ruled first, not only identification's leads
     if not verdict.get("failures") and gaps and not spent and more(None, []):
         # the fallback round was meant for any unruled fact, but the loop only searched again when the artist or
         # the title failed: Bloch's "Casting out the Money Changers" ruled both at once, never searched, and lost

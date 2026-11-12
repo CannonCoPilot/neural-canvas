@@ -1703,3 +1703,10 @@ def test_one_painter_one_name_and_never_a_namesake():
     assert same_person("Carl Bloch", "Carl Heinrich Bloch") and same_person("N. C. Wyeth", "Newell Convers Wyeth")
     assert same_person("Edgar Degas", "Hilaire Germain Edgar Degas") and same_person("James Tissot", "James Jacques Joseph Tissot")
     assert not same_person("Andrew Wyeth", "Newell Convers Wyeth") and not same_person("John Singer Sargent", "Richard Sargent")
+
+
+def test_a_file_names_furniture_is_never_a_search_lead():
+    from neural_canvas.catalogue import leads
+    got = leads({"title": "Jesus Cleansing the Temple", "evidence": {"web_references": [
+        "file: default | page: default | site: smk.dk", "file: main | page: Jesus Cleansing the Temple | site: artvee.com"]}})
+    assert "default" not in got and "main" not in got and "Jesus Cleansing the Temple" in got
