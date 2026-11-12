@@ -964,6 +964,20 @@ class Catalogue:
             return []
         listing = self.wiki.oeuvre(qid)
         named = [w for w in listing if any(same_title(t, w["label"]) for t in titles if t)][:4]
+        if len(named) < 4 and titles and self.cfg is not None:
+            # the English label is one name of many: "Der Blaue Reiter" is labelled "The Blue Rider", "Escargots"
+            # "The Snail" (2026-11-12: the item never joined, and Artvee's wrong 1914 printed). The cached listing
+            # carries every work's labels and aliases in nine languages; a match is still verified on its picture
+            from .indexer import works_listing
+            have = {w["qid"] for w in named}
+            try:
+                every = works_listing(self.cfg.path("state_dir"), self.wiki, qid)
+            except Exception as e:      # the English match stands; the listing is a widening, never a gate
+                log.warning("works listing for %s unavailable: %s", qid, e)
+                every = []
+            named += [{"qid": w["qid"], "label": (w["labels"] or [""])[0], "file": w["file"]} for w in every
+                      if w["file"] and w["qid"] not in have
+                      and any(same_title(t, l) for t in titles if t for l in w["labels"])][:4 - len(named)]
         works, vecs = self.idf._oeuvre_vectors(qid)
         near = [works[int(i)] for i in np.argsort(-(vecs @ img_vec))[:4]] if works else []
         out = []
