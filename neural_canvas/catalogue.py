@@ -91,6 +91,15 @@ KID_VERSION = re.compile(r"\b(forarbejde|skitse|studie|kopi|efter|replik|replika
                          re.I)
 
 
+# when a movement began (its first works or manifesto): an artist's movement never labels their earlier work
+MOVEMENT_START = {"impressionism": 1867, "post impressionism": 1886, "neo impressionism": 1886, "pointillism": 1886,
+                  "les nabis": 1888, "nabis": 1888, "symbolism": 1880, "art nouveau": 1890, "vienna secession": 1897,
+                  "fauvism": 1905, "expressionism": 1905, "cubism": 1907, "futurism": 1909, "de stijl": 1917,
+                  "dada": 1916, "bauhaus": 1919, "art deco": 1920, "surrealism": 1924, "belgian surrealism": 1926,
+                  "precisionism": 1915, "regionalism": 1928, "american regionalism": 1928, "abstract expressionism": 1943,
+                  "pop art": 1955, "minimalism": 1960, "photorealism": 1965, "hyperrealism": 1970, "magic realism": 1925}
+
+
 def clean_movement(v: str) -> str:
     """One movement, as a card prints it: WikiArt lists several ("Art Nouveau (Modern) , Symbolism") and adds its own
     parenthetical; the first, without it (Mucha, 2026-11-10)."""
@@ -2304,6 +2313,14 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
         if year:
             facts["date"], support["date"] = year, ids
             unruled.pop("date", None)
+    # the artist's movement describes the artist, but a work painted before the movement began cannot belong to it:
+    # Mondrian's c. 1899 farm landscape printed "De Stijl" (founded 1917), Signac's 1884 harbour "Pointillism"
+    # (2026-11-12). Only an artist-level movement is held to it; a work's own record speaks for the work
+    years = [int(y) for y in re.findall(r"\d{4}", facts.get("date") or "")]
+    began = MOVEMENT_START.get(fold(facts.get("movement", "")))
+    if years and began and max(years) < began and any("(artist)" in x for x in support.get("movement", [])):
+        unruled["movement"] = f"{facts.pop('movement')!r}: the artist's movement began in {began}, after this work"
+        support.pop("movement", None)
     # a verified copy on an auction lot page that names this work: it was sold, and no museum's record claims it.
     # Not for a print: an edition has no single holder (Mucha's lithographs)
     from .agents import states
