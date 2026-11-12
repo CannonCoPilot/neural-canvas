@@ -231,7 +231,7 @@ class Docent:
                 t0 = time.time()
                 cat = Catalogue(self.identifier, self.cfg.thresholds)
                 # curated records join the work's evidence ledger; the agents rule the card (Sir, 2026-11-07)
-                ruling = catalogue_stage(cat, img, st["identify"])
+                ruling = catalogue_stage(cat, img, st["identify"], run=run_id)
                 st[stage] = {"passed": not ruling["failures"], "seconds": round(time.time() - t0, 1), **ruling}
                 save()
                 if ruling["failures"]:

@@ -1932,13 +1932,18 @@ def life_from_ledger(items, artist: str) -> dict:
     1883–1948)", "FINK, WALDEMAR (1883 Bern 1948)", "Tomás Sánchez (Cuban b. 1948)", "Soichiro Tomioka, Japanese,
     1922–1994". Each site votes once; the birth year most sites print wins, then its most printed death year (two
     of Fink's pages print 1893, five print 1883)."""
+    return decide_life(*life_votes(items, artist))
+
+
+def life_votes(items, artist: str) -> tuple[dict, dict]:
+    """One work's votes on its artist's life and nationality: {origin: [born, died, weight, id]} and
+    {origin: [demonym, id]}. A site votes once, with its weightiest item."""
     from .evidence import site_rank
-    out = {"born": "", "died": "", "nationality": "", "life_ids": [], "nationality_ids": []}
+    lives: dict = {}
+    nats: dict = {}
     sur = fold(artist).split()[-1] if fold(artist) else ""
     if len(sur) < 3:
-        return out
-    lives: dict = {}       # origin -> (born, died, id, weight)
-    nats: dict = {}        # origin -> (demonym, id)
+        return lives, nats
     for i in items:
         if i.kind not in ("copy", "caption", "engine", "record") or i.site_kind in ("shop", "music"):
             continue
@@ -1955,40 +1960,81 @@ def life_from_ledger(items, artist: str) -> dict:
                 continue
             years = re.findall(r"\b(1[3-9]\d\d|20[0-2]\d)\b", inner)
             if len(years) == 1 and re.search(r"\b(b\.|born|geb\.|nee)\s*(in\s+\w+\s*,?\s*)?\d{4}", inner, re.I):
-                life = (years[0], "")
+                life = [years[0], ""]
             elif len(years) == 2 and 15 <= int(years[1]) - int(years[0]) <= 105:
-                life = (years[0], years[1])
+                life = years[:2]
             else:
                 continue
             # sites weigh by kind: a catalogue, auction house or art reference outweighs social feeds, which copy
             # each other's errors (Fink's 1893 runs through Instagram, X and Pinterest; Koller and artprice: 1883)
             weight = (3 if i.kind == "record" or site_rank(i.url) <= 2 else 2 if site_rank(i.url) <= 4 else 1) \
                 + (1 if i.kind == "copy" and i.verified else 0)
-            if weight > lives.get(i.origin, ("", "", "", 0))[3]:
-                lives[i.origin] = (*life, i.id, weight)
-            words = fold(inner).split()
-            dem = next((w.capitalize() for w in words if w in DEMONYM), "") or _country_demonym(inner)
+            if weight > (lives.get(i.origin) or ["", "", 0])[2]:
+                lives[i.origin] = [*life, weight, i.id]
+            # a compound stays whole: "French-American" is not "French" (Maggiori, 2026-11-12)
+            pair = re.search(r"\b([A-Za-z]+)-([A-Za-z]+)\b", inner)
+            if pair and pair.group(1).lower() in DEMONYM and pair.group(2).lower() in DEMONYM:
+                dem = f"{pair.group(1).capitalize()}-{pair.group(2).capitalize()}"
+            else:
+                dem = next((w.capitalize() for w in fold(inner).split() if w in DEMONYM), "") or _country_demonym(inner)
             if dem:
-                nats.setdefault(i.origin, (dem, i.id))
+                nats.setdefault(i.origin, [dem, i.id])
             break
+    return lives, nats
+
+
+def decide_life(lives: dict, nats: dict) -> dict:
+    """The winning life and nationality over votes: the most weight wins (an earlier birth year breaks a tie)."""
+    out = {"born": "", "died": "", "nationality": "", "life_ids": [], "nationality_ids": []}
     if lives:
         votes: dict = {}
-        for born, died, _, w in lives.values():
+        for born, died, w, _ in lives.values():
             votes[born] = votes.get(born, 0) + w
         born = max(votes, key=lambda b: (votes[b], -int(b)))
         deaths: dict = {}
-        for b, d, _, w in lives.values():
+        for b, d, w, _ in lives.values():
             if b == born and d:
                 deaths[d] = deaths.get(d, 0) + w
         died = max(deaths, key=lambda d: deaths[d]) if deaths else ""
-        out.update(born=born, died=died, life_ids=[x for b, d, x, _ in lives.values() if b == born and d in (died, "")])
+        out.update(born=born, died=died, life_ids=[x for b, d, _, x in lives.values() if b == born and d in (died, "")])
     if nats:
         tally: dict = {}
         for dem, _ in nats.values():
             tally[dem] = tally.get(dem, 0) + 1
-        dem = max(tally, key=tally.get)
+        dem = max(tally, key=lambda d: (tally[d], "-" in d))      # a tie goes to the compound, the fuller statement
         out.update(nationality=dem, nationality_ids=[x for d, x in nats.values() if d == dem])
     return out
+
+
+class ArtistLives:
+    """Every work's votes on its artist's life and nationality, kept across works (var/state/artist_lives.json):
+    one painter prints one life and one nationality on every card. Voting work by work printed Mark Maggiori
+    "French" on two cards and "American" on a third (2026-11-12). A site's vote from another work is referenced
+    as "<run>:<item>"."""
+
+    def __init__(self, state_dir):
+        self.path = Path(state_dir) / "artist_lives.json"
+
+    def merge(self, artist: str, run: str, lives: dict, nats: dict) -> dict:
+        import fcntl
+        key = fold(artist)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path.with_suffix(".lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                db = json.loads(self.path.read_text()) if self.path.exists() else {}
+            except ValueError:
+                db = {}
+            mine = db.setdefault(key, {"lives": {}, "nats": {}})
+            for origin, (b, d, w, x) in lives.items():
+                if w >= (mine["lives"].get(origin) or ["", "", 0])[2]:
+                    mine["lives"][origin] = [b, d, w, f"{run}:{x}"]
+            for origin, (dem, x) in nats.items():
+                mine["nats"][origin] = [dem, f"{run}:{x}"]
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(db, ensure_ascii=False, indent=0))
+            tmp.replace(self.path)
+        return decide_life(mine["lives"], mine["nats"])
 
 
 def identification_ledger(ev: dict):
@@ -2004,7 +2050,7 @@ def identification_ledger(ev: dict):
     return ledger
 
 
-def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
+def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "work") -> dict:
     """The catalogue stage as the pipeline runs it: gather curated records by the identification's leads, add
     them to the work's ledger, and let the agents rule the card's facts under the same rules as identification,
     plus one: the date, medium and collection need a catalogue record among their witnesses. When a fact stays
@@ -2066,7 +2112,11 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
     # a painter with no Wikidata item and no printed biography: the life and nationality the pages print beside
     # the name, "Waldemar Fink (Swiss, 1883–1948)" (one reliable witness, Sir, 2026-11-10; most sites win a conflict)
     if not facts.get("artist_born") or not facts.get("artist_nationality"):
-        got = life_from_ledger(ledger.items, facts.get("artist") or ident.get("artist", ""))
+        who = facts.get("artist") or ident.get("artist", "")
+        votes = life_votes(ledger.items, who)
+        state = cat.cfg.path("state_dir") if getattr(cat, "cfg", None) is not None else None
+        got = ArtistLives(state).merge(who, run, *votes) if state and who \
+            else decide_life(*votes)
         if not facts.get("artist_born") and got["born"]:
             facts["artist_born"], facts["artist_died"] = got["born"], got["died"]
             support["artist_life"] = got["life_ids"]

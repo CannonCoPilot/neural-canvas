@@ -1586,3 +1586,23 @@ def test_a_living_painter_prints_born():
 def test_an_edition_has_no_single_holder():
     from neural_canvas.catalogue import in_editions
     assert in_editions("Colour lithograph") and in_editions("woodblock print") and not in_editions("Oil on board")
+
+
+def test_one_painter_prints_one_life_and_nationality_on_every_card(tmp_path):
+    # Maggiori (2026-11-12): voted work by work he printed "French" twice and "American" once; Tumblr's
+    # "French-American" had been read as "French"
+    from neural_canvas.catalogue import ArtistLives, life_votes
+    from neural_canvas.evidence import Ledger
+    a, b = Ledger(), Ledger()
+    a.add("caption", "omkar", "Mark Maggiori (French-American,b.1977) Under The Eye Of Yuttahih", "https://x.tumblr.com/post/1")
+    a.add("caption", "omkar", "Mark Maggiori (French, b. 1977) Journey", "https://www.artsy.net/artwork/1")
+    b.add("copy", "bing", "Mark Maggiori (American, b. 1977) Sonoran Magnetism, 2022", "https://www.pinterest.com/pin/1/",
+          verified=True, clip=0.95, inliers=80)
+    assert life_votes(a.items, "Mark Maggiori")[1]["tumblr"][0] == "French-American"
+    store = ArtistLives(tmp_path)
+    first = store.merge("Mark Maggiori", "run1", *life_votes(a.items, "Mark Maggiori"))
+    second = store.merge("Mark Maggiori", "run2", *life_votes(b.items, "Mark Maggiori"))
+    assert first["born"] == second["born"] == "1977"
+    assert second["nationality"] in ("French", "French-American", "American")
+    again = store.merge("Mark Maggiori", "run1", *life_votes(a.items, "Mark Maggiori"))
+    assert again["nationality"] == second["nationality"]          # every card reads the same pooled vote
