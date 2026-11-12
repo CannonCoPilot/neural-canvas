@@ -2377,8 +2377,12 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
     # (2026-11-12). Only an artist-level movement is held to it; a work's own record speaks for the work
     years = [int(y) for y in re.findall(r"\d{4}", facts.get("date") or "")]
     began = MOVEMENT_START.get(fold(facts.get("movement", "")))
-    if years and began and max(years) < began and any("(artist)" in x for x in support.get("movement", [])):
-        unruled["movement"] = f"{facts.pop('movement')!r}: the artist's movement began in {began}, after this work"
+    artist_level = any("(artist)" in x for x in support.get("movement", []))
+    # a work's own tag may name a movement it led into ("Le Pavé de Chailly", 1865, Impressionism), never one founded
+    # a decade later: WikiArt tagged Vallotton's 1913 "Sunset" Magic Realism (c. 1925) (2026-11-12)
+    if years and began and max(years) < began - (0 if artist_level else 10):
+        unruled["movement"] = (f"{facts.pop('movement')!r}: the movement began in {began}, after this work"
+                               + ("" if artist_level else " (a source's tag on the work)"))
         support.pop("movement", None)
     # a verified copy on an auction lot page that names this work: it was sold, and no museum's record claims it.
     # Not for a print: an edition has no single holder (Mucha's lithographs)
