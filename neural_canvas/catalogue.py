@@ -104,6 +104,18 @@ def clean_movement(v: str) -> str:
                     for i, w in enumerate(words))
 
 
+def clean_collection(v: str) -> str:
+    """A holder's name as a card prints it: no acronym in brackets and no postal address after it. "Los Angeles
+    County Museum of Art (LACMA), Los Angeles, CA, US" prints "Los Angeles County Museum of Art" (2026-11-12);
+    a comma inside the name stays ("Cooper Hewitt, Smithsonian Design Museum")."""
+    v = re.sub(r"\s*\([A-Z][A-Za-z&.\s]{1,12}\)", "", (v or "").strip())
+    parts = [p.strip() for p in v.split(",")]
+    # a trailing address: two or more parts after the name, the last a country or state code ("CA", "US", "USA")
+    if len(parts) >= 3 and re.fullmatch(r"[A-Z]{2,3}", parts[-1]):
+        v = parts[0]
+    return v.strip(" ,")
+
+
 def kid_medium(s: str) -> str:
     """Kunstindeks Danmark's Danish technique in English, word by word; English entries pass through."""
     words = s.strip().split()

@@ -1687,3 +1687,11 @@ def test_print_media_name_their_material():
     for m in ("chromolithograph", "serigraph", "aquatint", "linocut", "Oil on masonite"):
         assert _materials(m), m
     assert not _materials("Drawing") and not _materials("painting")
+
+
+def test_a_collection_prints_without_acronym_or_address():
+    from neural_canvas.catalogue import clean_collection
+    assert clean_collection("Los Angeles County Museum of Art (LACMA), Los Angeles, CA, US") == "Los Angeles County Museum of Art"
+    assert clean_collection("Cooper Hewitt, Smithsonian Design Museum") == "Cooper Hewitt, Smithsonian Design Museum"
+    assert clean_collection("National History Museum, Frederiksborg Castle, Denmark") == "National History Museum, Frederiksborg Castle, Denmark"
+    assert clean_collection("Private collection") == "Private collection"
