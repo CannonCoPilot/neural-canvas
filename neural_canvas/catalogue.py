@@ -1771,8 +1771,8 @@ class Catalogue:
         # one reliable witness rules everything but the title and the artist (Sir, 2026-11-10)
         if not pick("movement", [(r, r.movement) for r in pref if r.movement], same_mov, floor=1):
             # the artist's movement (Sir's card lists "movement/period"): the movements on the artist's Wikipedia
-            # article, in its order, confirmed by Wikidata's; Wikidata alone never prints (it gives Andrew Wyeth
-            # "French Realism", Q316325 P135). Names are compared whole, nationality and adjective form aside
+            # article, in its order, confirmed by Wikidata's; Wikidata's own prints only when the article names none
+            # (it gives Andrew Wyeth "French Realism", Q316325 P135, against the article's "Regionalist"). Names are compared whole, nationality and adjective form aside
             # ("Belgian surrealism" is the article's "Surrealist"), never as a substring: "Impressionism" inside the
             # article's "Post-Impressionism" printed Matisse an Impressionist (2026-11-12)
             who = next((r for r in authorities if r.source == "wikidata" and (r.movement or r.article_movement)), None)
@@ -1782,13 +1782,15 @@ class Catalogue:
                 return " ".join(_ism(w) for w in fold(m).split() if w not in DEMONYM)
             wd = {name(m) for m in (who.movement.split("|") if who else []) if name(m)}
             both = [x for x in listed if name(x) in wd]
-            pick_ = both[0] if both else listed[0] if listed else ""
+            # one reliable witness (Sir, 2026-11-10): the article's movement when it names one (Wyeth's "Regionalist"
+            # outvotes Wikidata's "French Realism"); Wikidata's when the article names none (Vallotton: Les Nabis)
+            first_wd = next((m for m in (who.movement.split("|") if who else []) if name(m)), "")
+            pick_ = both[0] if both else listed[0] if listed else first_wd
             if pick_:
                 shown = " ".join(_ism(w) for w in pick_.split())
                 out["facts"]["movement"] = shown[:1].upper() + shown[1:]
-                # the article's own movement is one reliable witness when Wikidata does not confirm it (Sir,
-                # 2026-11-10): Wyeth's article reads "Regionalist" -> Regionalism
-                out["support"]["movement"] = ["wikipedia (artist)"] + (["wikidata (artist)"] if both else [])
+                out["support"]["movement"] = (["wikipedia (artist)"] if listed else []) + (
+                    ["wikidata (artist)"] if both or not listed else [])
                 out["unruled"].pop("movement", None)
             elif who:
                 out["unruled"]["movement"] = [f"wikidata (artist): {who.movement.replace('|', ', ')}, "

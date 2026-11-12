@@ -1510,9 +1510,9 @@ def test_the_artists_movement_is_ruled_when_wikidata_and_their_wikipedia_article
     surreal = Record("wikidata", "u", "", [], "René Magritte", authority=True, movement="Surrealism", artist_born="1898",
                      text="movement surrealist", article_movement="Surrealist")
     assert cat.rule([surreal], {"artist": "René Magritte"})["facts"]["movement"] == "Surrealism"
-    bare = Record("wikidata", "u", "", [], "Andrew Wyeth", authority=True, movement="French Realism", artist_born="1917")
-    ru = cat.rule([bare], {"artist": "Andrew Wyeth"})
-    assert "movement" not in ru["facts"]                         # no article movement: Wikidata alone never prints
+    nabi = Record("wikidata", "u", "", [], "Félix Vallotton", authority=True, movement="Les Nabis|Symbolism", artist_born="1865")
+    ru = cat.rule([nabi], {"artist": "Félix Vallotton"})        # the article names no movement: Wikidata's first
+    assert ru["facts"]["movement"] == "Les Nabis" and ru["support"]["movement"] == ["wikidata (artist)"]
 
 
 def test_an_unlisted_label_ends_a_field():
