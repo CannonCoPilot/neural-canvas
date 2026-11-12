@@ -1606,3 +1606,14 @@ def test_one_painter_prints_one_life_and_nationality_on_every_card(tmp_path):
     assert second["nationality"] in ("French", "French-American", "American")
     again = store.merge("Mark Maggiori", "run1", *life_votes(a.items, "Mark Maggiori"))
     assert again["nationality"] == second["nationality"]          # every card reads the same pooled vote
+
+
+def test_the_works_year_is_read_after_its_title_and_never_before_the_painter_could_paint():
+    from neural_canvas.catalogue import date_from_ledger
+    from neural_canvas.evidence import Ledger
+    led = Ledger()
+    led.add("engine", "omkar", "Richard Savoie, Canada (1959-) There Was a Time (2015) ...", "https://www.instagram.com/p/1/")
+    led.add("engine", "omkar", "“There Was A Time” Richard Savoie (b. 1959) 2015", "https://www.facebook.com/p/2")
+    led.add("caption", "bing", "Richard Savoie - There Was a Time 1959", "https://www.reddit.com/r/Art/1")   # the life misread
+    assert date_from_ledger(led.items, "Richard Savoie", "There Was a Time", "1959") == ("2015", ["E1"])
+    assert date_from_ledger(led.items, "Someone Else", "There Was a Time", "1959") == ("", [])

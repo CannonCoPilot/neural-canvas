@@ -2006,6 +2006,44 @@ def decide_life(lives: dict, nats: dict) -> dict:
     return out
 
 
+def date_from_ledger(items, artist: str, title: str, born: str = "", died: str = "") -> tuple[str, list[str]]:
+    """The work's year as pages print it right after its title, on pages naming the artist: "Richard Savoie,
+    Canada (1959-) There Was a Time (2015)" (2026-11-12: the model ruled Savoie's birth year). Each site votes
+    once, weighted as for the life. The year must sit in brackets or after a comma right behind the title, and fall
+    in the painter's working life: a print's or an exhibition's year printed there is later (Botticelli's
+    "Primavera 1910", Bruce's "Composition IV 1941", in the replay over 281 works)."""
+    from .agents import states
+    from .evidence import site_rank
+    t = fold(title)
+    if len(t) < 3 or not artist:
+        return "", []
+    floor = int(born) + 8 if str(born).isdigit() else 1200
+    ceiling = int(died) if str(died).isdigit() else time.localtime().tm_year
+    pat = re.compile(r"\b" + r"\W+".join(map(re.escape, t.split())) + r"\b\W{0,3}(?:\(|,)\s*(?:c\.|ca\.|circa)?\s*(\d{4})(?:\s*[-/]\s*(\d{4}))?\s*(?:\)|[,.;|]|$)", re.I)
+    votes: dict = {}
+    for i in items:
+        if i.kind not in ("copy", "caption", "engine", "record") or i.site_kind in ("shop", "music") \
+                or states(i, "artist", artist) is not True:
+            continue
+        text = unicodedata.normalize("NFKD", _DASHES.sub("-", i.text)).encode("ascii", "ignore").decode()
+        for y in pat.finditer(text):
+            if not floor <= int(y.group(1)) <= ceiling:
+                continue
+            year = y.group(1) + (f"–{y.group(2)}" if y.group(2) and 0 < int(y.group(2)) - int(y.group(1)) <= 15 else "")
+            w = (3 if i.kind == "record" or site_rank(i.url) <= 2 else 2 if site_rank(i.url) <= 4 else 1) \
+                + (1 if i.kind == "copy" and i.verified else 0)
+            if w > (votes.get(i.origin) or ("", 0, ""))[1]:
+                votes[i.origin] = (year, w, i.id)
+            break
+    if not votes:
+        return "", []
+    tally: dict = {}
+    for year, w, _ in votes.values():
+        tally[year] = tally.get(year, 0) + w
+    best = max(tally, key=tally.get)
+    return best, [x for y, _, x in votes.values() if y == best]
+
+
 class ArtistLives:
     """Every work's votes on its artist's life and nationality, kept across works (var/state/artist_lives.json):
     one painter prints one life and one nationality on every card. Voting work by work printed Mark Maggiori
@@ -2131,6 +2169,12 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
     if years and facts.get("artist_born", "").isdigit() and min(years) < int(facts["artist_born"]) + 8:
         unruled["date"] = f"{facts.pop('date')!r}: before the artist (born {facts['artist_born']}) could paint it"
         support.pop("date", None)
+    if not facts.get("date") and facts.get("title"):
+        year, ids = date_from_ledger(ledger.items, facts.get("artist", ""), facts["title"], facts.get("artist_born", ""),
+                                     facts.get("artist_died", ""))
+        if year:
+            facts["date"], support["date"] = year, ids
+            unruled.pop("date", None)
     # a verified copy on an auction lot page that names this work: it was sold, and no museum's record claims it.
     # Not for a print: an edition has no single holder (Mucha's lithographs)
     if not facts.get("collection") and not in_editions(facts.get("medium", "")):
