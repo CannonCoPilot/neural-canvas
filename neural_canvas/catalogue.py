@@ -109,8 +109,15 @@ def clean_movement(v: str) -> str:
     # Hudson River School (Wikidata's labels are sentence case, 2026-11-12)
     small = {"of", "and", "the", "de", "des", "la", "le", "les", "du", "in", "der", "die"}
     words = first.split()
-    return " ".join("-".join(p[:1].upper() + p[1:] for p in w.split("-")) if i == 0 or w.lower() not in small else w
-                    for i, w in enumerate(words))
+    prefix = {"post", "neo", "pre", "proto", "anti", "late", "early", "high"}
+
+    def cap(w: str) -> str:
+        # a hyphenated part is capitalised after a prefix (Post-Impressionism, Pre-Raphaelite), never in a borrowed
+        # term ("Ukiyo-e", "Shin-hanga" printed "Ukiyo-E", 2026-11-12)
+        parts = w.split("-")
+        return "-".join([parts[0][:1].upper() + parts[0][1:]] +
+                        [p[:1].upper() + p[1:] if parts[0].lower() in prefix else p for p in parts[1:]])
+    return " ".join(cap(w) if i == 0 or w.lower() not in small else w for i, w in enumerate(words))
 
 
 def clean_collection(v: str) -> str:
