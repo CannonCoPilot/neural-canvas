@@ -96,7 +96,12 @@ def clean_movement(v: str) -> str:
     parenthetical; the first, without it (Mucha, 2026-11-10)."""
     first = re.split(r"\s*[,;/]\s*", (v or "").strip())[0]
     first = re.sub(r"\s*\([^)]*\)", "", first).strip(" .")
-    return first[:1].upper() + first[1:] if first else ""
+    # a movement is a proper noun: "American realism" and "Hudson River school" print as American Realism and
+    # Hudson River School (Wikidata's labels are sentence case, 2026-11-12)
+    small = {"of", "and", "the", "de", "des", "la", "le", "les", "du", "in", "der", "die"}
+    words = first.split()
+    return " ".join("-".join(p[:1].upper() + p[1:] for p in w.split("-")) if i == 0 or w.lower() not in small else w
+                    for i, w in enumerate(words))
 
 
 def kid_medium(s: str) -> str:

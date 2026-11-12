@@ -1659,3 +1659,11 @@ def test_a_movement_inside_another_never_confirms_it():
                      text="movement fauvism modernism post impressionism")
     ru = cat.rule([matisse], {"artist": "Henri Matisse"})
     assert ru["facts"]["movement"] == "Fauvism" and ru["support"]["movement"] == ["wikipedia (artist)", "wikidata (artist)"]
+
+
+def test_a_movement_prints_as_a_proper_noun():
+    from neural_canvas.catalogue import clean_movement
+    assert clean_movement("American realism") == "American Realism"
+    assert clean_movement("Hudson River school") == "Hudson River School"
+    assert clean_movement("post-impressionism") == "Post-Impressionism"
+    assert clean_movement("Les Nabis") == "Les Nabis" and clean_movement("Art Nouveau (Modern) , Symbolism") == "Art Nouveau"
