@@ -123,7 +123,8 @@ def _layout(ident: dict, scale: float, inner_w: int) -> tuple[list[tuple[str, Im
     """Rows of (text, font, advance). Facts that are missing close up; a row that will not fit is set
     smaller, then (title only) on two lines; past that it is reported, never cut."""
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
-    life = "–".join(v for v in (ident.get("artist_born"), ident.get("artist_died")) if v)
+    born, died = ident.get("artist_born") or "", ident.get("artist_died") or ""
+    life = f"{born}–{died}" if born and died else f"b. {born}" if born else ""     # a living painter: "b. 1948"
     rows = [("artist", ident["artist"]),
             ("meta", ", ".join(v for v in (ident.get("artist_nationality"), life) if v)),
             ("gap", ""),

@@ -1774,12 +1774,15 @@ class Catalogue:
             who = next((r for r in authorities if r.source == "wikidata" and r.movement), None)
             stated = who.text.replace("movement ", "", 1) if who and who.text else ""
             both = [m for m in (who.movement.split("|") if who else []) if stated and fold(m) and fold(m) in stated]
-            # Wikidata's first movement for the artist that the article also names (Klimt: Symbolism), else its first
-            mine = both or [m for m in (who.movement.split("|") if who else []) if m]
-            if mine:
-                out["facts"]["movement"] = mine[0][:1].upper() + mine[0][1:]
-                out["support"]["movement"] = ["wikidata (artist)"] + (["wikipedia (artist)"] if both else [])
+            # Wikidata's first movement for the artist that the article also names (Klimt: Symbolism). Wikidata alone
+            # is not enough: it gives Andrew Wyeth "French Realism" (Q316325, P135), and the card printed it (2026-11-12)
+            if both:
+                out["facts"]["movement"] = both[0][:1].upper() + both[0][1:]
+                out["support"]["movement"] = ["wikidata (artist)", "wikipedia (artist)"]
                 out["unruled"].pop("movement", None)
+            elif who:
+                out["unruled"]["movement"] = [f"wikidata (artist): {who.movement.replace('|', ', ')}, "
+                                              "not named by the artist's Wikipedia article"]
         # the artist's life: Wikidata's years (the work's item, else the artist's own) against a printed biography
         wd = next((r for r in recs + authorities if r.source == "wikidata" and r.artist_born), None)
         bios = [r for r in recs + authorities if r.artist_bio and r.source != "wikidata"]
@@ -1897,6 +1900,97 @@ def record_items(ledger, recs: list[Record]) -> int:
     return len(ledger.items) - n0
 
 
+AUCTION_HOUSES = ("christies.com", "sothebys.com", "bonhams.com", "phillips.com", "kollerauktionen.ch", "koller.ch",
+                  "dorotheum.com", "lempertz.com", "bukowskis.com", "hindmanauctions.com", "ketterer-kunst.com",
+                  "ketterer-kunst.de", "vanham.de", "grisebach.com", "artcurial.com", "tajan.com", "doyle.com",
+                  "freemansauction.com", "skinnerinc.com", "nagel-auktionen.de", "hampel-auctions.com", "lelandlittle.com",
+                  "heritageauctions.com", "ha.com", "stockholmsauktionsverk.se", "bruun-rasmussen.dk", "fischerauktionen.ch")
+
+
+def sale_page(url: str) -> bool:
+    """A page that sells this very object at auction: an auction house's site, or a lot page on a sale aggregator
+    (Invaluable's "/auction-lot/", LiveAuctioneers' "/price-result/")."""
+    from .evidence import site_of
+    u = (url or "").lower()
+    return bool(u) and (site_of(u) in AUCTION_HOUSES or bool(re.search(r"/(auction-lot|price-result|lot)[/-]", u)))
+
+
+_EDITION = re.compile(r"lithograph|print|woodcut|woodblock|etching|engraving|screen ?print|serigraph|poster|aquatint|"
+                      r"mezzotint|linocut|giclee|photograph|chromolitho", re.I)
+
+
+def in_editions(medium: str) -> bool:
+    """A medium made in editions (a lithograph, a woodblock print): no single collection holds the work."""
+    return bool(_EDITION.search(medium or ""))
+
+
+_DASHES = re.compile(r"[‐-―−]")
+
+
+def life_from_ledger(items, artist: str) -> dict:
+    """The artist's life and nationality as pages print them right after the name: "Waldemar Fink (Swiss Artist,
+    1883–1948)", "FINK, WALDEMAR (1883 Bern 1948)", "Tomás Sánchez (Cuban b. 1948)", "Soichiro Tomioka, Japanese,
+    1922–1994". Each site votes once; the birth year most sites print wins, then its most printed death year (two
+    of Fink's pages print 1893, five print 1883)."""
+    from .evidence import site_rank
+    out = {"born": "", "died": "", "nationality": "", "life_ids": [], "nationality_ids": []}
+    sur = fold(artist).split()[-1] if fold(artist) else ""
+    if len(sur) < 3:
+        return out
+    lives: dict = {}       # origin -> (born, died, id, weight)
+    nats: dict = {}        # origin -> (demonym, id)
+    for i in items:
+        if i.kind not in ("copy", "caption", "engine", "record") or i.site_kind in ("shop", "music"):
+            continue
+        raw = unicodedata.normalize("NFKD", _DASHES.sub("-", i.text)).encode("ascii", "ignore").decode()
+        for m in re.finditer(rf"\b{re.escape(sur)}\b", raw, re.I):
+            tail = raw[m.end():m.end() + 80]
+            p = re.match(r"[^()]{0,40}?\(([^()]{1,60})\)", tail)
+            bare = re.match(r"[,\s]+([A-Za-z]+)[,\s]+(\d{4})\s*-\s*(\d{4})", tail)
+            if p:
+                inner = p.group(1)
+            elif bare and bare.group(1).lower() in DEMONYM:
+                inner = bare.group(0)
+            else:
+                continue
+            years = re.findall(r"\b(1[3-9]\d\d|20[0-2]\d)\b", inner)
+            if len(years) == 1 and re.search(r"\b(b\.|born|geb\.|nee)\s*(in\s+\w+\s*,?\s*)?\d{4}", inner, re.I):
+                life = (years[0], "")
+            elif len(years) == 2 and 15 <= int(years[1]) - int(years[0]) <= 105:
+                life = (years[0], years[1])
+            else:
+                continue
+            # sites weigh by kind: a catalogue, auction house or art reference outweighs social feeds, which copy
+            # each other's errors (Fink's 1893 runs through Instagram, X and Pinterest; Koller and artprice: 1883)
+            weight = (3 if i.kind == "record" or site_rank(i.url) <= 2 else 2 if site_rank(i.url) <= 4 else 1) \
+                + (1 if i.kind == "copy" and i.verified else 0)
+            if weight > lives.get(i.origin, ("", "", "", 0))[3]:
+                lives[i.origin] = (*life, i.id, weight)
+            words = fold(inner).split()
+            dem = next((w.capitalize() for w in words if w in DEMONYM), "") or _country_demonym(inner)
+            if dem:
+                nats.setdefault(i.origin, (dem, i.id))
+            break
+    if lives:
+        votes: dict = {}
+        for born, died, _, w in lives.values():
+            votes[born] = votes.get(born, 0) + w
+        born = max(votes, key=lambda b: (votes[b], -int(b)))
+        deaths: dict = {}
+        for b, d, _, w in lives.values():
+            if b == born and d:
+                deaths[d] = deaths.get(d, 0) + w
+        died = max(deaths, key=lambda d: deaths[d]) if deaths else ""
+        out.update(born=born, died=died, life_ids=[x for b, d, x, _ in lives.values() if b == born and d in (died, "")])
+    if nats:
+        tally: dict = {}
+        for dem, _ in nats.values():
+            tally[dem] = tally.get(dem, 0) + 1
+        dem = max(tally, key=tally.get)
+        out.update(nationality=dem, nationality_ids=[x for d, x in nats.values() if d == dem])
+    return out
+
+
 def identification_ledger(ev: dict):
     """The identification's evidence ledger. One made before the ledger existed (2026-11-07) kept only its verified
     match: that match, checked on both instruments, becomes the ledger's verified copy, or a rerun of the catalogue
@@ -1916,7 +2010,7 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
     plus one: the date, medium and collection need a catalogue record among their witnesses. When a fact stays
     unruled, one more round runs after Google's results through SerpAPI. The artist's life and nationality are
     still ruled by ``rule`` (Wikidata against a printed biography)."""
-    from .evidence import Ledger
+    from .agents import rule_facts
     idf = cat.idf
     lead_list = leads(ident)
     found = cat.gather(img, ident, lead_list)
@@ -1933,15 +2027,20 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
         return record_items(ledger, extra)
 
     prior = (ident.get("evidence") or {}).get("verdict")
+    last = ((ident.get("evidence") or {}).get("adjudication") or [{}])[-1]
+    card_rule = dict(need=("artist", "title"), record_facts=("date", "medium", "collection"))
     if not added and prior and not prior.get("failures"):
-        # nothing new to weigh (a living painter in no catalogue): identification's ruling stands, and its
-        # date, medium and collection stay unruled, since no catalogue record states them
-        verdict = {**prior, "facts": {k: v for k, v in prior["facts"].items() if k in ("artist", "title")},
-                   "rounds": [], "note": "no catalogue record found: identification's ruling stands"}
+        # nothing new to weigh (a living painter in no catalogue): identification's last ruling is ruled again
+        # under the card's rules, with no model call. Its date, medium and collection had been dropped here
+        # outright, though verified copies and pages naming the work stated them (Musil's "Acrylic on Panel,
+        # 2025", 2026-11-12)
+        verdict = rule_facts(ledger, last["ruling"], last["check"], **card_rule) if last.get("ruling") else {"failures": [1]}
+        if verdict["failures"]:
+            verdict = {**prior, "facts": {k: v for k, v in prior["facts"].items() if k in ("artist", "title")}}
+        verdict.update(rounds=[], note="no catalogue record found: identification's ruling ruled again under the card's rules")
     else:
         try:
-            verdict = idf.agents.settle(img, ledger, need=("artist", "title"), record_facts=("date", "medium", "collection"),
-                                        rounds_max=idf.rounds_max, search=more)
+            verdict = idf.agents.settle(img, ledger, **card_rule, rounds_max=idf.rounds_max, search=more)
         except Exception as e:      # a failed agent blocks the stage with its reason; it never prints a guess
             log.error("catalogue adjudication failed: %s", e)
             verdict = {"facts": {}, "support": {}, "unruled": {}, "rounds": [],
@@ -1952,6 +2051,8 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
         verdict.setdefault("unruled", {})["medium"] = f"{facts.pop('medium')!r}: names no material"
     if facts.get("title"):
         facts["title"] = display_title(facts["title"], facts.get("artist", ""))
+    if fold(facts.get("collection", "")) == "private collection":
+        facts["collection"] = "Private collection"
     life = cat.rule(found, {**ident, "artist": facts.get("artist") or ident.get("artist", "")})
     # the life, nationality and movement are ruled by ``rule``: the agents rule only the work's own five facts, and
     # the movement had been left off every card since the ledger redesign (2026-11-10)
@@ -1962,6 +2063,36 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict) -> dict:
                                         and k not in ("artist",)) or k == "movement"}}
     unruled = {**verdict["unruled"], **{k: v for k, v in life["unruled"].items() if k.startswith("artist_l")
                                         or k in ("artist_nationality", "movement")}}
+    # a painter with no Wikidata item and no printed biography: the life and nationality the pages print beside
+    # the name, "Waldemar Fink (Swiss, 1883–1948)" (one reliable witness, Sir, 2026-11-10; most sites win a conflict)
+    if not facts.get("artist_born") or not facts.get("artist_nationality"):
+        got = life_from_ledger(ledger.items, facts.get("artist") or ident.get("artist", ""))
+        if not facts.get("artist_born") and got["born"]:
+            facts["artist_born"], facts["artist_died"] = got["born"], got["died"]
+            support["artist_life"] = got["life_ids"]
+            unruled.pop("artist_life", None)
+        if not facts.get("artist_nationality") and got["nationality"]:
+            facts["artist_nationality"] = got["nationality"]
+            support["artist_nationality"] = got["nationality_ids"]
+            unruled.pop("artist_nationality", None)
+    # a work dated before its painter was eight is the painter's life misread as the work's date ("Richard Savoie
+    # (b. 1959)" ruled Savoie's 2015 painting "1959", 2026-11-12)
+    years = [int(y) for y in re.findall(r"\d{4}", facts.get("date") or "")]
+    if years and facts.get("artist_born", "").isdigit() and min(years) < int(facts["artist_born"]) + 8:
+        unruled["date"] = f"{facts.pop('date')!r}: before the artist (born {facts['artist_born']}) could paint it"
+        support.pop("date", None)
+    # a verified copy on an auction lot page that names this work: it was sold, and no museum's record claims it.
+    # Not for a print: an edition has no single holder (Mucha's lithographs)
+    if not facts.get("collection") and not in_editions(facts.get("medium", "")):
+        from .agents import states
+        lots = [i.id for i in ledger.items if i.kind == "copy" and i.verified and sale_page(i.url)
+                and facts.get("artist") and states(i, "artist", facts["artist"]) is True
+                and (states(i, "title", facts.get("title", "")) is True
+                     or (facts.get("date") and states(i, "date", facts["date"]) is True))]
+        if lots:
+            facts["collection"] = "Private collection"
+            support["collection"] = lots
+            unruled.pop("collection", None)
     return {"facts": facts, "support": support, "unruled": unruled, "failures": verdict["failures"],
             "contradicted": verdict.get("contradicted", {}), "adjudication": verdict.get("rounds", []),
             "sources": life["sources"], "consulted": life["consulted"], "unavailable": life["unavailable"],

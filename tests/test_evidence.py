@@ -103,7 +103,8 @@ def test_card_facts_need_a_record_and_a_curated_record_can_veto():
     ruling = {**_ruling(["E1", "E3"], ["E1", "E3"]), "date": {"value": "2019", "cites": ["E3", "E6"]}}
     chk = {**_check(["E1", "E3"]), "date": {"supports": ["E3", "E6"], "contradicts": []}}
     v = rule_facts(led, ruling, chk, record_facts=("date",))
-    assert "date" not in v["facts"] and "no catalogue record" in v["unruled"]["date"]
+    # one reliable witness (Sir, 2026-11-10): a verified copy stating the date rules it, with no catalogue record
+    assert v["facts"]["date"] == "2019" and {"E3", "E6"} <= set(v["support"]["date"])
     chk["artist"]["contradicts"] = ["E5"]
     v2 = rule_facts(led, ruling, chk)
     assert "artist" not in v2["facts"] and "curated record" in v2["unruled"]["artist"]
@@ -295,3 +296,28 @@ def test_a_fact_other_than_title_and_artist_needs_one_record_and_a_conflict_is_c
     assert v["facts"]["collection"] == "Rijksmuseum" and v["contradicted"]["collection"] == ["E3"]
     caption_only = {**ruling, "date": {"value": "1750", "cites": ["E1"]}}
     assert "date" not in rule_facts(led, caption_only, chk, record_facts=("date", "collection"))["facts"]   # no record
+
+
+def test_a_page_naming_the_work_witnesses_its_card_facts_and_a_shop_never_does():
+    # ground truth, 2026-11-12: Fink's medium was in Google's answer and on Pinterest, never in a catalogue record
+    led = Ledger()
+    led.add("copy", "omkar", "FINK, WALDEMAR Abendstimmung in Adelboden. 1913.", "https://www.kollerauktionen.ch/de/1.htm",
+            verified=True, clip=0.95, inliers=90)                                                                       # E1
+    led.add("copy", "yandex", "Waldemar Fink, Evening in Adelboden", "https://www.instagram.com/p/1/", verified=True,
+            clip=0.93, inliers=60)                                                                                       # E2
+    led.add("engine", "omkar", "Evening in Adelboden (1913) By Fink Waldemar; oil on board; 80 x 103 cm", "", "Artnet")  # E3
+    led.add("caption", "omkar", "Evening in Adelboden by Waldemar Fink, 1913. Oil on board", "https://es.pinterest.com/pin/1/",
+            clip=0.5)                                                                                                    # E4
+    led.add("caption", "bing", "Evening in Adelboden Waldemar Fink canvas print", "https://www.etsy.com/listing/1", clip=0.9)  # E5
+    led.add("caption", "bing", "Fall Collection '25", "https://example.org/fall", clip=0.9)                           # E6
+    ruling = {**_ruling(["E1", "E2"], ["E2", "E3"], "Waldemar Fink", "Evening in Adelboden"),
+              "medium": {"value": "Oil on board", "cites": ["E3", "E4"]},
+              "date": {"value": "1913", "cites": ["E3"]},
+              "collection": {"value": "Private collection", "cites": ["E6"]}}
+    chk = _check(["E1", "E2", "E3"])
+    v = rule_facts(led, ruling, chk, record_facts=("date", "medium", "collection"))
+    assert v["facts"]["medium"] == "Oil on board" and set(v["support"]["medium"]) == {"E3", "E4"}
+    assert v["facts"]["date"] == "1913" and "E1" in v["support"]["date"]        # the uncited verified lot page joins
+    assert "collection" not in v["facts"]               # "Collection" alone names no holder, and E6 names no work
+    shop = {**ruling, "medium": {"value": "Canvas", "cites": ["E5"]}}
+    assert "medium" not in rule_facts(led, shop, chk, record_facts=("medium",))["facts"]

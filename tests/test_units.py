@@ -1495,8 +1495,11 @@ def test_the_artists_movement_is_ruled_when_wikidata_and_their_wikipedia_article
     ru = \
         cat.rule([who, _rec("artvee.com", "Bauerngarten", artist="Gustav Klimt")], {"artist": "Gustav Klimt"})
     assert ru["facts"]["movement"] == "Symbolism"
-    alone = Record("wikidata", "u", "", [], "Gustav Klimt", authority=True, movement="Symbolism", artist_born="1862")
-    assert cat.rule([alone], {"artist": "Gustav Klimt"})["facts"]["movement"] == "Symbolism"   # one witness (Sir, 2026-11-10)
+    # Wikidata alone is no witness for the artist's movement: it gives Andrew Wyeth "French Realism" (2026-11-12)
+    wyeth = Record("wikidata", "u", "", [], "Andrew Wyeth", authority=True, movement="French Realism", artist_born="1917",
+                   text="movement realism regionalism")
+    ru = cat.rule([wyeth], {"artist": "Andrew Wyeth"})
+    assert "movement" not in ru["facts"] and "not named by the artist's Wikipedia" in ru["unruled"]["movement"][0]
 
 
 def test_an_unlisted_label_ends_a_field():
@@ -1537,3 +1540,49 @@ def test_a_date_range_prints_with_an_en_dash_and_a_long_title_wraps_evenly():
                             "date": "1895 - 1917", "detail": True}, 0.3, 221)
     text = [t for t, _, _ in lines if t]
     assert not fails and "(detail)" not in text and any("1895–1917" in t for t in text)
+
+
+def test_a_living_painters_life_and_nationality_are_read_beside_the_name_and_most_sites_win():
+    # ground truth, 2026-11-12: Fink, Sanchez, Tomioka and Musil have no Wikidata item; their pages print the life
+    from neural_canvas.catalogue import life_from_ledger
+    from neural_canvas.evidence import Ledger
+    led = Ledger()
+    led.add("engine", "omkar", "Artwork by Waldemar Theophil Fink (Swiss, 1893\u20131948)", "", "x.com")
+    led.add("copy", "yandex", "Sold at Auction: Waldemar Fink, FINK, WALDEMAR (1883 Bern 1948) Abendstimmung",
+            "https://www.invaluable.com/auction-lot/fink-1", verified=True, clip=0.95, inliers=80)
+    led.add("caption", "omkar", "Waldemar Fink (Swiss Artist, 1883\u20131948) ...", "https://www.instagram.com/p/1/")
+    led.add("caption", "omkar", "Fink | Evening in Adelboden (1913)", "https://primaopoi.tumblr.com/post/1")
+    led.add("caption", "bing", "Waldemar Fink (Swiss, 1883-1948) canvas print", "https://www.etsy.com/listing/1")  # a shop
+    got = life_from_ledger(led.items, "Waldemar Fink")
+    assert (got["born"], got["died"], got["nationality"]) == ("1883", "1948", "Swiss")
+    assert set(got["life_ids"]) == {"E2", "E3"}
+    led2 = Ledger()
+    led2.add("engine", "serpapi", "Tom\u00e1s S\u00e1nchez (Cuban b. 1948), Finding the Meditator", "https://www.christies.com/en/lot/lot-1")
+    assert life_from_ledger(led2.items, "Tomás Sánchez")["born"] == "1948"
+    assert life_from_ledger(led2.items, "Tomás Sánchez")["died"] == "" and life_from_ledger(led2.items, "Tomás Sánchez")["nationality"] == "Cuban"
+    led3 = Ledger()
+    led3.add("engine", "omkar", "Soichiro Tomioka, Japanese, 1922\u20131994, born in Takada", "https://www.facebook.com/p/1")
+    led3.add("engine", "omkar", "Tomioka Soichiro, Japan (1922-1994) Trees (1961)", "https://www.instagram.com/p/2/")
+    got = life_from_ledger(led3.items, "Soichiro Tomioka")
+    assert (got["born"], got["died"], got["nationality"]) == ("1922", "1994", "Japanese")
+
+
+def test_a_verified_copy_on_a_lot_page_makes_the_collection_private():
+    from neural_canvas.catalogue import sale_page
+    assert sale_page("https://www.christies.com/en/lot/lot-6293966")
+    assert sale_page("https://www.kollerauktionen.ch/de/319324-0001-----5039-FINK.htm")
+    assert sale_page("https://www.invaluable.com/auction-lot/fink-waldemar-1883-bern-1948")
+    assert not sale_page("https://artmuseum.princeton.edu/art/collections/objects/99647")
+    assert not sale_page("")
+
+
+def test_a_living_painter_prints_born():
+    from neural_canvas.placard import _layout
+    rows, _ = _layout({"artist": "Tom\u00e1s S\u00e1nchez", "artist_nationality": "Cuban", "artist_born": "1948",
+                       "title": "Finding the Meditator"}, 1.0, 2000)
+    assert any(t == "Cuban, b. 1948" for t, *_ in rows)
+
+
+def test_an_edition_has_no_single_holder():
+    from neural_canvas.catalogue import in_editions
+    assert in_editions("Colour lithograph") and in_editions("woodblock print") and not in_editions("Oil on board")

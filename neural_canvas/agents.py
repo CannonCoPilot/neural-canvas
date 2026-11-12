@@ -9,9 +9,12 @@
   script, and its contradictions are recorded (a curated record's contradiction vetoes).
 * The RULES are code, not models (Sir, 2026-11-07): the artist and the title need at least two supporting items
   from two independent origins, at least one of them a verified copy or a catalogue record (an engine's answer
-  supports but never anchors: engines name look-alikes). Every other fact needs one reliable witness: the card's
-  date, medium and collection need a catalogue record, and a true conflict among records is chosen, not left
-  blank (Sir, 2026-11-10). Every cited item must carry the value in its own words (``states``). Leads
+  supports but never anchors: engines name look-alikes). Every other fact needs one reliable witness, and a true
+  conflict is chosen, not left blank (Sir, 2026-11-10). For the card's date, medium and collection a reliable
+  witness is a catalogue record, a verified copy, or any page or engine answer that names the ruled work (its
+  artist and its title) beside the value: a living painter or a privately held work has no catalogue record, and
+  demanding one dropped facts the evidence carried (ground truth, 2026-11-12). Shops and music pages never witness
+  them (a print shop's "canvas" is its product, not the painting). Every cited item must carry the value in its own words (``states``). Leads
   (model guesses, the signature reading) never count.
 
 Rounds are capped (``rounds_max``). The cap is a circuit-breaker, never an acceptance: a fact that fails
@@ -43,6 +46,18 @@ ANCHORS = ("copy", "record")
 # speaks for this one. An article on Eric Wert's own paintings, found by a search for his name, ruled a Suzan Visser
 # "Eric Wert" (bench pass 7); Visser's Instagram caption sits beside a 0.86 near-copy
 CAPTION_CLIP = 0.85
+
+# sites whose words about a picture are their product, not the work: never a witness for the card's date, medium
+# or collection
+UNFIT = ("shop", "music")
+
+
+def names_work(item, artist: str, title: str) -> bool:
+    """An item about the ruled work itself: its own words carry both the artist and the title. Its date, medium or
+    collection is then that work's, whatever picture sits beside it ("Evening in Adelboden (1913) By Fink Waldemar;
+    oil on board", Google's answer for Fink's painting, 2026-11-12)."""
+    return bool(artist and title) and states(item, "artist", artist) is True and states(item, "title", title) is True
+
 
 ADJUDICATE_PROMPT = """You are a museum registrar ruling on what an artwork is. The photograph is attached. Searches of
 the web, search engines and catalogues have gathered the evidence below, one item per line, each with an id.
@@ -155,7 +170,7 @@ class Agents:
             anchors = [i.line() for i in ledger.items if i.kind == "record" or (i.kind == "copy" and i.verified)][:30]
             feedback = ("\nYOUR PREVIOUS RULING FAILED THE EVIDENCE RULES: " + "; ".join(verdict["failures"])
                         + ". The artist and the title need two independent sites that state them, at least one of them "
-                        "a VERIFIED COPY or a catalogue record; the date, medium and collection need one catalogue record. These are the ONLY items that can anchor a ruling; each verified copy "
+                        "a VERIFIED COPY or a catalogue record; the date, medium and collection need one record, verified copy or page naming this work. These are the ONLY items that can anchor a ruling; each verified copy "
                         "is proven to be this very picture:\n" + "\n".join(anchors)
                         + "\nThe photograph's style can suggest a famous look-alike artist; the anchors decide. Which "
                         "artist and title do these anchors themselves name? Rule that, citing them and every other item "
@@ -182,20 +197,26 @@ def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] 
         # needs the checker's confirmation and no rejection. The 8b checker is unreliable both ways where words
         # can be compared: it missed Instagram's "Hummingbird and Fish. Painted by Suzan Visser" (bench pass 5)
         # and rejected verified copies reading "... Different Colours by James Ward" (smoke test, 2026-11-07)
+        card = f in record_facts
+        work = (out["facts"].get("artist", ""), out["facts"].get("title", ""))
         items = [i for x in _ids(cites) if (i := ledger.get(x)) and i.kind in EVIDENCE
-                 and (i.kind != "caption" or i.clip >= CAPTION_CLIP)
+                 and (i.kind != "caption" or i.clip >= CAPTION_CLIP or (card and names_work(i, *work)))
+                 and not (card and i.site_kind in UNFIT)
                  and ((lex := states(i, f, value)) is True or (lex is None and x in confirmed and x not in rejected))]
-        if f in record_facts:
+        if card:
             # a catalogue record whose OWN field for this fact states the value supports it, cited or not: the
             # adjudicator often cites pages and leaves the records out (Wyeth's date, 2026-11-10: Wikidata,
-            # Wikipedia and WikiArt all read 1948, none was cited, and the date stayed off the card)
+            # Wikipedia and WikiArt all read 1948, none was cited, and the date stayed off the card); so does a
+            # verified copy whose words state it (Koller's lot page for Fink's "Abendstimmung in Adelboden. 1913.")
             cited = {i.id for i in items}
-            items += [i for i in ledger.items if i.kind == "record" and i.id not in cited and i.claims.get(f)
-                      and states(SimpleNamespace(text=str(i.claims[f]), claims={}), f, value) is True]
+            items += [i for i in ledger.items if i.id not in cited and i.site_kind not in UNFIT and (
+                (i.kind == "record" and i.claims.get(f) and states(SimpleNamespace(text=str(i.claims[f]), claims={}), f, value) is True)
+                or (i.kind == "copy" and i.verified and states(i, f, value) is True))]
         origins = {i.origin for i in items}
-        anchors = [i for i in items if i.kind in ANCHORS]
+        anchors = [i for i in items if i.kind in ANCHORS and (i.kind == "record" or i.verified or not card)
+                   or (card and names_work(i, *work))]
         # Sir, 2026-11-10: the title and the artist need two independent witnesses; every other fact needs one
-        # reliable witness (a catalogue record: record_facts), and a true conflict there is chosen, not left blank
+        # reliable witness, and a true conflict there is chosen, not left blank
         floor = 2 if f in need or f in ("artist", "title") else 1
         why = ""
         if f == "title" and re.search(r"(\.\.\.|\u2026)\s*$", value):
@@ -203,9 +224,8 @@ def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] 
         elif len(origins) < floor:
             why = f"{len(origins)} independent item(s) state it ({floor} needed)"
         elif not anchors:
-            why = "no verified copy or catalogue record states it"
-        elif f in record_facts and not any(i.kind == "record" for i in items):
-            why = "no catalogue record states it"
+            why = ("no record, verified copy or page naming this work states it" if card
+                   else "no verified copy or catalogue record states it")
         against = [x for x in c.get("contradicts") or [] if (i := ledger.get(str(x))) and i.kind == "record" and i.overrule
                    and contradicts(i, f, value)]
         if not why and against and floor == 2:
@@ -225,6 +245,8 @@ def rule_facts(ledger: Ledger, ruling: dict, check: dict, need: tuple[str, ...] 
     return out
 
 
+_GENERIC_HOLDER = {"collection", "collections", "museum", "museo", "musee", "art", "arts", "gallery", "galleries", "fine",
+                   "national", "foundation", "university", "institute", "kunst", "kunstmuseum"}
 _STOP = {"the", "and", "with", "of", "on", "in", "a", "an", "de", "la", "le", "het", "en", "van", "der", "des", "du", "und", "von"}
 
 
@@ -283,6 +305,8 @@ def states(item, fact: str, value: str) -> bool | None:
         years = re.findall(r"\d{4}", value)
         return bool(years) and any(y in joined for y in years)
     words = [w for w in _fold(value).split() if w not in _STOP and len(w) > 2] or _fold(value).split()
+    if fact == "collection":   # "Fall Collection '25" names no holder: the holder's own words must be there
+        words = [w for w in words if w not in _GENERIC_HOLDER] or words
     stem = lambda w: w[:-1] if w.endswith("s") and len(w) > 3 else w      # noqa: E731  (hummingbirds ~ hummingbird)
     have = {stem(w) for w in text}
     need = 0.6 if fact == "title" else 0.5
