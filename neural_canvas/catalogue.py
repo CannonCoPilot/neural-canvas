@@ -2220,6 +2220,27 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
             log.error("catalogue adjudication failed: %s", e)
             verdict = {"facts": {}, "support": {}, "unruled": {}, "rounds": [],
                        "failures": [f"catalogue adjudication failed: {type(e).__name__}: {str(e)[:200]}"]}
+    gaps = [k for k in ("date", "medium", "collection") if not verdict.get("facts", {}).get(k)]
+    if not verdict.get("failures") and gaps and not spent and more(None, []):
+        # the fallback round was meant for any unruled fact, but the loop only searched again when the artist or
+        # the title failed: Bloch's "Casting out the Money Changers" ruled both at once, never searched, and lost
+        # the WikiArt record (1874, oil on copper) an earlier run had found (2026-11-12). One more ruling over
+        # the new evidence; what the first ruled is carried, so the second can only add
+        keep = {k: (v, verdict.get("support", {}).get(k, [])) for k, v in verdict["facts"].items()
+                if k in ("artist", "title", "date", "medium", "collection")}
+        try:
+            again = idf.agents.settle(img, ledger, need=("artist", "title"), record_facts=("date", "medium", "collection"),
+                                      carry=keep, rounds_max=1, search=None)
+        except Exception as e:      # the first ruling stands; the extra round is a widening, never a gate
+            log.warning("catalogue fallback round failed: %s", e)
+            again = None
+        if again and not again["failures"]:
+            added = {k: v for k, v in again["facts"].items() if k not in verdict["facts"]}
+            verdict["facts"] = {**verdict["facts"], **added}
+            verdict["support"] = {**verdict.get("support", {}), **{k: again["support"].get(k, []) for k in added}}
+            verdict["unruled"] = {k: v for k, v in {**verdict.get("unruled", {}), **again.get("unruled", {})}.items()
+                                  if k not in verdict["facts"]}
+            verdict["rounds"] = [*verdict.get("rounds", []), *again.get("rounds", [])]
     facts = dict(verdict["facts"])
     if facts.get("medium"):
         facts["medium"] = card_medium(facts["medium"])
