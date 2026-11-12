@@ -1727,3 +1727,10 @@ def test_a_reproductions_process_is_never_the_works_medium():
     from neural_canvas.catalogue import _REPRODUCTION
     assert _REPRODUCTION.search("photomechanical print") and _REPRODUCTION.search("Giclée on canvas")
     assert not _REPRODUCTION.search("chromolithograph") and not _REPRODUCTION.search("Oil on canvas")
+
+
+def test_one_painter_keeps_one_nationality_wording(tmp_path):
+    from neural_canvas.catalogue import _kept_nationality
+    assert _kept_nationality(tmp_path, "Paul Klee") == ""
+    assert _kept_nationality(tmp_path, "Paul Klee", "German-Swiss") == "German-Swiss"
+    assert _kept_nationality(tmp_path, "Paul Klee", "Swiss-German") == "German-Swiss"     # the first wording stays

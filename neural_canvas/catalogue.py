@@ -1371,11 +1371,21 @@ class Catalogue:
         if not label:                     # no model: the one demonym every stating source shares, if there is one
             common = set.intersection(*stated.values())
             label = next(iter(common)) if len(common) == 1 else ""
-        parts = [p.strip() for p in re.split(r"[-–/]", label) if p.strip()]
         said = {a for s in stated.values() for d in s for a in _alias(d)}
+        # one painter, one nationality on every card: the model words it afresh each run, and Klee printed
+        # "German-Swiss" on some cards and "Swiss-German" on another (2026-11-12). The first wording ruled for the
+        # artist is kept while the sources still state every part of it
+        state = self.cfg.path("state_dir") if getattr(self, "cfg", None) is not None else None
+        kept = _kept_nationality(state, artist) if state else ""
+        if kept and all(p.lower() in said for p in re.split(r"[-–/]", kept) if p.strip()):
+            label = kept
+        parts = [p.strip() for p in re.split(r"[-–/]", label) if p.strip()]
         sup = sorted(src for src, s in stated.items() if {a for d in s for a in _alias(d)} & {p.lower() for p in parts})
         if parts and all(p.lower() in said for p in parts) and len(sup) >= 1:      # one reliable witness (Sir, 2026-11-10)
-            return "-".join(p.capitalize() for p in parts), sup, stated
+            label = "-".join(p.capitalize() for p in parts)
+            if state and not kept:
+                _kept_nationality(state, artist, label)
+            return label, sup, stated
         return "", sup, stated
 
     def _translations(self, titles: list[str]) -> list[str]:
@@ -2168,6 +2178,26 @@ def date_from_ledger(items, artist: str, title: str, born: str = "", died: str =
         tally[year] = tally.get(year, 0) + w
     best = max(tally, key=tally.get)
     return best, [x for y, _, x in votes.values() if y == best]
+
+
+def _kept_nationality(state_dir, artist: str, label: str = "") -> str:
+    """The nationality first ruled for an artist (var/state/artist_nationality.json); with ``label``, keep it."""
+    import fcntl
+    path = Path(state_dir) / "artist_nationality.json"
+    key = fold(artist)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_suffix(".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            db = json.loads(path.read_text()) if path.exists() else {}
+        except ValueError:
+            db = {}
+        if label and key not in db:
+            db[key] = label
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(db, ensure_ascii=False, indent=0))
+            tmp.replace(path)
+        return db.get(key, "")
 
 
 class ArtistLives:
