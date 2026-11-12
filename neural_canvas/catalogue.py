@@ -97,7 +97,11 @@ MOVEMENT_START = {"impressionism": 1867, "post impressionism": 1886, "neo impres
                   "fauvism": 1905, "expressionism": 1905, "cubism": 1907, "futurism": 1909, "de stijl": 1917,
                   "dada": 1916, "bauhaus": 1919, "art deco": 1920, "surrealism": 1924, "belgian surrealism": 1926,
                   "precisionism": 1915, "regionalism": 1928, "american regionalism": 1928, "abstract expressionism": 1943,
-                  "pop art": 1955, "minimalism": 1960, "photorealism": 1965, "hyperrealism": 1970, "magic realism": 1925}
+                  "pop art": 1955, "minimalism": 1960, "photorealism": 1965, "hyperrealism": 1970, "magic realism": 1925,
+                  # nineteenth-century schools: Corot's 1826 Marino printed "Realism" (2026-11-12)
+                  "realism": 1840, "french realism": 1840, "barbizon school": 1830, "hudson river school": 1825,
+                  "luminism": 1850, "tonalism": 1880, "pre raphaelite brotherhood": 1848, "pre raphaelite": 1848,
+                  "american impressionism": 1880, "california impressionism": 1895, "american realism": 1880}
 
 
 def clean_movement(v: str) -> str:
