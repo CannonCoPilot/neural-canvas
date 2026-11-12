@@ -188,7 +188,11 @@ What nationality would a museum wall label print for this artist?
 Reply JSON: {{"label": "...", "reason": "one sentence"}}"""
 MATERIALS = ("oil", "acrylic", "tempera", "gouache", "watercolor", "watercolour", "pastel", "charcoal", "ink",
              "graphite", "pencil", "woodblock", "woodcut", "lithograph", "etching", "engraving", "canvas", "panel",
-             "paper", "board", "cardboard", "wood", "linen", "cloth", "silk", "copper", "fresco", "print")
+             "paper", "board", "cardboard", "wood", "linen", "cloth", "silk", "copper", "fresco", "print",
+             # print media the guard dropped as "names no material": Moran's "chromolithograph", Earle's "serigraph"
+             # (2026-11-12)
+             "chromolithograph", "serigraph", "screenprint", "aquatint", "mezzotint", "linocut", "drypoint",
+             "monotype", "masonite", "vellum", "parchment", "enamel", "egg tempera")
 
 
 def fold(s: str) -> str:

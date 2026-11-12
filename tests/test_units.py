@@ -1680,3 +1680,10 @@ def test_a_printmaker_with_no_medium_is_not_given_a_private_collection():
     from neural_canvas.catalogue import _PRINTMAKER
     assert _PRINTMAKER.search("Czechoslovak poster artist, lithographer, photographer")
     assert not _PRINTMAKER.search("French Impressionist painter")
+
+
+def test_print_media_name_their_material():
+    from neural_canvas.catalogue import _materials
+    for m in ("chromolithograph", "serigraph", "aquatint", "linocut", "Oil on masonite"):
+        assert _materials(m), m
+    assert not _materials("Drawing") and not _materials("painting")
