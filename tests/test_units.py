@@ -1681,6 +1681,8 @@ def test_a_movement_prints_as_a_proper_noun():
 def test_wikidatas_worded_ranges_print_as_ranges():
     from neural_canvas.placard import date_range
     assert date_range("between 1600 and 1620") == "1600–1620" and date_range("from 1873 until 1874") == "1873–1874"
+    assert date_range("1870–80") == "1870–1880" and date_range("1895-05") == "1895–1905"
+    assert date_range("1870–1880") == "1870–1880" and date_range("c. 1480–85") == "c. 1480–1485"
     assert date_range("1895 - 1917") == "1895–1917" and date_range("c. 1905") == "c. 1905"
 
 

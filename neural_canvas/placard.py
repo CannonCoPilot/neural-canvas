@@ -118,7 +118,14 @@ def date_range(d: str) -> str:
     """A range of years as a card prints it: "1895 - 1917" -> "1895–1917" (an en dash, no spaces). Wikidata's
     wordings print the same: "between 1600 and 1620" (Beert) and "from 1873 until 1874" (Moran), 2026-11-12."""
     d = re.sub(r"^\s*(?:between|from)\s+(\d{3,4})\s+(?:and|until|to)\s+(\d{3,4})\s*$", "\\1–\\2", (d or "").strip(), flags=re.I)
-    return re.sub(r"(\d{2,4})\s*[-–—]\s*(\d{2,4})", "\\1–\\2", d)
+    d = re.sub(r"(\d{2,4})\s*[-–—]\s*(\d{2,4})", "\\1–\\2", d)
+
+    # a museum's short second year prints whole, as every other card does: Cooper Hewitt's "1870–80" (Church,
+    # 2026-11-12) is 1870–1880, and "1895–05" crosses the century to 1905
+    def whole(m: re.Match) -> str:
+        start, end = int(m.group(1)), int(m.group(1)[:2] + m.group(2))
+        return f"{m.group(1)}–{end + 100 if end < start else end}"
+    return re.sub(r"\b(\d{4})–(\d{2})\b(?!\d)", whole, d)
 
 
 def _layout(ident: dict, scale: float, inner_w: int) -> tuple[list[tuple[str, ImageFont.FreeTypeFont, int]], list[str]]:
