@@ -142,7 +142,19 @@ def clean_collection(v: str) -> str:
     # a trailing address: two or more parts after the name, the last a country or state code ("CA", "US", "USA")
     if len(parts) >= 3 and re.fullmatch(r"[A-Z]{2,3}", parts[-1]):
         v = parts[0]
-    return v.strip(" ,")
+    v = v.strip(" ,")
+    return next((new for new, olds in _HOLDERS.items() if fold(v) in {fold(o) for o in olds}), v)
+
+
+# a holder's current name: sources keep the old ones, and one museum printed three ways (2026-11-12)
+_HOLDERS = {
+    "Buffalo AKG Art Museum": ("Albright-Knox Art Gallery", "Albright Knox Art Gallery", "Albright Art Gallery"),
+    "Brandywine Museum of Art": ("Brandywine River Museum of Art", "Brandywine River Museum",
+                                 "Brandywine Conservancy and Museum of Art", "Brandywine Conservancy & Museum of Art"),
+    # the collection is shown at the Barberini, which holds it ("Impressionism: The Hasso Plattner Collection")
+    "Museum Barberini": ("Impressionism: The Hasso Plattner Collection", "The Hasso Plattner Collection",
+                         "Hasso Plattner Collection"),
+}
 
 
 def kid_medium(s: str) -> str:
