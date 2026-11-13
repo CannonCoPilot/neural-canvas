@@ -119,6 +119,9 @@ def date_range(d: str) -> str:
     wordings print the same: "between 1600 and 1620" (Beert) and "from 1873 until 1874" (Moran), 2026-11-12."""
     d = re.sub(r"^\s*(?:between|from)\s+(\d{3,4})\s+(?:and|until|to)\s+(\d{3,4})\s*$", "\\1–\\2", (d or "").strip(), flags=re.I)
     d = re.sub(r"(\d{2,4})\s*[-–—]\s*(\d{2,4})", "\\1–\\2", d)
+    # one word for "about": "c." as on 22 cards, not "circa" (Moran's "Valley of the Catawissa", Crystal Bridges) or
+    # "ca." (2026-11-12)
+    d = re.sub(r"(?i)^(?:circa|ca\.?|approx\.?)\s*(?=\d)", "c. ", d)
 
     # a museum's short second year prints whole, as every other card does: Cooper Hewitt's "1870–80" (Church,
     # 2026-11-12) is 1870–1880, and "1895–05" crosses the century to 1905
