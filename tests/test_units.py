@@ -1649,10 +1649,11 @@ def test_an_oil_painting_prints_its_material():
     from neural_canvas.catalogue import card_medium
     assert card_medium("Oil painting") == "Oil" and card_medium("watercolor painting") == "Watercolor"
     assert card_medium("painting") == "painting" and card_medium("Oil on canvas") == "Oil on canvas"
-    assert card_medium("Oil paint on canvas") == "Oil on canvas" and card_medium("oil paint on panel") == "oil on panel"
+    assert card_medium("Oil paint on canvas") == "Oil on canvas" and card_medium("oil paint on panel") == "Oil on panel"
     assert card_medium("oil, canvas") == "Oil on canvas" and card_medium("oil, copper") == "Oil on copper"
     assert card_medium("Watercolor paint on wove paper") == "Watercolor on wove paper"
-    assert card_medium("ink, watercolor, paper") == "ink, watercolor, paper"     # only a simple pair is rewritten
+    assert card_medium("oil on canvas") == "Oil on canvas"
+    assert card_medium("ink, watercolor, paper") == "Ink, watercolor, paper"     # only a simple pair is reworded
 
 
 def test_a_movement_inside_another_never_confirms_it():

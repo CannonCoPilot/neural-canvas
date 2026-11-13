@@ -2182,7 +2182,10 @@ def card_medium(medium: str) -> str:
     if pair:
         m = f"{pair.group(1).capitalize()} on {pair.group(2).lower()}"
     bare = re.sub(r"\s+paint(?:ing|ings)?\s*$", "", m, flags=re.I)
-    return bare[:1].upper() + bare[1:] if bare != m and _materials(bare) else m
+    m = bare if bare != m and _materials(bare) else m
+    # a card line opens with a capital: the National Gallery's "oil on canvas" printed lower case (Magritte's
+    # "The Blank Signature", 2026-11-12)
+    return m[:1].upper() + m[1:] if _materials(m) else m
 
 
 def date_from_ledger(items, artist: str, title: str, born: str = "", died: str = "") -> tuple[str, list[str]]:
