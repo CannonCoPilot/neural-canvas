@@ -359,6 +359,32 @@ def display_title(t: str, artist: str = "") -> str:
     return re.sub(r"\s+", " ", t).strip(" ,;:-–—")
 
 
+def accented(title: str, texts: list[str]) -> str:
+    """A title as its sources accent it: the ruled form is the most frequent, and English pages and file names drop
+    accents, so Monet's "Nymphéas" (33 mentions) printed "Nympheas" (91) (2026-11-12). No source adds an accent the
+    work's title lacks, so the accented form that two items spell letter for letter wins."""
+    if not title or not title.isascii():
+        return title
+
+    def base(ch: str) -> str:            # one character for one, so a match's span is the original's span
+        b = unicodedata.normalize("NFKD", ch)[:1]
+        return b if b.isascii() else ch
+    want, seen = title.lower(), {}
+    for text in texts:
+        flat = "".join(base(c) for c in text or "").lower()
+        forms = set()
+        for m in re.finditer(r"(?<!\w)" + re.escape(want) + r"(?!\w)", flat):
+            got = (text or "")[m.start():m.end()]
+            if not got.isascii():
+                forms.add(got.lower())
+        for f in forms:
+            seen[f] = seen.get(f, 0) + 1
+    best = max(seen, key=seen.get, default="")
+    if seen.get(best, 0) < 2:
+        return title
+    return "".join(b.upper() if a.isupper() else b for a, b in zip(title, best))
+
+
 def same_collection(a: str, b: str) -> bool:
     drop = {"museum", "art", "arts", "gallery", "national", "collection", "fine", "institute", "the", "of"}
     ta, tb = _toks(a) - drop, _toks(b) - drop
@@ -2391,7 +2417,8 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
     elif who and facts.get("artist") and same_person(who.artist, facts["artist"]):
         facts["artist"] = who.artist
     if facts.get("title"):
-        facts["title"] = display_title(facts["title"], facts.get("artist", ""))
+        facts["title"] = accented(display_title(facts["title"], facts.get("artist", "")),
+                                  [i.text for i in ledger.items])
     if fold(facts.get("collection", "")) == "private collection":
         facts["collection"] = "Private collection"
     life = cat.rule(found, {**ident, "artist": facts.get("artist") or ident.get("artist", "")})

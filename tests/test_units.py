@@ -1742,6 +1742,17 @@ def test_one_painter_keeps_one_nationality_wording(tmp_path):
     assert _kept_nationality(tmp_path, "Paul Klee", "Swiss-German") == "German-Swiss"     # the first wording stays
 
 
+def test_a_title_keeps_its_sources_accents():
+    from neural_canvas.catalogue import accented
+    pages = ["Claude Monet, Nympheas, 1897", "Nymphéas (Water Lilies), LACMA", "Monet — Nymphéas, c. 1897–98"]
+    assert accented("Nympheas", pages) == "Nymphéas"
+    assert accented("NYMPHEAS", pages) == "NYMPHÉAS"                       # the ruled form's case stays
+    assert accented("Nympheas", pages[:2]) == "Nympheas"                   # one accented witness is not enough
+    assert accented("Water Lilies", pages) == "Water Lilies"
+    assert accented("Cafe", ["Le Café de nuit", "Café Terrace", "Cafeteria"]) == "Café"
+    assert accented("Nymphéas", pages) == "Nymphéas"                       # an accented title is left alone
+
+
 def test_one_painter_keeps_one_name(tmp_path):
     from neural_canvas.catalogue import _kept_name
     long, short = "José María Velasco Gómez Obregón", "José María Velasco"
