@@ -116,6 +116,13 @@ def clean_movement(v: str) -> str:
                    flags=re.I)
     # "Italian Baroque Painting" is the Italian Baroque: the card already says it is a painting (Caravaggio, 2026-11-12)
     first = re.sub(r"\s+painting$", "", first, flags=re.I) if len(first.split()) > 1 else first
+    # a page's furniture run on after the name: Britannica's "Post-Impressionism See All Related Content Visual Arts
+    # ..." blocked Van Gogh's "Wheat Field with Cypresses" (2026-11-12). A movement is a name of a few words: keep the
+    # known movement it opens with, else it is no movement
+    if len(first.split()) > 5:
+        words = first.split()
+        known = next((" ".join(words[:k]) for k in range(4, 0, -1) if fold(" ".join(words[:k])) in MOVEMENT_START), "")
+        first = known
     # a movement is a proper noun: "American realism" and "Hudson River school" print as American Realism and
     # Hudson River School (Wikidata's labels are sentence case, 2026-11-12)
     small = {"of", "and", "the", "de", "des", "la", "le", "les", "du", "in", "der", "die"}
@@ -2000,7 +2007,7 @@ def labelled(text: str) -> dict:
     for m in re.finditer(rf"\b({alt}):\s*(.+?)(?=\s+(?:{alt}):|$)", text[:20000]):
         # a value ends where the page's furniture begins: a run of capitals ("SHOP FOR POSTERS ..."), "Share:"
         # ... or where an unlisted label starts ("Style: Northern Renaissance Series: The Ghent Altarpiece")
-        v = re.split(r"\s+(?:[A-Z]{2,}\s+){2,}[A-Z]{2,}|\s+(?:Share|Tags|Buy|Order)\b|\s+[A-Z][a-z]+(?:\s[a-z]+)?:\s",
+        v = re.split(r"\s+(?:[A-Z]{2,}\s+){2,}[A-Z]{2,}|\s+(?:Share|Tags|Buy|Order)\b|\s+(?:See All|Related Content|Read More|Learn More|Add Us On|Subscribe|Sign Up)\b|\s+[A-Z][a-z]+(?:\s[a-z]+)?:\s",
                      m.group(2))[0].strip(" ;,.")
         if v and fold(v) not in ("unknown", "n a", "na", "none", "?"):
             out.setdefault(m.group(1), v[:200])
