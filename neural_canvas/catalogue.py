@@ -2216,6 +2216,16 @@ def card_medium(medium: str) -> str:
                         r"(canvas|panel|paper|board|cardboard|wood|copper|linen|masonite|silk)", m, flags=re.I)
     if pair:
         m = f"{pair.group(1).capitalize()} on {pair.group(2).lower()}"
+    # Wikidata lists materials without saying which is the support: "oil, tempera and paper" (af Klint, "The Ten
+    # Largest, No. 2", 2026-11-12) is oil and tempera on paper
+    listed = re.fullmatch(r"((?:oil|acrylic|tempera|gouache|watercolou?r|pastel|ink|graphite|charcoal|chalk)"
+                          r"(?:\s*,\s*(?:oil|acrylic|tempera|gouache|watercolou?r|pastel|ink|graphite|charcoal|chalk))*)"
+                          r"\s*,?\s+and\s+(canvas|panel|paper|board|cardboard|wood|copper|linen|masonite|silk|paperboard)",
+                          m.strip(), flags=re.I)
+    if listed:
+        paints = [x.strip().lower() for x in re.split(r"\s*,\s*", listed.group(1))]
+        m = f"{' and '.join([', '.join(paints[:-1]), paints[-1]] if len(paints) > 1 else paints).capitalize()} " \
+            f"on {listed.group(2).lower()}"
     bare = re.sub(r"\s+paint(?:ing|ings)?\s*$", "", m, flags=re.I)
     m = bare if bare != m and _materials(bare) else m
     # a card line opens with a capital: the National Gallery's "oil on canvas" printed lower case (Magritte's

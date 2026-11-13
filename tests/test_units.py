@@ -1653,6 +1653,10 @@ def test_an_oil_painting_prints_its_material():
     assert card_medium("oil, canvas") == "Oil on canvas" and card_medium("oil, copper") == "Oil on copper"
     assert card_medium("Watercolor paint on wove paper") == "Watercolor on wove paper"
     assert card_medium("oil on canvas") == "Oil on canvas"
+    assert card_medium("oil , tempera and paper") == "Oil and tempera on paper"   # Wikidata's materials list
+    assert card_medium("oil, tempera, gouache and canvas") == "Oil, tempera and gouache on canvas"
+    assert card_medium("oil and canvas") == "Oil on canvas"
+    assert card_medium("Watercolor and pencil on paper") == "Watercolor and pencil on paper"   # already a phrase
     assert card_medium("ink, watercolor, paper") == "Ink, watercolor, paper"     # only a simple pair is reworded
 
 
