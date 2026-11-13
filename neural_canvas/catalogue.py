@@ -143,7 +143,24 @@ def clean_collection(v: str) -> str:
     if len(parts) >= 3 and re.fullmatch(r"[A-Z]{2,3}", parts[-1]):
         v = parts[0]
     v = v.strip(" ,")
+    # one holder, one name: "The Metropolitan Museum of Art" printed on seven cards and "Metropolitan Museum of Art"
+    # on six; "Museum of Modern Art, New York" and "Musée d'Orsay, Paris" beside the bare names (2026-11-12)
+    v = re.sub(r"^The\s+(?=\S+\s+\S)", "", v)
+    parts = [p.strip() for p in v.split(",")]
+    while len(parts) >= 2 and _HOLDER_WORD.search(", ".join(parts[:-1])) and not _HOLDER_WORD.search(parts[-1]) \
+            and len(parts[-1].split()) <= 3 and all(w[:1].isupper() for w in parts[-1].split()) \
+            and fold(", ".join(parts[:-1])) not in _NEEDS_CITY:
+        parts.pop()
+    v = ", ".join(parts)
     return next((new for new, olds in _HOLDERS.items() if fold(v) in {fold(o) for o in olds}), v)
+
+
+_HOLDER_WORD = re.compile(r"(?i)museum|museo|mus[ée]e|galler|galerie|atheneum|institut|library|collection|kunsthalle|"
+                          r"pinakothek|castle|palace|palais|foundation|fondation|stiftung|academy|belvedere")
+# names that need their city: the Museum of Fine Arts is in Boston and in Houston
+_NEEDS_CITY = {"museum of fine arts", "national gallery", "national museum", "museum of art", "art museum",
+               "museum of contemporary art", "kunstmuseum", "kunsthalle", "city art gallery", "art gallery",
+               "musee des beaux arts", "museo nacional", "museo de bellas artes", "private collection"}
 
 
 # a holder's current name: sources keep the old ones, and one museum printed three ways (2026-11-12)
@@ -153,7 +170,12 @@ _HOLDERS = {
                                  "Brandywine Conservancy and Museum of Art", "Brandywine Conservancy & Museum of Art"),
     # the collection is shown at the Barberini, which holds it ("Impressionism: The Hasso Plattner Collection")
     "Museum Barberini": ("Impressionism: The Hasso Plattner Collection", "The Hasso Plattner Collection",
-                         "Hasso Plattner Collection"),
+                         "Hasso Plattner Collection", "Impressionism: Hasso Plattner Collection"),
+    # Wikidata's names (Q303139, Q3078776)
+    "Belvedere": ("Austrian Gallery Belvedere", "Österreichische Galerie Belvedere", "Belvedere Museum"),
+    "Museum of National History at Frederiksborg Castle": ("National History Museum, Frederiksborg Castle",
+                                                            "Museum of National History, Frederiksborg Castle",
+                                                            "Frederiksborg Museum", "Frederiksborg Castle"),
 }
 
 

@@ -1705,10 +1705,19 @@ def test_a_collection_prints_without_acronym_or_address():
     assert clean_collection("Brandywine Conservancy and Museum of Art") == "Brandywine Museum of Art"
     assert clean_collection("Brandywine River Museum of Art") == "Brandywine Museum of Art"
     assert clean_collection("Impressionism: The Hasso Plattner Collection") == "Museum Barberini"
-    assert clean_collection("National History Museum, Frederiksborg Castle, Denmark") == "National History Museum, Frederiksborg Castle, Denmark"
+    # one holder, one name: no leading "The", no trailing city, unless the name needs it
+    assert clean_collection("The Metropolitan Museum of Art") == "Metropolitan Museum of Art"
+    assert clean_collection("Museum of Modern Art, New York") == "Museum of Modern Art"
+    assert clean_collection("Musée d'Orsay, Paris") == "Musée d'Orsay"
+    assert clean_collection("Museum of Fine Arts, Boston, Massachusetts") == "Museum of Fine Arts, Boston"
+    assert clean_collection("Huntington Library, Art Museum, and Botanical Gardens") == \
+        "Huntington Library, Art Museum, and Botanical Gardens"
+    assert clean_collection("National History Museum, Frederiksborg Castle, Denmark") == \
+        "Museum of National History at Frederiksborg Castle"
+    assert clean_collection("Austrian Gallery Belvedere") == "Belvedere"
     assert clean_collection("Private collection") == "Private collection"
     assert clean_collection("museum collection of the Prague City Gallery") == "Prague City Gallery"
-    assert clean_collection("The Wallace Collection") == "The Wallace Collection"
+    assert clean_collection("The Wallace Collection") == "Wallace Collection"   # its name survives, as Wikidata prints it
 
 
 def test_one_painter_one_name_and_never_a_namesake():
