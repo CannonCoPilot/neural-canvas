@@ -1736,3 +1736,17 @@ def test_one_painter_keeps_one_nationality_wording(tmp_path):
     assert _kept_nationality(tmp_path, "Paul Klee") == ""
     assert _kept_nationality(tmp_path, "Paul Klee", "German-Swiss") == "German-Swiss"
     assert _kept_nationality(tmp_path, "Paul Klee", "Swiss-German") == "German-Swiss"     # the first wording stays
+
+
+def test_one_painter_keeps_one_name(tmp_path):
+    from neural_canvas.catalogue import _kept_name
+    long, short = "José María Velasco Gómez Obregón", "José María Velasco"
+    assert _kept_name(tmp_path, long) == long                     # no Wikidata yet: the first ruled name is kept
+    assert _kept_name(tmp_path, short) == long
+    assert _kept_name(tmp_path, long, short) == short             # Wikidata's label replaces a ruled name
+    assert _kept_name(tmp_path, long) == short                    # and every later card prints it
+    assert _kept_name(tmp_path, "José Velasco", "José Maria Velasco") == short   # the first label stays
+    assert _kept_name(tmp_path, "Andrew Wyeth", "Andrew Wyeth") == "Andrew Wyeth"
+    assert _kept_name(tmp_path, "N. C. Wyeth", "Newell Convers Wyeth") == "Newell Convers Wyeth"
+    assert _kept_name(tmp_path, "Jamie Wyeth") == "Jamie Wyeth"   # another Wyeth is another painter
+    assert _kept_name(tmp_path, "Wyeth") == "Wyeth"               # a bare surname matching several keeps its form

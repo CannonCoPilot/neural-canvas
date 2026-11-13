@@ -2205,6 +2205,48 @@ def _kept_nationality(state_dir, artist: str, label: str = "") -> str:
         return db.get(key, "")
 
 
+def _one_name(a: str, b: str) -> bool:
+    """``same_person``, or one name opening the other: Spanish names carry two surnames, and "José María Velasco"
+    is "José María Velasco Gómez Obregón" though their last words differ."""
+    x, y = fold(a).split(), fold(b).split()
+    short, long = sorted((x, y), key=len)
+    return same_person(a, b) or (len(short) >= 2 and long[:len(short)] == short)
+
+
+def _kept_name(state_dir, artist: str, wikidata: str = "") -> str:
+    """The one name a painter prints on every card (var/state/artist_names.json): their Wikidata label once any
+    work has found it, else the first name ruled. The Wikidata label fix ran only on works that found the artist's
+    item, so Velasco printed "José María Velasco" on one card and "José María Velasco Gómez Obregón" on another
+    (2026-11-12). A name matching two kept painters ("Velasco" alone) keeps its own form."""
+    import fcntl
+    path = Path(state_dir) / "artist_names.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_suffix(".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            db = json.loads(path.read_text()) if path.exists() else {}
+        except ValueError:
+            db = {}
+        hits = [k for k, v in db.items() if _one_name(v["name"], artist)]
+        if wikidata and _one_name(wikidata, artist):
+            hits = [k for k in hits if not db[k]["wikidata"] or _one_name(db[k]["name"], wikidata)]
+            if len(hits) > 1 or (hits and db[hits[0]]["wikidata"]):
+                return db[hits[0]]["name"] if len(hits) == 1 else wikidata
+            for k in hits:
+                db.pop(k)
+            db[fold(wikidata)] = {"name": wikidata, "wikidata": True}
+        elif len(hits) == 1:
+            return db[hits[0]]["name"]
+        elif hits or not artist:
+            return artist
+        else:
+            db[fold(artist)] = {"name": artist, "wikidata": False}
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(db, ensure_ascii=False, indent=0))
+        tmp.replace(path)
+        return wikidata or artist
+
+
 class ArtistLives:
     """Every work's votes on its artist's life and nationality, kept across works (var/state/artist_lives.json):
     one painter prints one life and one nationality on every card. Voting work by work printed Mark Maggiori
@@ -2331,7 +2373,10 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
     # the ruled one ("Carl Heinrich Bloch" on seven cards and "Carl Bloch" on six; "Hilaire Germain Edgar Degas",
     # 2026-11-12)
     who = next((r for r in found if r.authority and r.source == "wikidata" and r.artist), None)
-    if who and facts.get("artist") and same_person(who.artist, facts["artist"]):
+    state = cat.cfg.path("state_dir") if getattr(cat, "cfg", None) is not None else None
+    if facts.get("artist") and state:
+        facts["artist"] = _kept_name(state, facts["artist"], who.artist if who else "")
+    elif who and facts.get("artist") and same_person(who.artist, facts["artist"]):
         facts["artist"] = who.artist
     if facts.get("title"):
         facts["title"] = display_title(facts["title"], facts.get("artist", ""))
