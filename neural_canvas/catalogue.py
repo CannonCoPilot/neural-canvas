@@ -181,6 +181,9 @@ _HOLDERS = {
     # the collection is shown at the Barberini, which holds it ("Impressionism: The Hasso Plattner Collection")
     "Museum Barberini": ("Impressionism: The Hasso Plattner Collection", "The Hasso Plattner Collection",
                          "Hasso Plattner Collection", "Impressionism: Hasso Plattner Collection"),
+    # merged into the National Museum in 2003 (Wikidata Q3330707 -> Q1132918; Munch's "Winter in the Woods")
+    "National Museum of Art, Architecture and Design": ("National Gallery of Norway", "Nasjonalgalleriet",
+                                                        "Nasjonalmuseet", "National Museum of Norway"),
     # Wikidata's names (Q303139, Q3078776)
     "Belvedere": ("Austrian Gallery Belvedere", "Österreichische Galerie Belvedere", "Belvedere Museum"),
     "Museum of National History at Frederiksborg Castle": ("National History Museum, Frederiksborg Castle",

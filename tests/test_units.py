@@ -1728,6 +1728,7 @@ def test_a_collection_prints_without_acronym_or_address():
     assert clean_collection("National History Museum, Frederiksborg Castle, Denmark") == \
         "Museum of National History at Frederiksborg Castle"
     assert clean_collection("Austrian Gallery Belvedere") == "Belvedere"
+    assert clean_collection("National Gallery of Norway") == "National Museum of Art, Architecture and Design"
     assert clean_collection("Private collection") == "Private collection"
     assert clean_collection("museum collection of the Prague City Gallery") == "Prague City Gallery"
     assert clean_collection("The Wallace Collection") == "Wallace Collection"   # its name survives, as Wikidata prints it
