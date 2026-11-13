@@ -1671,6 +1671,11 @@ def test_a_movement_prints_as_a_proper_noun():
     from neural_canvas.catalogue import clean_movement
     assert clean_movement("American realism") == "American Realism"
     assert clean_movement("Hudson River school") == "Hudson River School"
+    assert clean_movement("Pre-Raphaelite Brotherhood") == "Pre-Raphaelitism"       # the movement, not the society
+    from neural_canvas.catalogue import career_span
+    assert career_span("between 1854 and 1917", "1834", "1917") and career_span("1726 - 1779", "1716", "1779")
+    assert not career_span("1886–1894", "1836", "1902") and not career_span("1882–1885", "1839", "1906")
+    assert not career_span("1854–1917", "", "")                                       # a living or unknown life: kept
     assert clean_movement("post-impressionism") == "Post-Impressionism" and clean_movement("ukiyo-e") == "Ukiyo-e"
     assert clean_movement("Shin-hanga") == "Shin-hanga" and clean_movement("pre-raphaelite") == "Pre-Raphaelite"
     assert clean_movement("Founder of Tonalism") == "Tonalism" and clean_movement("co-founder of the Nabis") == "Nabis"

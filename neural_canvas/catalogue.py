@@ -102,7 +102,7 @@ MOVEMENT_START = {"impressionism": 1867, "post impressionism": 1878, "neo impres
                   "pop art": 1955, "minimalism": 1960, "photorealism": 1965, "hyperrealism": 1970, "magic realism": 1925,
                   # nineteenth-century schools: Corot's 1826 Marino printed "Realism" (2026-11-12)
                   "realism": 1840, "french realism": 1840, "barbizon school": 1830, "hudson river school": 1825,
-                  "luminism": 1850, "tonalism": 1880, "pre raphaelite brotherhood": 1848, "pre raphaelite": 1848,
+                  "luminism": 1850, "tonalism": 1880, "pre raphaelite brotherhood": 1848, "pre raphaelite": 1848, "pre raphaelitism": 1848,
                   "american impressionism": 1880, "california impressionism": 1895, "american realism": 1880}
 
 
@@ -128,7 +128,10 @@ def clean_movement(v: str) -> str:
         parts = w.split("-")
         return "-".join([parts[0][:1].upper() + parts[0][1:]] +
                         [p[:1].upper() + p[1:] if parts[0].lower() in prefix else p for p in parts[1:]])
-    return " ".join(cap(w) if i == 0 or w.lower() not in small else w for i, w in enumerate(words))
+    out = " ".join(cap(w) if i == 0 or w.lower() not in small else w for i, w in enumerate(words))
+    # the Brotherhood was a society of seven; the movement is Pre-Raphaelitism: Wikidata tags Leighton's "The feigned
+    # death of Juliet" with the society, and Leighton was never a member (2026-11-12)
+    return "Pre-Raphaelitism" if fold(out) == "pre raphaelite brotherhood" else out
 
 
 def clean_collection(v: str) -> str:
@@ -2210,6 +2213,14 @@ def card_medium(medium: str) -> str:
     return m[:1].upper() + m[1:] if _materials(m) else m
 
 
+def career_span(date: str, born: str, died: str) -> bool:
+    """A range from the painter's youth to their death: a catalogue's bounds for an undated work ("1854–1917" for
+    Degas's "The Dancers", "1846 - 1902" for a Tissot, "1726 - 1779" for Hoch), never the work's date."""
+    years = [int(y) for y in re.findall(r"\d{4}", date or "")]
+    return len(years) >= 2 and str(born).isdigit() and str(died).isdigit() and min(years) <= int(born) + 25 \
+        and max(years) >= int(died) - 1 and max(years) - min(years) >= 30
+
+
 def date_from_ledger(items, artist: str, title: str, born: str = "", died: str = "") -> tuple[str, list[str]]:
     """The work's year as pages print it right after its title, on pages naming the artist: "Richard Savoie,
     Canada (1959-) There Was a Time (2015)" (2026-11-12: the model ruled Savoie's birth year). Each site votes
@@ -2477,6 +2488,11 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
     years = [int(y) for y in re.findall(r"\d{4}", facts.get("date") or "")]
     if years and facts.get("artist_born", "").isdigit() and min(years) < int(facts["artist_born"]) + 8:
         unruled["date"] = f"{facts.pop('date')!r}: before the artist (born {facts['artist_born']}) could paint it"
+        support.pop("date", None)
+    # a range spanning the painter's working life is a catalogue's bounds for an undated work, not a date: the Met's
+    # "The Dancers" has no date, its search bounds 1854–1917 reached Wikidata, and Degas's card printed them (2026-11-12)
+    if career_span(facts.get("date", ""), facts.get("artist_born", ""), facts.get("artist_died", "")):
+        unruled["date"] = f"{facts.pop('date')!r}: the artist's working life, not the work's date"
         support.pop("date", None)
     if not facts.get("date") and facts.get("title"):
         year, ids = date_from_ledger(ledger.items, facts.get("artist", ""), facts["title"], facts.get("artist_born", ""),
