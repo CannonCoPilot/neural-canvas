@@ -794,7 +794,9 @@ class Catalogue:
                 if ok:
                     prov = (x.get("dataProvider") or ["Europeana"])[0]
                     others = [t for ts in (x.get("dcTitleLangAware") or {}).values() for t in ts if t != title]
-                    return [Record(f"europeana:{fold(prov)}", x.get("guid", ""), title, list(dict.fromkeys(others)), creator,
+                    # Europeana's item link carries the caller's API key as "utm_campaign": never stored
+                    guid = re.sub(r"[?&]utm_[a-z]+=[^&]*", "", x.get("guid", "")).rstrip("?&")
+                    return [Record(f"europeana:{fold(prov)}", guid, title, list(dict.fromkeys(others)), creator,
                                    "", (x.get("year") or [""])[0], "", prov, "", url, "image", sim, inl)]
         return []
 
@@ -2385,13 +2387,54 @@ def identification_ledger(ev: dict):
     return ledger
 
 
+def _card_rule(ident: dict) -> dict:
+    """The card's rules: identification's proven artist and title keep their witnesses when the catalogue rules
+    them again; the date, medium and collection need a record, verified copy or page naming the work."""
+    prior = (ident.get("evidence") or {}).get("verdict")
+    carry = {k: (prior["facts"][k], prior.get("support", {}).get(k, [])) for k in ("artist", "title")
+             if prior and prior.get("facts", {}).get(k)}
+    return dict(need=("artist", "title"), record_facts=("date", "medium", "collection"), carry=carry)
+
+
+def _prior_verdict(ledger, ident: dict) -> dict:
+    """Nothing new to weigh (a living painter in no catalogue): identification's last ruling is ruled again under
+    the card's rules, with no model call. Its date, medium and collection had been dropped here outright, though
+    verified copies and pages naming the work stated them (Musil's "Acrylic on Panel, 2025", 2026-11-12)."""
+    from .agents import rule_facts
+    prior = (ident.get("evidence") or {}).get("verdict") or {}
+    last = ((ident.get("evidence") or {}).get("adjudication") or [{}])[-1]
+    verdict = rule_facts(ledger, last["ruling"], last["check"], **_card_rule(ident)) if last.get("ruling") \
+        else {"failures": [1]}
+    if verdict["failures"]:
+        verdict = {**prior, "facts": {k: v for k, v in prior.get("facts", {}).items() if k in ("artist", "title")}}
+    verdict.update(rounds=[], note="no catalogue record found: identification's ruling ruled again under the card's rules")
+    return verdict
+
+
+def _with_again(verdict: dict, again: dict | None) -> dict:
+    """The fallback round's ruling can only add: what the first ruled is carried."""
+    if again and not again["failures"]:
+        added = {k: v for k, v in again["facts"].items() if k not in verdict["facts"]}
+        verdict["facts"] = {**verdict["facts"], **added}
+        verdict["support"] = {**verdict.get("support", {}), **{k: again["support"].get(k, []) for k in added}}
+        verdict["unruled"] = {k: v for k, v in {**verdict.get("unruled", {}), **again.get("unruled", {})}.items()
+                              if k not in verdict["facts"]}
+        verdict["rounds"] = [*verdict.get("rounds", []), *again.get("rounds", [])]
+    return verdict
+
+
+def _keep(verdict: dict) -> dict:
+    return {k: (v, verdict.get("support", {}).get(k, [])) for k, v in verdict["facts"].items()
+            if k in ("artist", "title", "date", "medium", "collection")}
+
+
 def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "work") -> dict:
     """The catalogue stage as the pipeline runs it: gather curated records by the identification's leads, add
     them to the work's ledger, and let the agents rule the card's facts under the same rules as identification,
     plus one: the date, medium and collection need a catalogue record among their witnesses. When a fact stays
     unruled, one more round runs after Google's results through SerpAPI. The artist's life and nationality are
-    still ruled by ``rule`` (Wikidata against a printed biography)."""
-    from .agents import rule_facts
+    still ruled by ``rule`` (Wikidata against a printed biography). Everything after the evidence is gathered and
+    the agents have ruled is ``card_from_evidence``, which ``rerule`` runs again offline."""
     idf = cat.idf
     lead_list = leads(ident)
     found = cat.gather(img, ident, lead_list)
@@ -2408,20 +2451,9 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
         return record_items(ledger, extra)
 
     prior = (ident.get("evidence") or {}).get("verdict")
-    last = ((ident.get("evidence") or {}).get("adjudication") or [{}])[-1]
-    # identification's proven artist and title keep their witnesses when the catalogue rules them again
-    carry = {k: (prior["facts"][k], prior.get("support", {}).get(k, [])) for k in ("artist", "title")
-             if prior and prior.get("facts", {}).get(k)}
-    card_rule = dict(need=("artist", "title"), record_facts=("date", "medium", "collection"), carry=carry)
+    card_rule = _card_rule(ident)
     if not added and prior and not prior.get("failures"):
-        # nothing new to weigh (a living painter in no catalogue): identification's last ruling is ruled again
-        # under the card's rules, with no model call. Its date, medium and collection had been dropped here
-        # outright, though verified copies and pages naming the work stated them (Musil's "Acrylic on Panel,
-        # 2025", 2026-11-12)
-        verdict = rule_facts(ledger, last["ruling"], last["check"], **card_rule) if last.get("ruling") else {"failures": [1]}
-        if verdict["failures"]:
-            verdict = {**prior, "facts": {k: v for k, v in prior["facts"].items() if k in ("artist", "title")}}
-        verdict.update(rounds=[], note="no catalogue record found: identification's ruling ruled again under the card's rules")
+        verdict = _prior_verdict(ledger, ident)
     else:
         try:
             verdict = idf.agents.settle(img, ledger, **card_rule, rounds_max=idf.rounds_max, search=more)
@@ -2438,21 +2470,26 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
         # the title failed: Bloch's "Casting out the Money Changers" ruled both at once, never searched, and lost
         # the WikiArt record (1874, oil on copper) an earlier run had found (2026-11-12). One more ruling over
         # the new evidence; what the first ruled is carried, so the second can only add
-        keep = {k: (v, verdict.get("support", {}).get(k, [])) for k, v in verdict["facts"].items()
-                if k in ("artist", "title", "date", "medium", "collection")}
         try:
             again = idf.agents.settle(img, ledger, need=("artist", "title"), record_facts=("date", "medium", "collection"),
-                                      carry=keep, rounds_max=1, search=None)
+                                      carry=_keep(verdict), rounds_max=1, search=None)
         except Exception as e:      # the first ruling stands; the extra round is a widening, never a gate
             log.warning("catalogue fallback round failed: %s", e)
             again = None
-        if again and not again["failures"]:
-            added = {k: v for k, v in again["facts"].items() if k not in verdict["facts"]}
-            verdict["facts"] = {**verdict["facts"], **added}
-            verdict["support"] = {**verdict.get("support", {}), **{k: again["support"].get(k, []) for k in added}}
-            verdict["unruled"] = {k: v for k, v in {**verdict.get("unruled", {}), **again.get("unruled", {})}.items()
-                                  if k not in verdict["facts"]}
-            verdict["rounds"] = [*verdict.get("rounds", []), *again.get("rounds", [])]
+        verdict = _with_again(verdict, again)
+    who = next((r for r in found if r.authority and r.source == "wikidata" and r.artist), None)
+    state = cat.cfg.path("state_dir") if getattr(cat, "cfg", None) is not None else None
+    return card_from_evidence(verdict, ledger, ident, lambda a: cat.rule(found, {**ident, "artist": a}),
+                              wikidata_name=who.artist if who else "", state=state, run=run, found=found)
+
+
+def card_from_evidence(verdict: dict, ledger, ident: dict, life_of, wikidata_name: str = "", state=None,
+                       run: str = "work", found: list | None = None) -> dict:
+    """The card's facts from the agents' verdict and the work's ledger, with no network and no model call:
+    the medium, title and date guards, one name and nationality per painter, the artist's life, the movement's
+    start check and the private-collection rule. ``life_of(artist)`` rules the artist's life, nationality and
+    movement (``Catalogue.rule`` over the gathered records). The catalogue stage runs it once; ``rerule`` runs it
+    again over a stored record when the rules change, so a fix reaches every card without a search (Sir, 2026-11-13)."""
     facts = dict(verdict["facts"])
     if facts.get("medium"):
         facts["medium"] = card_medium(facts["medium"])
@@ -2466,18 +2503,16 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
     # one name per painter on every card: the artist's own Wikidata label, their common name, when its surname is
     # the ruled one ("Carl Heinrich Bloch" on seven cards and "Carl Bloch" on six; "Hilaire Germain Edgar Degas",
     # 2026-11-12)
-    who = next((r for r in found if r.authority and r.source == "wikidata" and r.artist), None)
-    state = cat.cfg.path("state_dir") if getattr(cat, "cfg", None) is not None else None
     if facts.get("artist") and state:
-        facts["artist"] = _kept_name(state, facts["artist"], who.artist if who else "")
-    elif who and facts.get("artist") and same_person(who.artist, facts["artist"]):
-        facts["artist"] = who.artist
+        facts["artist"] = _kept_name(state, facts["artist"], wikidata_name)
+    elif wikidata_name and facts.get("artist") and same_person(wikidata_name, facts["artist"]):
+        facts["artist"] = wikidata_name
     if facts.get("title"):
         facts["title"] = accented(display_title(facts["title"], facts.get("artist", "")),
                                   [i.text for i in ledger.items])
     if fold(facts.get("collection", "")) == "private collection":
         facts["collection"] = "Private collection"
-    life = cat.rule(found, {**ident, "artist": facts.get("artist") or ident.get("artist", "")})
+    life = life_of(facts.get("artist") or ident.get("artist", ""))
     # the life, nationality and movement are ruled by ``rule``: the agents rule only the work's own five facts, and
     # the movement had been left off every card since the ledger redesign (2026-11-10)
     for k in ("artist_born", "artist_died", "artist_nationality", "inscribed_title", "movement"):
@@ -2492,7 +2527,6 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
     if not facts.get("artist_born") or not facts.get("artist_nationality"):
         who = facts.get("artist") or ident.get("artist", "")
         votes = life_votes(ledger.items, who)
-        state = cat.cfg.path("state_dir") if getattr(cat, "cfg", None) is not None else None
         got = ArtistLives(state).merge(who, run, *votes) if state and who \
             else decide_life(*votes)
         if not facts.get("artist_born") and got["born"]:
@@ -2511,13 +2545,17 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
         support.pop("date", None)
     # a range spanning the painter's working life is a catalogue's bounds for an undated work, not a date: the Met's
     # "The Dancers" has no date, its search bounds 1854–1917 reached Wikidata, and Degas's card printed them (2026-11-12)
+    span = set()
     if career_span(facts.get("date", ""), facts.get("artist_born", ""), facts.get("artist_died", "")):
+        span = set(re.findall(r"\d{4}", facts["date"]))
         unruled["date"] = f"{facts.pop('date')!r}: the artist's working life, not the work's date"
         support.pop("date", None)
     if not facts.get("date") and facts.get("title"):
         year, ids = date_from_ledger(ledger.items, facts.get("artist", ""), facts["title"], facts.get("artist_born", ""),
                                      facts.get("artist_died", ""))
-        if year:
+        # the span's own ends are no date either: Tissot's "Castle or Fortress on the Coast" lost "1846 - 1902" and
+        # took "1846" back from a page printing the same span after the title (rerule, 2026-11-13)
+        if year and year not in span:
             facts["date"], support["date"] = year, ids
             unruled.pop("date", None)
     # the artist's movement describes the artist, but a work painted before the movement began cannot belong to it:
@@ -2552,4 +2590,96 @@ def catalogue_stage(cat: Catalogue, img: Image.Image, ident: dict, run: str = "w
     return {"facts": facts, "support": support, "unruled": unruled, "failures": verdict["failures"],
             "contradicted": verdict.get("contradicted", {}), "adjudication": verdict.get("rounds", []),
             "sources": life["sources"], "consulted": life["consulted"], "unavailable": life["unavailable"],
-            "corroborating": life["corroborating"], "ledger": ledger.to_list()}
+            "corroborating": life["corroborating"], "ledger": ledger.to_list(),
+            # every gathered record, whole, so ``rerule`` can rule the artist's life again offline
+            **({"found": [found_dict(r) for r in found]} if found is not None else {})}
+
+
+# ── offline re-rule (Sir, 2026-11-13) ─────────────────────────────────────────
+# The catalogue's evidence (its ledger, the agents' rulings, the gathered records) is stored with each run; the
+# rules over it change often. ``rerule`` runs the rules again over what is stored, with no search and no model
+# call, so a fix reaches every finished card at no cost in credits.
+
+def found_dict(r: "Record") -> dict:
+    """A gathered record as stored: whole but for its other pictures, its page text kept to what rules read."""
+    d = asdict(r)
+    d.pop("images", None)
+    d["text"] = (d.get("text") or "")[:8000]
+    return d
+
+
+def verdict_from_rounds(ledger, ident: dict, rounds: list[dict]) -> dict | None:
+    """The agents' verdict, ruled again from their stored rounds: the main settle's last round, then the fallback
+    round (a second settle, its rounds numbered from 1 again) adding what the first left unruled. None when
+    nothing was ruled (an adjudication that failed outright)."""
+    from .agents import rule_facts
+    prior = (ident.get("evidence") or {}).get("verdict")
+    if not rounds:
+        return _prior_verdict(ledger, ident) if prior and not prior.get("failures") else None
+    if any(not r.get("ruling") for r in rounds):
+        return None
+    starts = [i for i, r in enumerate(rounds) if r.get("round") == 1]
+    main = rounds[:starts[1]] if len(starts) > 1 else rounds
+    extra = rounds[starts[1]:] if len(starts) > 1 else []
+    verdict = rule_facts(ledger, main[-1]["ruling"], main[-1].get("check") or {}, **_card_rule(ident))
+    verdict["rounds"] = list(main)
+    if extra and not verdict["failures"]:
+        again = rule_facts(ledger, extra[-1]["ruling"], extra[-1].get("check") or {}, need=("artist", "title"),
+                           record_facts=("date", "medium", "collection"), carry=_keep(verdict))
+        again["rounds"] = list(extra)
+        verdict = _with_again(verdict, again)
+    return verdict
+
+
+_LIFE = ("artist_born", "artist_died", "artist_nationality", "inscribed_title", "movement")
+
+
+def stored_life(cat_stage: dict, state=None):
+    """For a record stored before its gathered records were: the life, nationality and movement it printed, as
+    ``rule`` had ruled them (``rule`` needs the artist's authority records, which were not kept). The one
+    nationality wording per painter is applied again."""
+    facts0, sup0, unr0 = cat_stage.get("facts") or {}, cat_stage.get("support") or {}, cat_stage.get("unruled") or {}
+
+    def life_of(artist: str) -> dict:
+        facts = {k: facts0[k] for k in _LIFE if facts0.get(k)}
+        if state and artist and facts.get("artist_nationality"):
+            facts["artist_nationality"] = _kept_nationality(state, artist) or facts["artist_nationality"]
+        return {"facts": facts,
+                "support": {k: v for k, v in sup0.items() if k.startswith("artist_") or k == "movement"},
+                "unruled": {k: v for k, v in unr0.items() if k.startswith("artist_l") or k in ("artist_nationality", "movement")},
+                "sources": cat_stage.get("sources", []), "consulted": cat_stage.get("consulted", []),
+                "unavailable": cat_stage.get("unavailable", []), "corroborating": cat_stage.get("corroborating", [])}
+    return life_of
+
+
+def rerule(record: dict, cfg=None) -> dict | None:
+    """The catalogue stage of a stored run, ruled again by the current rules over its stored evidence. None when
+    the run has no ruled catalogue to rule again. With the gathered records stored (runs from 2026-11-13), the
+    artist's life is ruled again too; before that, the life ``rule`` printed is kept."""
+    from .evidence import Ledger
+    st = record.get("stages") or {}
+    c, ident = st.get("catalogue") or {}, st.get("identify") or {}
+    if not c.get("ledger") or not ident:
+        return None
+    if any("adjudication failed" in str(f) for f in c.get("failures") or []):
+        return None      # the agents gave no answer to rule again; only a run with the model can
+    ledger = Ledger(c["ledger"])
+    verdict = verdict_from_rounds(ledger, ident, c.get("adjudication") or [])
+    if verdict is None:
+        return None
+    state = cfg.path("state_dir") if cfg is not None else None
+    found = None
+    if c.get("found"):
+        found = [Record(**{k: v for k, v in d.items() if k in Record.__dataclass_fields__}) for d in c["found"]]
+        offline = Catalogue.__new__(Catalogue)
+        offline.cfg, offline.consulted, offline.t = cfg, list(c.get("consulted") or []), {}
+        ruled = lambda a: offline.rule(found, {**ident, "artist": a})
+        who = next((r for r in found if r.authority and r.source == "wikidata" and r.artist), None)
+        name = who.artist if who else ""
+    else:
+        # the artist's Wikidata label, as the work's own Wikidata record names its creator (the artist's authority
+        # record was not stored): "M. C. Escher", not the long form a run without the item had saved first
+        ruled = stored_life(c, state)
+        name = next((d.get("artist") for d in c.get("sources") or [] if d.get("source") == "wikidata" and d.get("artist")), "")
+    return card_from_evidence(verdict, ledger, ident, ruled, wikidata_name=name, state=state,
+                              run=record.get("run_id", "work"), found=found)

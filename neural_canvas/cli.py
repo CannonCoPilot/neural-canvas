@@ -39,6 +39,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="deliver again even if delivered before; the new frame replaces the old one in the album")
     p.add_argument("--redo", default="", help="comma-separated stages to run again though they passed (e.g. "
                    "catalogue, interpret, source); the others resume")
+    p = sub.add_parser("rerule", help="rule every finished work's catalogue again by the current rules over its stored "
+                                      "evidence (no search, no model call); lists the cards whose facts change")
+    p.add_argument("--apply", action="store_true", help="store the new rulings (default: a dry run on copied state)")
+    p.add_argument("--ids", help="file of run ids (one per line) to limit the pass to")
+    p.add_argument("--out", help="write the changed run ids here, one per line")
     p = sub.add_parser("retry")
     p.add_argument("--stage", help="only tasks blocked at this stage (e.g. deliver)")
     sub.add_parser("auth-photos")
@@ -101,6 +106,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"input": Path(i).name, **r.__dict__}), flush=True)
             bad += r.status not in ("complete", "rendered")
         return 1 if bad else 0
+    if a.cmd == "rerule":
+        from .rerule import rerule_all
+        return rerule_all(cfg, apply=a.apply, ids_file=a.ids, out=a.out)
     if a.cmd == "retry":
         from .service import Pulse
         pl = Pulse(cfg["pulse"]["url"])

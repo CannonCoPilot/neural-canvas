@@ -1793,3 +1793,58 @@ def test_one_painter_keeps_one_name(tmp_path):
     assert _kept_name(tmp_path, "N. C. Wyeth", "Newell Convers Wyeth") == "Newell Convers Wyeth"
     assert _kept_name(tmp_path, "Jamie Wyeth") == "Jamie Wyeth"   # another Wyeth is another painter
     assert _kept_name(tmp_path, "Wyeth") == "Wyeth"               # a bare surname matching several keeps its form
+
+
+def _rerule_fixture():
+    import json
+    from pathlib import Path
+    return json.loads((Path(__file__).parent / "fixtures" / "rerule_records.json").read_text())
+
+
+class _StateCfg:
+    def __init__(self, d):
+        self.d = d
+
+    def path(self, name):
+        return self.d
+
+
+def test_rerule_rules_a_stored_card_again_offline(tmp_path):
+    """rerule runs the current rules over a stored run's evidence, with no search and no model call (Sir, 2026-11-13)."""
+    import copy
+    from neural_canvas.catalogue import rerule
+    recs = _rerule_fixture()
+    escher = rerule(copy.deepcopy(recs["ee79bced"]), _StateCfg(tmp_path))
+    old = recs["ee79bced"]["stages"]["catalogue"]["facts"]
+    assert escher["facts"]["artist"] == "M. C. Escher"            # Wikidata's label, from the work's own record
+    assert escher["facts"]["medium"] == old["medium"][:1].upper() + old["medium"][1:]
+    assert {k: v for k, v in escher["facts"].items() if k != "medium"} == {k: v for k, v in old.items() if k != "medium"}
+
+
+def test_rerule_never_takes_a_career_span_back_as_a_date(tmp_path):
+    import copy
+    from neural_canvas.catalogue import rerule
+    tissot = rerule(copy.deepcopy(_rerule_fixture()["d5b7e6c1"]), _StateCfg(tmp_path))
+    assert not tissot["facts"].get("date")                         # "1846 - 1902", nor its "1846"
+    assert "working life" in tissot["unruled"]["date"]
+
+
+def test_rerule_leaves_a_failed_adjudication_to_the_model(tmp_path):
+    import copy
+    from neural_canvas.catalogue import rerule
+    rec = copy.deepcopy(_rerule_fixture()["ee79bced"])
+    rec["stages"]["catalogue"]["failures"] = ["catalogue adjudication failed: VLMError: no usable answer"]
+    assert rerule(rec, _StateCfg(tmp_path)) is None
+
+
+def test_rerule_splits_the_fallback_round_from_the_main_rounds():
+    import copy
+    from neural_canvas.catalogue import verdict_from_rounds
+    from neural_canvas.evidence import Ledger
+    rec = copy.deepcopy(_rerule_fixture()["ee79bced"])
+    c, ident = rec["stages"]["catalogue"], rec["stages"]["identify"]
+    rounds = c["adjudication"]
+    one = verdict_from_rounds(Ledger(c["ledger"]), ident, rounds)
+    twice = verdict_from_rounds(Ledger(c["ledger"]), ident, rounds + [{**rounds[-1], "round": 1}])
+    assert not one["failures"] and not twice["failures"]
+    assert twice["facts"] == one["facts"]                          # a fallback ruling the same facts adds nothing
